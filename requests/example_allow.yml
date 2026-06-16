@@ -1,0 +1,7 @@
+access_request:
+  action: allow
+  target_ip: 192.168.66.22
+  mask: 32
+  requester: ansible-test
+  request_id: REQ-ALLOW-1921686622
+  description: 临时放行 192.168.66.22 外网访问

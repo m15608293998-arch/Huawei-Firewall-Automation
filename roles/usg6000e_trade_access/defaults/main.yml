@@ -1,0 +1,5 @@
+---
+rule_port_limit: 4
+save_config: true
+local_tmp_dir: "/tmp/usg6000e_trade_access"
+local_python_interpreter: "python3.12"

@@ -1,0 +1,170 @@
+---
+- name: Render query address-set member command before add for {{ address_context.name }}
+  ansible.builtin.template:
+    src: query_address_set_member.cli.j2
+    dest: "{{ local_tmp_dir }}/query_address_set_member_before_add_{{ address_context.name }}.cli"
+    mode: "0600"
+
+- name: Query address-set member before add in {{ address_context.name }}
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_address_set_member_before_add_' ~ address_context.name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: address_query_before
+  changed_when: false
+  failed_when:
+    - address_query_before.rc != 0 or
+      'Error:' in address_query_before.stdout or
+      'Unrecognized command' in address_query_before.stdout or
+      'Too many parameters' in address_query_before.stdout
+
+- name: Save raw address-set query output before add in {{ address_context.name }}
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/query_address_set_member_before_add_{{ address_context.name }}.out"
+    mode: "0600"
+    content: "{{ address_query_before.stdout }}"
+  changed_when: false
+
+- name: Extract address-set member id before add in {{ address_context.name }}
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_address_id.py"
+      - "--file"
+      - "{{ local_tmp_dir }}/query_address_set_member_before_add_{{ address_context.name }}.out"
+      - "--ip"
+      - "{{ access_request.target_ip }}"
+      - "--mask"
+      - "{{ access_request.mask | default(32) | string }}"
+  register: address_id_extract_before
+  changed_when: false
+  failed_when:
+    - address_id_extract_before.rc != 0
+
+- name: Set address-set state before add in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    address_extract_before: "{{ address_id_extract_before.stdout | from_json }}"
+    address_member_ids_before: "{{ (address_id_extract_before.stdout | from_json).ids }}"
+    address_member_lines_before: "{{ (address_id_extract_before.stdout | from_json).lines }}"
+    address_exists_before: "{{ ((address_id_extract_before.stdout | from_json).ids | length) > 0 }}"
+
+- name: Show address-set state before add in {{ address_context.name }}
+  ansible.builtin.debug:
+    msg:
+      action: allow
+      vsystem: "{{ address_context.name }}"
+      address_set_name: "{{ address_context.address_set_name }}"
+      target_ip: "{{ access_request.target_ip }}"
+      matched_lines: "{{ address_member_lines_before }}"
+      member_ids: "{{ address_member_ids_before }}"
+      exists_before: "{{ address_exists_before }}"
+
+- name: Render add address-set member command for {{ address_context.name }}
+  ansible.builtin.template:
+    src: add_address_set_member.cli.j2
+    dest: "{{ local_tmp_dir }}/add_address_set_member_{{ address_context.name }}.cli"
+    mode: "0600"
+  when: not address_exists_before | bool
+
+- name: Add target IP to address-set in {{ address_context.name }}
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/add_address_set_member_' ~ address_context.name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: address_add_result
+  changed_when: true
+  failed_when:
+    - address_add_result.rc != 0 or
+      'Unrecognized command' in address_add_result.stdout or
+      'Too many parameters' in address_add_result.stdout or
+      (
+        'Error:' in address_add_result.stdout and
+        'Address item conflicts' not in address_add_result.stdout and
+        'already exist' not in address_add_result.stdout and
+        'already existed' not in address_add_result.stdout and
+        'has already existed' not in address_add_result.stdout
+      )
+  when: not address_exists_before | bool
+
+- name: Show add address-set output in {{ address_context.name }}
+  ansible.builtin.debug:
+    var: address_add_result.stdout_lines
+  when: not address_exists_before | bool
+
+- name: Mark firewall changed after address-set add in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    firewall_mutated: true
+  when: not address_exists_before | bool
+
+- name: Reuse existing address-set state in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    address_member_ids_after: "{{ address_member_ids_before }}"
+    address_member_lines_after: "{{ address_member_lines_before }}"
+    address_exists_after: "{{ address_exists_before }}"
+
+- name: Query address-set member after add in {{ address_context.name }}
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_address_set_member_before_add_' ~ address_context.name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: address_query_after
+  changed_when: false
+  failed_when:
+    - address_query_after.rc != 0 or
+      'Error:' in address_query_after.stdout or
+      'Unrecognized command' in address_query_after.stdout or
+      'Too many parameters' in address_query_after.stdout
+  when: not address_exists_before | bool
+
+- name: Save raw address-set query output after add in {{ address_context.name }}
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/query_address_set_member_after_add_{{ address_context.name }}.out"
+    mode: "0600"
+    content: "{{ address_query_after.stdout }}"
+  changed_when: false
+  when: not address_exists_before | bool
+
+- name: Extract address-set member id after add in {{ address_context.name }}
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_address_id.py"
+      - "--file"
+      - "{{ local_tmp_dir }}/query_address_set_member_after_add_{{ address_context.name }}.out"
+      - "--ip"
+      - "{{ access_request.target_ip }}"
+      - "--mask"
+      - "{{ access_request.mask | default(32) | string }}"
+  register: address_id_extract_after
+  changed_when: false
+  failed_when:
+    - address_id_extract_after.rc != 0
+  when: not address_exists_before | bool
+
+- name: Set address-set state after add in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    address_extract_after: "{{ address_id_extract_after.stdout | from_json }}"
+    address_member_ids_after: "{{ (address_id_extract_after.stdout | from_json).ids }}"
+    address_member_lines_after: "{{ (address_id_extract_after.stdout | from_json).lines }}"
+    address_exists_after: "{{ ((address_id_extract_after.stdout | from_json).ids | length) > 0 }}"
+  when: not address_exists_before | bool
+
+- name: Show address-set state after add in {{ address_context.name }}
+  ansible.builtin.debug:
+    msg:
+      action: allow
+      vsystem: "{{ address_context.name }}"
+      address_set_name: "{{ address_context.address_set_name }}"
+      target_ip: "{{ access_request.target_ip }}"
+      matched_lines: "{{ address_member_lines_after }}"
+      member_ids: "{{ address_member_ids_after }}"
+      exists_after: "{{ address_exists_after }}"
+
+- name: Validate target IP exists after address-set operation in {{ address_context.name }}
+  ansible.builtin.assert:
+    that:
+      - address_exists_after | bool
+    fail_msg: >-
+      {{ access_request.target_ip }} was not found in
+      {{ address_context.address_set_name }} under {{ address_context.name }}
+      after operation. Matched lines: {{ address_member_lines_after }}.
+    success_msg: >-
+      {{ access_request.target_ip }} exists in
+      {{ address_context.address_set_name }} under {{ address_context.name }}.

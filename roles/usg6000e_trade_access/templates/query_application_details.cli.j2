@@ -1,0 +1,8 @@
+system-view
+{% if application_vsystem | lower != 'public' %}
+switch vsys {{ application_vsystem }}
+system-view
+{% endif %}
+{% for application_name in application_names_to_query %}
+display application name {{ application_name }}
+{% endfor %}

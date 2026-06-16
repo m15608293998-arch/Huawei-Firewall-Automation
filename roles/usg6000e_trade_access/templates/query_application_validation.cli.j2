@@ -1,0 +1,9 @@
+system-view
+{% if application_vsystem | lower != 'public' %}
+switch vsys {{ application_vsystem }}
+system-view
+{% endif %}
+display current-configuration | include {{ base_app_name }}
+{% for unit in application_units %}
+display application name {{ unit.app_name }}
+{% endfor %}

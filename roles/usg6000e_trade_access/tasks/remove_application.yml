@@ -1,0 +1,161 @@
+---
+- name: Set current application unit facts for remove
+  ansible.builtin.set_fact:
+    app_name: "{{ application_unit.app_name }}"
+    application_ports_for_app: "{{ application_unit.ports | default([]) }}"
+
+- name: Render query user-defined application command before remove
+  ansible.builtin.template:
+    src: query_application.cli.j2
+    dest: "{{ local_tmp_dir }}/query_application_before_remove_{{ app_name }}.cli"
+    mode: "0600"
+
+- name: Query user-defined application before remove
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_before_remove_' ~ app_name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_query_before_remove
+  changed_when: false
+  failed_when:
+    - application_query_before_remove.rc != 0 or
+      'Unrecognized command' in application_query_before_remove.stdout or
+      'Too many parameters' in application_query_before_remove.stdout
+
+- name: Render query application group command before remove
+  ansible.builtin.template:
+    src: query_application_group.cli.j2
+    dest: "{{ local_tmp_dir }}/query_application_group_before_remove_{{ app_name }}.cli"
+    mode: "0600"
+
+- name: Query application group before remove
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_group_before_remove_' ~ app_name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_group_query_before_remove
+  changed_when: false
+  failed_when:
+    - application_group_query_before_remove.rc != 0 or
+      'Unrecognized command' in application_group_query_before_remove.stdout or
+      'Too many parameters' in application_group_query_before_remove.stdout
+
+- name: Determine application remove state before remove
+  ansible.builtin.set_fact:
+    application_object_lines_before_remove: >-
+      {{
+        application_query_before_remove.stdout_lines
+        | map('trim')
+        | select('equalto', 'user-defined-application name ' ~ app_name)
+        | list
+      }}
+    application_group_lines_before_remove: >-
+      {{
+        application_group_query_before_remove.stdout_lines
+        | map('trim')
+        | select('equalto', 'add application ' ~ app_name)
+        | list
+      }}
+
+- name: Set application remove state before remove
+  ansible.builtin.set_fact:
+    application_object_exists: "{{ application_object_lines_before_remove | length > 0 }}"
+    application_group_contains_app: "{{ application_group_lines_before_remove | length > 0 }}"
+
+- name: Show application remove state before remove
+  ansible.builtin.debug:
+    msg:
+      action: deny
+      app_name: "{{ app_name }}"
+      application_object_exists: "{{ application_object_exists }}"
+      application_object_lines: "{{ application_object_lines_before_remove }}"
+      application_group_contains_app: "{{ application_group_contains_app }}"
+      application_group_lines: "{{ application_group_lines_before_remove }}"
+
+- name: Render remove user-defined application command
+  ansible.builtin.template:
+    src: remove_application.cli.j2
+    dest: "{{ local_tmp_dir }}/remove_application_{{ app_name }}.cli"
+    mode: "0600"
+
+- name: Remove user-defined application and application group member
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/remove_application_' ~ app_name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: remove_application_result
+  changed_when: true
+  failed_when:
+    - >-
+      remove_application_result.rc != 0 or
+      'Unrecognized command' in remove_application_result.stdout or
+      'Too many parameters' in remove_application_result.stdout or
+      (
+        'Error:' in (
+          remove_application_result.stdout
+          | regex_replace(
+              '(?m)^\\s*Error: The specified application does not exist\\.\\s*$',
+              ''
+            )
+          | regex_replace(
+              '(?m)^\\s*Error:.*application.*does not exist.*$',
+              ''
+            )
+        )
+      )
+
+
+- name: Show remove application output
+  ansible.builtin.debug:
+    var: remove_application_result.stdout_lines
+
+- name: Mark firewall changed after application removal
+  ansible.builtin.set_fact:
+    firewall_mutated: true
+
+- name: Query user-defined application after remove
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_before_remove_' ~ app_name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_query_after_remove
+  changed_when: false
+  failed_when:
+    - application_query_after_remove.rc != 0 or
+      'Unrecognized command' in application_query_after_remove.stdout or
+      'Too many parameters' in application_query_after_remove.stdout
+
+- name: Query application group after remove
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_group_before_remove_' ~ app_name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_group_query_after_remove
+  changed_when: false
+  failed_when:
+    - application_group_query_after_remove.rc != 0 or
+      'Unrecognized command' in application_group_query_after_remove.stdout or
+      'Too many parameters' in application_group_query_after_remove.stdout
+
+- name: Determine application remove state after remove
+  ansible.builtin.set_fact:
+    application_object_lines_after_remove: >-
+      {{
+        application_query_after_remove.stdout_lines
+        | map('trim')
+        | select('equalto', 'user-defined-application name ' ~ app_name)
+        | list
+      }}
+    application_group_lines_after_remove: >-
+      {{
+        application_group_query_after_remove.stdout_lines
+        | map('trim')
+        | select('equalto', 'add application ' ~ app_name)
+        | list
+      }}
+
+- name: Validate application removed
+  ansible.builtin.assert:
+    that:
+      - application_object_lines_after_remove | length == 0
+      - application_group_lines_after_remove | length == 0
+    fail_msg: >-
+      {{ app_name }} still exists after remove.
+      Application object lines: {{ application_object_lines_after_remove }}.
+      Application group lines: {{ application_group_lines_after_remove }}.
+    success_msg: "{{ app_name }} has been removed from application config and application group."

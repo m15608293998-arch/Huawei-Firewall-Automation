@@ -1,0 +1,84 @@
+---
+- name: Render query commands for applications belonging to target IP
+  ansible.builtin.template:
+    src: query_applications_by_ip.cli.j2
+    dest: "{{ local_tmp_dir }}/query_applications_by_ip_{{ access_request.target_ip }}.cli"
+    mode: "0600"
+  when: enable_application_config | default(true) | bool
+
+- name: Query applications belonging to target IP
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_applications_by_ip_' ~ access_request.target_ip ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_remove_discovery
+  changed_when: false
+  failed_when:
+    - application_remove_discovery.rc != 0 or
+      'Unrecognized command' in application_remove_discovery.stdout or
+      'Too many parameters' in application_remove_discovery.stdout
+  when: enable_application_config | default(true) | bool
+
+- name: Save application discovery output
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/query_applications_by_ip_{{ access_request.target_ip }}.out"
+    mode: "0600"
+    content: "{{ application_remove_discovery.stdout }}"
+  changed_when: false
+  when: enable_application_config | default(true) | bool
+
+- name: Parse application names belonging to target IP
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_application_names.py"
+      - "--file"
+      - "{{ local_tmp_dir }}/query_applications_by_ip_{{ access_request.target_ip }}.out"
+      - "--base-app-name"
+      - "{{ base_app_name }}"
+  register: application_remove_discovery_parse
+  changed_when: false
+  failed_when:
+    - application_remove_discovery_parse.rc != 0
+  when: enable_application_config | default(true) | bool
+
+- name: Extract application names belonging to target IP
+  ansible.builtin.set_fact:
+    application_remove_discovery_data: "{{ application_remove_discovery_parse.stdout | from_json }}"
+    application_names_to_remove: "{{ (application_remove_discovery_parse.stdout | from_json).names }}"
+    application_name_lines_to_remove: "{{ (application_remove_discovery_parse.stdout | from_json).lines }}"
+    application_units_to_remove: []
+  when: enable_application_config | default(true) | bool
+
+- name: Build application removal units
+  ansible.builtin.set_fact:
+    application_units_to_remove: >-
+      {{
+        application_units_to_remove
+        + [{'app_name': application_name_to_remove, 'ports': []}]
+      }}
+  loop: "{{ application_names_to_remove | default([]) }}"
+  loop_control:
+    loop_var: application_name_to_remove
+    label: "{{ application_name_to_remove }}"
+  when: enable_application_config | default(true) | bool
+
+- name: Show applications selected for removal
+  ansible.builtin.debug:
+    msg:
+      application_names_to_remove: "{{ application_names_to_remove }}"
+      matched_lines: "{{ application_name_lines_to_remove }}"
+  when: enable_application_config | default(true) | bool
+
+- name: Remove user-defined applications belonging to target IP
+  ansible.builtin.include_tasks: remove_application.yml
+  loop: "{{ application_units_to_remove | default([]) | reverse | list }}"
+  loop_control:
+    loop_var: application_unit
+    label: "{{ application_unit.app_name }}"
+  when: enable_application_config | default(true) | bool
+
+- name: Remove target IP from address set in each virtual system
+  ansible.builtin.include_tasks: remove_address_vsystem.yml
+  loop: "{{ address_vsystems }}"
+  loop_control:
+    loop_var: address_context

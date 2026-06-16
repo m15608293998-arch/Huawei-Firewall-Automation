@@ -1,0 +1,53 @@
+---
+# 华为 USG6000E 测试节点管理地址
+# firewall_device:
+#   device_host: "192.168.6.54"
+#   device_user: "slpeng"
+#   auth_type: "publickey"
+#   identity_file: "/home/ansiblerun/.ssh/usg6000e_slpeng"
+firewall_device:
+    device_host: "192.168.6.54"
+    device_user: "slpeng"
+    auth_type: "password"
+    device_password: "slpeng!@#123"
+ 
+address_vsystems:
+  - name: "public"
+    address_set_name: "VerifyBJ195"
+    switch_required: false
+
+  - name: "Internet"
+    address_set_name: "Verify195-TradeServers"
+    switch_required: true
+
+  - name: "private"
+    address_set_name: "Verify195-TradeServers"
+    switch_required: true
+
+# User-Defined Application 只在 private 里配置
+application_vsystem: "private"
+
+# 自定义应用配置
+user_defined_application:
+  name_prefix: "UD_TS_"
+  category: "General"
+  subcategory: "General_TCP"
+  data_model: "client-server"
+  label: "Business-Applications"
+  application_group_name: "UD_TradeGroup_Internet"
+
+# 需要放行的业务端口
+# 你只需要维护这个端口列表，role 会自动每 4 个端口拆成一条 rule
+application_ports:
+  - 12001
+  - 12002
+  - 12003
+  - 12004
+rule_port_limit: 4
+
+# 测试阶段先 false，确认没问题后再改 true
+enable_application_config: true
+commit_security_engine: true
+save_config: true
+# Ansible 控制节点本地临时目录
+local_tmp_dir: "/tmp/usg6000e_trade_access"

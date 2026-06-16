@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MicroTrade Access 管理平台</title>
+  <style>
+    :root { color-scheme:light; --bg:#f6f7f9; --surface:#fff; --surface-soft:#f8f9fb; --line:#e5e7eb; --line-strong:#d4d8df; --text:#17191c; --muted:#6b7280; --primary:#2563eb; --primary-hover:#1d4ed8; --danger:#dc2626; --success:#16835d; --shadow:0 8px 30px rgba(17,24,39,.06); }
+    * { box-sizing: border-box; }
+    body { margin:0; min-width:320px; background:var(--bg); color:var(--text); font-family:"IBM Plex Sans","Noto Sans SC","Microsoft YaHei",sans-serif; font-size:14px; line-height:1.5; }
+    button,input,select,textarea { font:inherit; }
+    button { letter-spacing:0; }
+    header { position:sticky; top:0; z-index:20; background:rgba(255,255,255,.96); color:var(--text); border-bottom:1px solid var(--line); backdrop-filter:blur(12px); }
+    .header-inner,main { width:min(1120px,calc(100% - 40px)); margin:0 auto; }
+    .header-inner { min-height:68px; display:flex; align-items:center; justify-content:space-between; gap:20px; }
+    h1 { margin:0; font-size:18px; font-weight:700; letter-spacing:0; }
+    h2 { margin:0; font-size:18px; font-weight:700; letter-spacing:0; }
+    .identity,.service-status { display:flex; align-items:center; gap:10px; }
+    .identity { color:var(--muted); }
+    .service-status { gap:7px; white-space:nowrap; }
+    main { padding:22px 0 64px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:#9ca3af; }
+    .dot.ok { background:#22a06b; }
+    .dot.fail { background:var(--danger); }
+    .layout { display:grid; grid-template-columns:minmax(390px,.95fr) minmax(500px,1.25fr); gap:22px; align-items:start; }
+    .panel { overflow:hidden; background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:0 1px 2px rgba(17,24,39,.02); }
+    .panel-header { min-height:64px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 22px; border-bottom:1px solid var(--line); }
+    .panel-body { padding:22px; }
+    label { display:block; margin-bottom:7px; color:#363b44; font-size:13px; font-weight:650; }
+    .field + .field { margin-top:16px; }
+    input,select,textarea { width:100%; min-height:42px; border:1px solid var(--line-strong); border-radius:9px; background:#fff; color:var(--text); padding:9px 12px; outline:none; transition:border-color 140ms ease,box-shadow 140ms ease; }
+    textarea { min-height:84px; resize:vertical; }
+    input:focus,select:focus,textarea:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); }
+    input:disabled { background:#f1f3f5; color:#737a85; }
+    input::placeholder,textarea::placeholder { color:#9aa0aa; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .permissions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .check { min-height:40px; display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-soft); }
+    .check input { width:16px; min-height:16px; margin:0; }
+    .check label { margin:0; font:12px "SFMono-Regular",Consolas,monospace; }
+    .actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:20px; }
+    .form-footer { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-top:22px; padding-top:20px; border-top:1px solid var(--line); }
+    .form-footer-copy { min-width:0; }
+    .form-footer-note,.section-copy { color:var(--muted); font-size:12px; }
+    .save-feedback { min-height:20px; margin-top:4px; color:var(--muted); font-size:12px; font-weight:650; }
+    .save-feedback.saving::before { content:""; display:inline-block; width:11px; height:11px; margin-right:7px; border:2px solid #bfdbfe; border-top-color:var(--primary); border-radius:50%; vertical-align:-2px; animation:spin .7s linear infinite; }
+    .save-feedback.ok { color:var(--success); }
+    .save-feedback.error { color:var(--danger); }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .subsection { margin-top:22px; padding-top:20px; border-top:1px solid var(--line); }
+    .subsection-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:14px; }
+    .subsection-title { margin:0; font-size:16px; }
+    .section-copy { margin:3px 0 0; }
+    .key-table { margin-top:14px; overflow-x:auto; border:1px solid var(--line); border-radius:9px; }
+    .key-table th,.key-table td { padding:10px 11px; font-size:12px; }
+    .key-table tbody tr { cursor:default; }
+    .key-table button { min-height:30px; padding:0 9px; }
+    dialog { width:min(520px,calc(100% - 28px)); padding:0; overflow:hidden; border:1px solid rgba(255,255,255,.8); border-radius:22px; background:#fff; color:var(--text); box-shadow:0 28px 90px rgba(15,23,42,.28); }
+    dialog::backdrop { background:rgba(15,23,42,.5); backdrop-filter:blur(2px); }
+    .modal-header { min-height:70px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 24px; border-bottom:1px solid var(--line); }
+    .modal-header h2 { font-size:18px; }
+    .icon-button { width:36px; height:36px; border:0; border-radius:9px; background:transparent; color:#69707c; cursor:pointer; font-size:25px; line-height:1; }
+    .icon-button:hover { background:#f1f3f5; color:#252a31; }
+    .modal-body { padding:24px; }
+    .modal-footer { display:flex; align-items:center; justify-content:flex-end; gap:10px; padding:17px 24px 22px; }
+    .selected-user { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:17px; padding:11px 12px; border:1px solid var(--line); border-radius:9px; background:var(--surface-soft); }
+    .selected-user strong { display:block; }
+    .selected-user span { color:var(--muted); font-size:12px; }
+    .modal-callout { margin-top:16px; padding:11px 13px; border-radius:9px; background:#eff6ff; color:#40505d; box-shadow:inset 3px 0 var(--primary); font-size:13px; }
+    .secret-display { display:grid; grid-template-columns:1fr auto; gap:8px; margin-top:14px; }
+    .secret-display input { font:12px "SFMono-Regular",Consolas,monospace; }
+    .secret-warning { margin-top:10px; color:var(--danger); font-size:12px; }
+    .success-mark { width:42px; height:42px; display:grid; place-items:center; margin-bottom:14px; border-radius:50%; background:#e8f7f0; color:var(--success); font-size:24px; font-weight:700; }
+    button.command { min-height:40px; border:1px solid transparent; border-radius:9px; padding:0 16px; cursor:pointer; font-weight:650; transition:background 140ms ease,border-color 140ms ease,opacity 140ms ease; }
+    button.primary { background:var(--primary); color:#fff; }
+    button.primary:hover:not(:disabled) { background:var(--primary-hover); }
+    button.secondary { border-color:var(--line-strong); background:#fff; color:#353b45; }
+    button.secondary:hover:not(:disabled) { background:var(--surface-soft); }
+    button:disabled { opacity:.48; cursor:not-allowed; }
+    .message { margin-bottom:16px; padding:11px 13px; border-radius:9px; background:var(--surface-soft); color:#505762; }
+    .message.ok { background:#e8f7f0; color:var(--success); }
+    .message.error { background:#fff1f2; color:#b42318; }
+    .search-row { display:grid; grid-template-columns:1fr auto; gap:8px; }
+    .search-results { margin-top:12px; max-height:220px; overflow:auto; border:1px solid var(--line); border-radius:9px; }
+    .search-item { width:100%; padding:10px 12px; border:0; border-bottom:1px solid var(--line); background:#fff; text-align:left; cursor:pointer; }
+    .search-item:hover,tbody tr:hover { background:#fafbfc; }
+    .search-item:last-child { border-bottom:0; }
+    .search-item small { display:block; color:var(--muted); }
+    .table-wrap { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:15px 18px; border-bottom:1px solid #eceef1; text-align:left; vertical-align:middle; }
+    th { background:var(--surface-soft); color:#69707c; font-size:12px; font-weight:650; }
+    tbody tr { cursor:pointer; }
+    td.mono { font:12px "SFMono-Regular",Consolas,monospace; }
+    .empty { padding:44px 24px; color:var(--muted); text-align:center; }
+    .hidden { display:none !important; }
+    @media (max-width:900px) { .layout { grid-template-columns:1fr; } }
+    @media (max-width:620px) { .header-inner,main { width:min(100% - 24px,1120px); } .header-inner { align-items:flex-start; flex-direction:column; justify-content:center; padding:14px 0; } .identity { width:100%; flex-wrap:wrap; } .row,.permissions,.search-row,.secret-display { grid-template-columns:1fr; } .form-footer,.subsection-header { align-items:stretch; flex-direction:column; } button.command { width:100%; } .modal-footer { flex-direction:column-reverse; } .modal-footer button { width:100%; } th,td { padding:13px 14px; } }
+  </style>
+</head>
+<body>
+  <header><div class="header-inner"><h1>MicroTrade Access 用户管理平台</h1><div class="identity"><span class="service-status"><span id="serviceDot" class="dot"></span><span id="serviceText">正在检查服务</span></span><span id="identityText" class="hidden"></span><button id="login" class="command primary" type="button">管理员登录</button><button id="logout" class="command secondary hidden" type="button">退出并切换账号</button></div></div></header>
+  <main>
+    <section class="layout">
+      <section class="panel">
+        <div class="panel-header"><h2>Keycloak User 授权</h2></div>
+        <div class="panel-body">
+          <div id="userMessage" class="message">登录后从 Keycloak 搜索用户</div>
+          <div class="field"><label for="userSearch">Keycloak 用户</label><div class="search-row"><input id="userSearch" placeholder="用户名、姓名或邮箱"><button id="searchUsers" class="command secondary" type="button">搜索</button></div><div id="searchResults" class="search-results hidden"></div></div>
+          <div class="field"><label for="userSubject">Subject ID</label><input id="userSubject" disabled></div>
+          <div class="row field"><div><label for="username">用户名</label><input id="username" disabled></div><div><label for="userDisplayName">显示名称</label><input id="userDisplayName"></div></div>
+          <div class="row field"><div><label for="userProfile">角色</label><select id="userProfile"><option value="user">普通用户</option><option value="admin">管理员</option></select></div><div><label for="userEnabled">本地访问状态</label><select id="userEnabled"><option value="true">启用</option><option value="false">停用</option></select></div></div>
+          <div class="field"><label>接口权限</label><div id="userPermissions" class="permissions"></div></div>
+          <div id="userIpsField" class="field"><label for="userAllowedIps">允许操作的精确 IP</label><textarea id="userAllowedIps"></textarea></div>
+          <div class="form-footer"><div class="form-footer-copy"><div class="form-footer-note">授权会在用户下次使用 Keycloak Token 时立即生效</div><div id="saveFeedback" class="save-feedback" role="status" aria-live="polite"></div></div><button id="saveUser" class="command primary" type="button">保存用户授权</button></div>
+          <section class="subsection hidden" aria-labelledby="userSkTitle">
+            <div class="subsection-header"><div><h2 id="userSkTitle" class="subsection-title">API Key</h2><p class="section-copy">用于 test-ui 和业务 API 调用</p></div><button id="generateUserSk" class="command secondary" type="button" disabled>创建 API Key</button></div>
+            <div class="key-table"><table><thead><tr><th>名称</th><th>前缀</th><th>有效期</th><th>最后使用</th><th>状态</th><th></th></tr></thead><tbody id="userSkRows"></tbody></table><div id="emptyUserSks" class="empty">请选择已保存的普通用户</div></div>
+          </section>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header"><h2>已授权用户</h2><button id="refreshUsers" class="command secondary" type="button" title="重新从服务器读取已授权用户列表">刷新列表</button></div>
+        <div class="table-wrap"><table><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>IP 数量</th><th>更新时间</th></tr></thead><tbody id="userRows"></tbody></table><div id="emptyUsers" class="empty">暂无已授权用户</div></div>
+      </section>
+    </section>
+  </main>
+  <dialog id="userSkDialog" aria-labelledby="userSkDialogTitle">
+    <div class="modal-header"><h2 id="userSkDialogTitle">创建 API Key</h2><button id="closeUserSkDialog" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div id="skCreateStep">
+      <div class="modal-body">
+        <div id="skDialogMessage" class="message error hidden"></div>
+        <div class="selected-user"><div><strong id="skDialogUsername">-</strong><span id="skDialogSubject">-</span></div><span>普通用户</span></div>
+        <div class="field"><label for="userSkLabel">名称</label><input id="userSkLabel" maxlength="120" placeholder="例如：日常访问"></div>
+        <div class="field"><label for="userSkDays">有效期</label><select id="userSkDays"><option value="90">90 天</option><option value="180">180 天</option><option value="365" selected>1 年</option><option value="730">2 年</option><option value="3650">10 年</option></select></div>
+        <div class="modal-callout">创建时将先保存当前页面中的权限和 IP 配置。</div>
+      </div>
+      <div class="modal-footer"><button id="cancelUserSk" class="command secondary" type="button">取消</button><button id="confirmUserSk" class="command primary" type="button">确认创建</button></div>
+    </div>
+    <div id="skResultStep" class="hidden">
+      <div class="modal-body"><div class="success-mark">✓</div><h2>API Key 已创建</h2><div class="secret-display"><input id="generatedUserSk" readonly><button id="copyUserSk" class="command primary" type="button">复制</button></div><div class="secret-warning">完整密钥仅显示一次，关闭后无法再次查看。</div></div>
+      <div class="modal-footer"><button id="finishUserSk" class="command primary" type="button">完成</button></div>
+    </div>
+  </dialog>
+  <script src="/static/oidc.js"></script>
+  <script>
+    const permissionDefinitions = [["firewall.allow","user"],["firewall.deny","user"],["firewall.job.read","user"],["firewall.job.audit","admin"],["identity.user.manage","admin"]];
+    const state = { users: [], authenticated: false, selectedUser: null, userSecretKeys: [], generatingKey: false };
+    const $ = (selector) => document.querySelector(selector);
+    const beijingDateTimeFormatter = new Intl.DateTimeFormat("zh-CN", { timeZone:"Asia/Shanghai", year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit", hourCycle:"h23" });
+    function formatBeijingTime(value) { if(!value) return "-"; const date=new Date(value); if(Number.isNaN(date.getTime())) return value; const parts=Object.fromEntries(beijingDateTimeFormatter.formatToParts(date).map((part)=>[part.type,part.value])); return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`; }
+    function buildPermissionControls() { permissionDefinitions.forEach(([name,level]) => { const wrapper=document.createElement("div"); wrapper.className="check"; const input=document.createElement("input"); input.type="checkbox"; input.id=`user-${name}`; input.dataset.permission=name; input.dataset.level=level; const label=document.createElement("label"); label.htmlFor=input.id; label.textContent=name; wrapper.append(input,label); $("#userPermissions").append(wrapper); }); }
+    function permissions() { return [...document.querySelectorAll("[data-permission]:checked")].map((input)=>input.dataset.permission); }
+    function setPermissions(values) { document.querySelectorAll("[data-permission]").forEach((input)=>{ input.checked=values.includes(input.dataset.permission); }); }
+    function parseIps() { return [...new Set($("#userAllowedIps").value.split(/[\s,，;；]+/).map((value)=>value.trim()).filter(Boolean))]; }
+    function message(value,type="") { $("#userMessage").textContent=value; $("#userMessage").className=`message ${type}`; }
+    function saveFeedback(value,type="") { $("#saveFeedback").textContent=value; $("#saveFeedback").className=`save-feedback ${type}`; }
+    async function checkHealth() { try { const response=await fetch("/healthz",{cache:"no-store"}); if(!response.ok) throw new Error(`HTTP ${response.status}`); const result=await response.json(); if(result.status!=="ok") throw new Error("Service unhealthy"); $("#serviceDot").className="dot ok"; $("#serviceText").textContent="服务正常"; } catch { $("#serviceDot").className="dot fail"; $("#serviceText").textContent="服务异常"; } }
+    function applyProfile(force=false) { const profile=$("#userProfile").value; document.querySelectorAll("[data-permission]").forEach((input)=>{ const forbidden=profile==="user"&&input.dataset.level==="admin"; input.disabled=forbidden; if(forbidden) input.checked=false; else if(force) input.checked=true; }); $("#userIpsField").classList.toggle("hidden",profile==="admin"); if(profile==="admin") $("#userAllowedIps").value=""; updateSkControls(); }
+    async function api(path,options={}) { const headers=new Headers(options.headers||{}); if(options.body) headers.set("Content-Type","application/json"); const response=await tradeAccessOidc.authenticatedFetch(path,{...options,headers}); const text=await response.text(); let data; try{data=text?JSON.parse(text):null;}catch{data=text;} if(!response.ok){const detail=data&&data.detail?data.detail:`HTTP ${response.status}`; throw new Error(typeof detail==="string"?detail:JSON.stringify(detail));} return data; }
+    function editUser(user) { const managed=state.users.find((item)=>item.subject_id===user.subject_id)||null; state.selectedUser=managed||user; state.userSecretKeys=[]; $("#userSubject").value=user.subject_id; $("#username").value=user.username; $("#userDisplayName").value=user.display_name||""; $("#userProfile").value=user.profile||"user"; $("#userEnabled").value=String(user.enabled!==false); $("#userAllowedIps").value=(user.allowed_ips||[]).join("\n"); setPermissions(user.permissions||["firewall.allow","firewall.deny","firewall.job.read"]); applyProfile(false); message(`正在配置 ${user.username}`); saveFeedback(""); if(managed&&managed.profile==="user") loadUserSecretKeys(managed.subject_id).catch((error)=>message(error.message,"error")); else renderUserSecretKeys(); }
+    function hasActiveUserSk() { const now=new Date(); return state.userSecretKeys.some((key)=>!key.revoked_at&&new Date(key.expires_at)>now); }
+    function updateSkControls() { const button=$("#generateUserSk"); const hasSubject=Boolean($("#userSubject").value); const hasActive=hasActiveUserSk(); button.disabled=!hasSubject||$("#userProfile").value!=="user"||$("#userEnabled").value!=="true"||hasActive; button.textContent=hasActive?"已有有效 API Key":"创建 API Key"; }
+    function renderUserSecretKeys() { $("#userSkRows").replaceChildren(); $("#emptyUserSks").classList.toggle("hidden",state.userSecretKeys.length>0); if(!state.userSecretKeys.length) $("#emptyUserSks").textContent="该用户尚未生成 SK"; state.userSecretKeys.forEach((key)=>{ const row=document.createElement("tr"); const status=key.revoked_at?"已吊销":(new Date(key.expires_at)<=new Date()?"已过期":"有效"); [key.label||"-",key.key_prefix,key.expires_at,key.last_used_at||"-",status].forEach((value,index)=>{const cell=document.createElement("td"); cell.textContent=value; if(index===1) cell.className="mono"; row.append(cell);}); const action=document.createElement("td"); if(status==="有效"){const button=document.createElement("button"); button.type="button"; button.className="command secondary"; button.textContent="吊销"; button.addEventListener("click",()=>run(()=>revokeUserSecretKey(key.key_id),button)); action.append(button);} row.append(action); $("#userSkRows").append(row); }); updateSkControls(); }
+    async function loadUserSecretKeys(subjectId=$("#userSubject").value) { state.userSecretKeys=await api(`/api/v1/admin/users/${encodeURIComponent(subjectId)}/secret-keys`); renderUserSecretKeys(); }
+    function userAuthorizationPayload() { return {username:$("#username").value,display_name:$("#userDisplayName").value.trim()||null,profile:$("#userProfile").value,enabled:$("#userEnabled").value==="true",permissions:permissions(),allowed_ips:$("#userProfile").value==="user"?parseIps():[]}; }
+    function openUserSkDialog() { const subjectId=$("#userSubject").value; if(!subjectId) throw new Error("请先选择 Keycloak 用户"); $("#skDialogUsername").textContent=$("#username").value; $("#skDialogSubject").textContent=subjectId; $("#userSkLabel").value=`${$("#username").value} API Key`; $("#userSkDays").value="365"; $("#generatedUserSk").value=""; $("#copyUserSk").textContent="复制"; $("#skDialogMessage").classList.add("hidden"); $("#skCreateStep").classList.remove("hidden"); $("#skResultStep").classList.add("hidden"); $("#userSkDialog").showModal(); }
+    function closeUserSkDialog() { if(!state.generatingKey) $("#userSkDialog").close(); }
+    async function generateUserSecretKey() { const subjectId=$("#userSubject").value; if(!subjectId) throw new Error("请先选择 Keycloak 用户"); await api(`/api/v1/admin/users/${encodeURIComponent(subjectId)}`,{method:"PUT",body:JSON.stringify(userAuthorizationPayload())}); await loadUsers(); const payload={label:$("#userSkLabel").value.trim()||null,expires_in_days:Number($("#userSkDays").value)}; const result=await api(`/api/v1/admin/users/${encodeURIComponent(subjectId)}/secret-keys`,{method:"POST",body:JSON.stringify(payload)}); $("#generatedUserSk").value=result.secret_key; $("#skCreateStep").classList.add("hidden"); $("#skResultStep").classList.remove("hidden"); await loadUserSecretKeys(subjectId); state.selectedUser=state.users.find((item)=>item.subject_id===subjectId)||state.selectedUser; message(`已保存授权并为 ${$("#username").value} 创建 API Key`,"ok"); }
+    async function runUserSkCreation(button) { try { state.generatingKey=true; button.disabled=true; $("#closeUserSkDialog").disabled=true; $("#cancelUserSk").disabled=true; $("#skDialogMessage").classList.add("hidden"); await generateUserSecretKey(); } catch(error) { $("#skDialogMessage").textContent=error.message; $("#skDialogMessage").classList.remove("hidden"); } finally { state.generatingKey=false; button.disabled=false; $("#closeUserSkDialog").disabled=false; $("#cancelUserSk").disabled=false; } }
+    async function revokeUserSecretKey(keyId) { const subjectId=$("#userSubject").value; await api(`/api/v1/admin/users/${encodeURIComponent(subjectId)}/secret-keys/${encodeURIComponent(keyId)}`,{method:"DELETE"}); await loadUserSecretKeys(subjectId); message("SK 已吊销","ok"); }
+    async function copyUserSecretKey() { const input=$("#generatedUserSk"); if(!input.value) return; if(navigator.clipboard&&window.isSecureContext) await navigator.clipboard.writeText(input.value); else { input.select(); document.execCommand("copy"); input.setSelectionRange(0,0); } $("#copyUserSk").textContent="已复制"; }
+    function renderUsers() { $("#userRows").replaceChildren(); $("#emptyUsers").classList.toggle("hidden",state.users.length>0); state.users.forEach((user)=>{ const row=document.createElement("tr"); [user.username,user.profile,user.enabled?"启用":"停用",String(user.allowed_ips.length),formatBeijingTime(user.updated_at)].forEach((value,index)=>{const cell=document.createElement("td"); cell.textContent=value; if(index===0) cell.className="mono"; row.append(cell);}); row.addEventListener("click",()=>editUser(user)); $("#userRows").append(row); }); }
+    async function loadUsers() { state.users=await api("/api/v1/admin/users"); renderUsers(); }
+    async function searchUsers() { const query=$("#userSearch").value.trim(); if(!query) throw new Error("请输入搜索条件"); const users=await api(`/api/v1/admin/users/search?q=${encodeURIComponent(query)}`); const box=$("#searchResults"); box.replaceChildren(); box.classList.toggle("hidden",users.length===0); users.forEach((user)=>{const button=document.createElement("button"); button.className="search-item"; button.type="button"; button.textContent=user.username; const detail=document.createElement("small"); detail.textContent=[user.display_name,user.email,user.subject_id].filter(Boolean).join(" · "); button.append(detail); button.addEventListener("click",()=>{const managed=state.users.find((item)=>item.subject_id===user.subject_id); editUser(managed||{...user,profile:"user",permissions:["firewall.allow","firewall.deny","firewall.job.read"],allowed_ips:[]}); box.classList.add("hidden");}); box.append(button);}); }
+    async function saveUser() { const subjectId=$("#userSubject").value; if(!subjectId) throw new Error("请先选择 Keycloak 用户"); const result=await api(`/api/v1/admin/users/${encodeURIComponent(subjectId)}`,{method:"PUT",body:JSON.stringify(userAuthorizationPayload())}); await loadUsers(); editUser(state.users.find((item)=>item.subject_id===result.subject_id)||result); message(`已保存 ${result.username} 的授权，下次请求立即生效`,"ok"); }
+    async function runSaveUser(button) { const originalText=button.textContent; try { button.disabled=true; button.textContent="保存中..."; saveFeedback("正在保存用户授权...","saving"); await saveUser(); button.textContent="已保存"; saveFeedback("保存成功，授权已立即生效","ok"); await new Promise((resolve)=>window.setTimeout(resolve,1200)); } catch(error) { message(error.message,"error"); saveFeedback(`保存失败：${error.message}`,"error"); } finally { button.disabled=false; button.textContent=originalText; } }
+    async function connect() { const me=await api("/api/v1/trade-access/me"); if(!me.is_admin||!me.permissions.includes("identity.user.manage")) throw new Error("当前用户没有用户管理权限"); state.authenticated=true; $("#identityText").textContent=me.subject; $("#identityText").classList.remove("hidden"); $("#login").classList.add("hidden"); $("#logout").classList.remove("hidden"); const status=await api("/api/v1/admin/users/status"); if(!status.keycloak_provisioning_configured) throw new Error("服务端未配置 Provisioning Client"); await loadUsers(); }
+    async function run(action,target) { try{target.disabled=true; await action();}catch(error){message(error.message,"error");}finally{target.disabled=false;} }
+    buildPermissionControls(); applyProfile(true);
+    $("#login").addEventListener("click",()=>tradeAccessOidc.loginFresh()); $("#logout").addEventListener("click",()=>tradeAccessOidc.switchAccount()); $("#userProfile").addEventListener("change",()=>applyProfile(true)); $("#userEnabled").addEventListener("change",updateSkControls); $("#searchUsers").addEventListener("click",(event)=>run(searchUsers,event.currentTarget)); $("#saveUser").addEventListener("click",(event)=>runSaveUser(event.currentTarget)); $("#generateUserSk").addEventListener("click",()=>{try{openUserSkDialog();}catch(error){message(error.message,"error");}}); $("#confirmUserSk").addEventListener("click",(event)=>runUserSkCreation(event.currentTarget)); $("#copyUserSk").addEventListener("click",(event)=>run(copyUserSecretKey,event.currentTarget)); $("#closeUserSkDialog").addEventListener("click",closeUserSkDialog); $("#cancelUserSk").addEventListener("click",closeUserSkDialog); $("#finishUserSk").addEventListener("click",closeUserSkDialog); $("#userSkDialog").addEventListener("cancel",(event)=>{if(state.generatingKey) event.preventDefault();}); $("#userSkDialog").addEventListener("close",()=>{$("#generatedUserSk").value="";}); $("#refreshUsers").addEventListener("click",(event)=>run(loadUsers,event.currentTarget));
+    checkHealth(); window.setInterval(checkHealth,30000);
+    tradeAccessOidc.initialize().then(()=>{if(tradeAccessOidc.isAuthenticated()) return connect(); return null;}).catch((error)=>{message(error.message,"error"); if(tradeAccessOidc.isAuthenticated()){ $("#identityText").textContent="已登录非管理员账号"; $("#identityText").classList.remove("hidden"); $("#login").classList.add("hidden"); $("#logout").classList.remove("hidden"); }});
+  </script>
+</body>
+</html>

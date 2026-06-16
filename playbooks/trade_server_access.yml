@@ -1,0 +1,7 @@
+---
+- name: Manage trade server access on Huawei USG6000E
+  hosts: localhost
+  gather_facts: false
+
+  roles:
+    - usg6000e_trade_access
