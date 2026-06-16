@@ -31,7 +31,7 @@
       - "{{ role_path }}/files/extract_usg_address_id.py"
       - "--file"
       - "{{ local_tmp_dir }}/query_address_set_member_before_port_{{ address_context.name }}.out"
-      - "--target-ip"
+      - "--ip"
       - "{{ access_request.target_ip }}"
       - "--mask"
       - "{{ access_request.mask | default(32) | string }}"

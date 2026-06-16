@@ -107,6 +107,15 @@ class RoleStaticTests(unittest.TestCase):
         self.assertIn("deny_ports.yml", main_yml)
         self.assertIn("deny_ip.yml", main_yml)
 
+    def test_port_operation_ip_validation_uses_address_parser_arguments(self) -> None:
+        validate_yml = (
+            PROJECT_ROOT
+            / "roles/usg6000e_trade_access/tasks/validate_address_vsystem.yml"
+        ).read_text()
+
+        self.assertIn('"--ip"', validate_yml)
+        self.assertNotIn('"--target-ip"', validate_yml)
+
 
 if __name__ == "__main__":
     unittest.main()
