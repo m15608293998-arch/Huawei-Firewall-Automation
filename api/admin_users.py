@@ -9,8 +9,10 @@ from api.time_utils import utc_now_iso
 
 
 USER_PERMISSIONS = {
-    "firewall.allow",
-    "firewall.deny",
+    "firewall.ip.allow",
+    "firewall.ip.deny",
+    "firewall.ports.allow",
+    "firewall.ports.deny",
     "firewall.job.read",
 }
 ADMIN_PERMISSIONS = set(VALID_PERMISSIONS)
@@ -89,9 +91,11 @@ class AdminUserService:
             if profile == UserProfile.admin.value
             else USER_PERMISSIONS
         )
-        permissions = allowed if requested is None else {
-            permission.strip().lower() for permission in requested
-        }
+        permissions = (
+            allowed
+            if requested is None
+            else AdminUserService._normalize_requested_permissions(requested)
+        )
         unknown = permissions - VALID_PERMISSIONS
         if unknown:
             raise ManagedUserValidationError(
@@ -110,6 +114,19 @@ class AdminUserService:
                 "At least one API permission is required."
             )
         return sorted(permissions)
+
+    @staticmethod
+    def _normalize_requested_permissions(requested: list[str]) -> set[str]:
+        permissions: set[str] = set()
+        for permission in requested:
+            normalized = permission.strip().lower()
+            if normalized == "firewall.allow":
+                permissions.update({"firewall.ip.allow", "firewall.ports.allow"})
+            elif normalized == "firewall.deny":
+                permissions.update({"firewall.ports.deny", "firewall.ip.deny"})
+            else:
+                permissions.add(normalized)
+        return permissions
 
     @staticmethod
     def _allowed_ips_for(profile: str, allowed_ips: list[str]) -> list[str]:

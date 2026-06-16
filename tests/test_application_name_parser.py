@@ -115,6 +115,27 @@ class ApplicationNameParserTests(unittest.TestCase):
         self.assertEqual(plan["new_ports"], [])
         self.assertFalse(plan["rebuild_needed"])
 
+    def test_remove_plan_deletes_requested_ports_and_keeps_remaining_ports(self) -> None:
+        parsed = {
+            "object_names": ["UD_TS_192.168.5.225"],
+            "group_names": ["UD_TS_192.168.5.225"],
+            "all_ports": [12001, 12002, 12003],
+            "all_target_ips_match": True,
+        }
+
+        plan = PARSER.build_application_plan(
+            parsed,
+            "UD_TS_192.168.5.225",
+            [12002, 13000],
+            mode="remove",
+        )
+
+        self.assertEqual(plan["mode"], "remove")
+        self.assertEqual(plan["removed_ports"], [12002])
+        self.assertEqual(plan["effective_ports"], [12001, 12003])
+        self.assertEqual(plan["units"][0]["ports"], [12001, 12003])
+        self.assertTrue(plan["rebuild_needed"])
+
     def test_parses_display_application_output(self) -> None:
         output = """
         user-defined-application name UD_TS_192.168.5.224

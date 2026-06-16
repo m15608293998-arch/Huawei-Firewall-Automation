@@ -4,11 +4,13 @@
     that:
       - access_request is defined
       - access_request.action is defined
-      - access_request.action in ['allow', 'deny']
+      - access_request.action in ['allow', 'allow_ip', 'allow_ports', 'deny', 'deny_ports', 'deny_ip']
       - access_request.target_ip is defined
       - access_request.requester is defined
       - access_request.request_id is defined
-    fail_msg: "access_request must include action allow/deny, target_ip, requester and request_id."
+    fail_msg: >-
+      access_request must include action allow/allow_ip/allow_ports/deny/deny_ports/deny_ip,
+      target_ip, requester and request_id.
 
 - name: Resolve firewall SSH auth type
   ansible.builtin.set_fact:
@@ -59,7 +61,7 @@
     target_ip_cidr: "{{ access_request.target_ip }}/{{ access_request.mask | default(32) }}"
     target_description: "{{ access_request.description | default('trade-server-' ~ access_request.target_ip) }}"
     base_app_name: "{{ user_defined_application.name_prefix }}{{ access_request.target_ip }}"
-    application_ports_int: "{{ (application_ports if access_request.action == 'allow' else []) | map('int') | unique | sort | list }}"
+    application_ports_int: "{{ (application_ports if access_request.action in ['allow', 'allow_ports', 'deny_ports'] else []) | map('int') | unique | sort | list }}"
     firewall_mutated: false
     firewall_cli_environment: >-
       {{
@@ -83,14 +85,14 @@
         )
       }}
 
-- name: Validate allow application ports
+- name: Validate application ports
   ansible.builtin.assert:
     that:
       - application_ports_int | length > 0
       - application_ports_int | min >= 1
       - application_ports_int | max <= 65535
-    fail_msg: "allow requires at least one unique TCP port between 1 and 65535."
-  when: access_request.action == 'allow'
+    fail_msg: "Port operations require at least one unique TCP port between 1 and 65535."
+  when: access_request.action in ['allow', 'allow_ports', 'deny_ports']
 
 - name: Ensure local temp directory exists
   ansible.builtin.file:
@@ -102,9 +104,25 @@
   ansible.builtin.include_tasks: allow.yml
   when: access_request.action == 'allow'
 
+- name: Run IP allow workflow
+  ansible.builtin.include_tasks: allow_ip.yml
+  when: access_request.action == 'allow_ip'
+
+- name: Run port allow workflow
+  ansible.builtin.include_tasks: allow_ports.yml
+  when: access_request.action == 'allow_ports'
+
 - name: Run deny workflow
   ansible.builtin.include_tasks: deny.yml
   when: access_request.action == 'deny'
+
+- name: Run port deny workflow
+  ansible.builtin.include_tasks: deny_ports.yml
+  when: access_request.action == 'deny_ports'
+
+- name: Run IP deny workflow
+  ansible.builtin.include_tasks: deny_ip.yml
+  when: access_request.action == 'deny_ip'
 
 - name: Render final commit and save command
   ansible.builtin.copy:

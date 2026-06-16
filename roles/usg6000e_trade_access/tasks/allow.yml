@@ -1,10 +1,6 @@
 ---
-- name: Add target IP to address set in each virtual system
-  ansible.builtin.include_tasks: address_vsystem.yml
-  loop: "{{ address_vsystems }}"
-  loop_control:
-    loop_var: address_context
+- name: Run address-set allow workflow
+  ansible.builtin.include_tasks: allow_ip.yml
 
-- name: Configure user-defined application in private virtual system
-  ansible.builtin.include_tasks: application.yml
-  when: enable_application_config | default(true) | bool
+- name: Run port allow workflow
+  ansible.builtin.include_tasks: allow_ports.yml

@@ -13,8 +13,12 @@ from api.auth import (
     authorize_trade_access_request,
     require_firewall_allow,
     require_firewall_deny,
+    require_firewall_ip_allow,
+    require_firewall_ip_deny,
     require_firewall_job_audit,
     require_firewall_job_read,
+    require_firewall_ports_allow,
+    require_firewall_ports_deny,
     require_identity_user_manage,
     require_trade_access_user,
     offline_api_key_service,
@@ -43,7 +47,10 @@ from api.schemas import (
     OidcBrowserConfigResponse,
     TradeAccessAllowRequest,
     TradeAccessDenyRequest,
+    TradeAccessIpRequest,
     TradeAccessJobCreate,
+    TradeAccessPortAllowRequest,
+    TradeAccessPortDenyRequest,
     UserSecretKeyCreate,
     UserSecretKeyCreatedResponse,
     UserSecretKeyResponse,
@@ -51,6 +58,10 @@ from api.schemas import (
 from api.permissions import (
     FIREWALL_ALLOW,
     FIREWALL_DENY,
+    FIREWALL_IP_ALLOW,
+    FIREWALL_IP_DENY,
+    FIREWALL_PORTS_ALLOW,
+    FIREWALL_PORTS_DENY,
 )
 from api.admin_users import (
     ManagedUserValidationError,
@@ -407,6 +418,62 @@ def create_trade_access_allow_job(
     job_request = TradeAccessJobCreate(action="allow", **request.model_dump())
     authorize_trade_access_request(principal, job_request)
     return create_job(job_request, principal, FIREWALL_ALLOW)
+
+
+@app.post(
+    "/api/v1/trade-access/ip/allow",
+    response_model=JobCreateResponse,
+    status_code=202,
+)
+def create_trade_access_ip_allow_job(
+    request: TradeAccessIpRequest,
+    principal: Principal = Depends(require_firewall_ip_allow),
+):
+    job_request = TradeAccessJobCreate(action="allow_ip", **request.model_dump())
+    authorize_trade_access_request(principal, job_request)
+    return create_job(job_request, principal, FIREWALL_IP_ALLOW)
+
+
+@app.post(
+    "/api/v1/trade-access/ports/allow",
+    response_model=JobCreateResponse,
+    status_code=202,
+)
+def create_trade_access_ports_allow_job(
+    request: TradeAccessPortAllowRequest,
+    principal: Principal = Depends(require_firewall_ports_allow),
+):
+    job_request = TradeAccessJobCreate(action="allow_ports", **request.model_dump())
+    authorize_trade_access_request(principal, job_request)
+    return create_job(job_request, principal, FIREWALL_PORTS_ALLOW)
+
+
+@app.post(
+    "/api/v1/trade-access/ports/deny",
+    response_model=JobCreateResponse,
+    status_code=202,
+)
+def create_trade_access_ports_deny_job(
+    request: TradeAccessPortDenyRequest,
+    principal: Principal = Depends(require_firewall_ports_deny),
+):
+    job_request = TradeAccessJobCreate(action="deny_ports", **request.model_dump())
+    authorize_trade_access_request(principal, job_request)
+    return create_job(job_request, principal, FIREWALL_PORTS_DENY)
+
+
+@app.post(
+    "/api/v1/trade-access/ip/deny",
+    response_model=JobCreateResponse,
+    status_code=202,
+)
+def create_trade_access_ip_deny_job(
+    request: TradeAccessIpRequest,
+    principal: Principal = Depends(require_firewall_ip_deny),
+):
+    job_request = TradeAccessJobCreate(action="deny_ip", **request.model_dump())
+    authorize_trade_access_request(principal, job_request)
+    return create_job(job_request, principal, FIREWALL_IP_DENY)
 
 
 @app.post(

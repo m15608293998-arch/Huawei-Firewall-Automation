@@ -1,0 +1,6 @@
+---
+- name: Remove target IP from address set in each virtual system
+  ansible.builtin.include_tasks: remove_address_vsystem.yml
+  loop: "{{ address_vsystems }}"
+  loop_control:
+    loop_var: address_context

@@ -19,6 +19,11 @@ from api.auth import (
     require_trade_access_admin,
     require_trade_access_user,
     require_firewall_allow,
+    require_firewall_deny,
+    require_firewall_ip_allow,
+    require_firewall_ip_deny,
+    require_firewall_ports_allow,
+    require_firewall_ports_deny,
     require_identity_user_manage,
 )
 from api.config import settings
@@ -31,6 +36,7 @@ from api.schemas import (
     TradeAccessAllowRequest,
     TradeAccessDenyRequest,
     TradeAccessJobCreate,
+    TradeAccessPortDenyRequest,
 )
 
 
@@ -348,6 +354,32 @@ class AuthorizationTests(unittest.TestCase):
             require_firewall_allow(denied)
         self.assertEqual(caught.exception.status_code, 403)
 
+    def test_split_operation_permissions_are_checked_at_endpoint_boundary(self) -> None:
+        principal = user_principal().model_copy(
+            update={
+                "permissions": [
+                    "firewall.ip.allow",
+                    "firewall.ports.allow",
+                    "firewall.ports.deny",
+                    "firewall.ip.deny",
+                ]
+            }
+        )
+
+        self.assertEqual(require_firewall_allow(principal), principal)
+        self.assertEqual(require_firewall_deny(principal), principal)
+        self.assertEqual(require_firewall_ip_allow(principal), principal)
+        self.assertEqual(require_firewall_ports_allow(principal), principal)
+        self.assertEqual(require_firewall_ports_deny(principal), principal)
+        self.assertEqual(require_firewall_ip_deny(principal), principal)
+
+        missing_ip_deny = principal.model_copy(
+            update={"permissions": ["firewall.ports.deny"]}
+        )
+        with self.assertRaises(HTTPException) as caught:
+            require_firewall_deny(missing_ip_deny)
+        self.assertEqual(caught.exception.status_code, 403)
+
     def test_user_management_requires_admin_role_and_permission(self) -> None:
         self.assertEqual(
             require_identity_user_manage(admin_principal()).subject_id,
@@ -411,6 +443,13 @@ class AuthorizationTests(unittest.TestCase):
                 {
                     "target_ip": "192.168.66.22",
                     "ports": [12001],
+                }
+            )
+
+        with self.assertRaises(ValidationError):
+            TradeAccessPortDenyRequest.model_validate(
+                {
+                    "target_ip": "192.168.66.22",
                 }
             )
 

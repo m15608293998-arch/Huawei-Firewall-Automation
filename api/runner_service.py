@@ -48,7 +48,7 @@ class AnsibleRunnerService:
             "local_tmp_dir": str(local_tmp_dir),
             "local_python_interpreter": sys.executable,
         }
-        if job["action"] == "allow":
+        if job["action"] in {"allow", "allow_ports", "deny_ports"}:
             extravars["application_ports"] = job["ports"]
 
         try:

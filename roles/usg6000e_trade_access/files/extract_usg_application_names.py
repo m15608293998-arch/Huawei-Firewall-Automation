@@ -174,10 +174,20 @@ def build_application_plan(
     requested_ports: list[int],
     rule_port_limit: int = 4,
     application_rule_limit: int = 8,
+    mode: str = "add",
 ) -> dict[str, Any]:
+    if mode not in {"add", "remove"}:
+        raise ValueError("mode must be add or remove")
     requested = sorted({int(port) for port in requested_ports})
     existing = sorted({int(port) for port in parsed["all_ports"]})
-    effective = sorted(set(existing) | set(requested))
+    if mode == "add":
+        effective = sorted(set(existing) | set(requested))
+        new_ports = sorted(set(requested) - set(existing))
+        removed_ports: list[int] = []
+    else:
+        effective = sorted(set(existing) - set(requested))
+        new_ports = []
+        removed_ports = sorted(set(existing) & set(requested))
     application_capacity = rule_port_limit * application_rule_limit
 
     units = []
@@ -203,16 +213,20 @@ def build_application_plan(
         reasons.append("application_objects_do_not_match_plan")
     if sorted(parsed["group_names"]) != sorted(desired_names):
         reasons.append("application_group_members_do_not_match_plan")
-    if set(requested) - set(existing):
+    if mode == "add" and new_ports:
         reasons.append("requested_ports_missing")
+    if mode == "remove" and removed_ports:
+        reasons.append("requested_ports_present")
     if not parsed["all_target_ips_match"]:
         reasons.append("application_target_ip_mismatch")
 
     return {
+        "mode": mode,
         "requested_ports": requested,
         "existing_ports": existing,
         "effective_ports": effective,
-        "new_ports": sorted(set(requested) - set(existing)),
+        "new_ports": new_ports,
+        "removed_ports": removed_ports,
         "desired_names": desired_names,
         "units": units,
         "rebuild_needed": bool(reasons),
@@ -227,6 +241,7 @@ def main() -> int:
     parser.add_argument("--target-ip")
     parser.add_argument("--mask", type=int)
     parser.add_argument("--requested-ports-json")
+    parser.add_argument("--mode", choices=["add", "remove"], default="add")
     parser.add_argument("--rule-port-limit", type=int, default=4)
     parser.add_argument("--application-rule-limit", type=int, default=8)
     args = parser.parse_args()
@@ -256,6 +271,7 @@ def main() -> int:
             requested_ports,
             rule_port_limit=args.rule_port_limit,
             application_rule_limit=args.application_rule_limit,
+            mode=args.mode,
         )
 
     print(json.dumps(parsed, ensure_ascii=False))

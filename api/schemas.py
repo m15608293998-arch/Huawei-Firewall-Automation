@@ -9,7 +9,11 @@ from api.time_utils import to_china_time_iso
 
 class AccessAction(str, Enum):
     allow = "allow"
+    allow_ip = "allow_ip"
+    allow_ports = "allow_ports"
     deny = "deny"
+    deny_ports = "deny_ports"
+    deny_ip = "deny_ip"
 
 
 class JobStatus(str, Enum):
@@ -71,7 +75,7 @@ class TradeAccessRequestBase(BaseModel):
         return self
 
 
-class TradeAccessAllowRequest(TradeAccessRequestBase):
+class TradeAccessPortsRequest(TradeAccessRequestBase):
     ports: list[int] = Field(min_length=1, max_length=256)
 
     @field_validator("ports")
@@ -81,6 +85,22 @@ class TradeAccessAllowRequest(TradeAccessRequestBase):
         if invalid:
             raise ValueError("ports must contain integers between 1 and 65535")
         return sorted(set(value))
+
+
+class TradeAccessAllowRequest(TradeAccessPortsRequest):
+    pass
+
+
+class TradeAccessIpRequest(TradeAccessRequestBase):
+    pass
+
+
+class TradeAccessPortAllowRequest(TradeAccessPortsRequest):
+    pass
+
+
+class TradeAccessPortDenyRequest(TradeAccessPortsRequest):
+    pass
 
 
 class TradeAccessDenyRequest(TradeAccessRequestBase):
@@ -93,10 +113,20 @@ class TradeAccessJobCreate(TradeAccessRequestBase):
 
     @model_validator(mode="after")
     def validate_action_payload(self):
-        if self.action == AccessAction.allow and not self.ports:
-            raise ValueError("ports is required and must not be empty for allow")
-        if self.action == AccessAction.deny and self.ports is not None:
-            raise ValueError("ports must be omitted for deny; deny removes all access for the target")
+        port_actions = {
+            AccessAction.allow,
+            AccessAction.allow_ports,
+            AccessAction.deny_ports,
+        }
+        no_port_actions = {
+            AccessAction.allow_ip,
+            AccessAction.deny,
+            AccessAction.deny_ip,
+        }
+        if self.action in port_actions and not self.ports:
+            raise ValueError("ports is required and must not be empty for this action")
+        if self.action in no_port_actions and self.ports is not None:
+            raise ValueError("ports must be omitted for this action")
         return self
 
 

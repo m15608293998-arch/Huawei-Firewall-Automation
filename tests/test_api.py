@@ -13,6 +13,10 @@ from api.main import (
     admin_ui,
     create_trade_access_allow_job,
     create_trade_access_deny_job,
+    create_trade_access_ip_allow_job,
+    create_trade_access_ip_deny_job,
+    create_trade_access_ports_allow_job,
+    create_trade_access_ports_deny_job,
     get_any_trade_access_job,
     get_any_trade_access_job_events,
     get_trade_access_job,
@@ -28,6 +32,9 @@ from api.schemas import (
     JobDetailResponse,
     TradeAccessAllowRequest,
     TradeAccessDenyRequest,
+    TradeAccessIpRequest,
+    TradeAccessPortAllowRequest,
+    TradeAccessPortDenyRequest,
 )
 from api.storage import JobStorage
 
@@ -114,6 +121,43 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(allow_job["action"], "allow")
         self.assertEqual(deny_job["action"], "deny")
         self.assertEqual(deny_job["ports"], [])
+
+    def test_split_firewall_endpoints_set_action_and_permission_code(self) -> None:
+        ip_allow_job = create_trade_access_ip_allow_job(
+            request=TradeAccessIpRequest(target_ip="192.168.66.22"),
+            principal=self.user,
+        )
+        ports_allow_job = create_trade_access_ports_allow_job(
+            request=TradeAccessPortAllowRequest(
+                target_ip="192.168.66.22",
+                ports=[12001, 12002],
+            ),
+            principal=self.user,
+        )
+        ports_deny_job = create_trade_access_ports_deny_job(
+            request=TradeAccessPortDenyRequest(
+                target_ip="192.168.66.22",
+                ports=[12002],
+            ),
+            principal=self.user,
+        )
+        ip_deny_job = create_trade_access_ip_deny_job(
+            request=TradeAccessIpRequest(target_ip="192.168.66.22"),
+            principal=self.user,
+        )
+
+        self.assertEqual(ip_allow_job["action"], "allow_ip")
+        self.assertEqual(ip_allow_job["ports"], [])
+        self.assertEqual(ip_allow_job["permission_code"], "firewall.ip.allow")
+        self.assertEqual(ports_allow_job["action"], "allow_ports")
+        self.assertEqual(ports_allow_job["ports"], [12001, 12002])
+        self.assertEqual(ports_allow_job["permission_code"], "firewall.ports.allow")
+        self.assertEqual(ports_deny_job["action"], "deny_ports")
+        self.assertEqual(ports_deny_job["ports"], [12002])
+        self.assertEqual(ports_deny_job["permission_code"], "firewall.ports.deny")
+        self.assertEqual(ip_deny_job["action"], "deny_ip")
+        self.assertEqual(ip_deny_job["ports"], [])
+        self.assertEqual(ip_deny_job["permission_code"], "firewall.ip.deny")
 
     def test_user_list_is_scoped_and_admin_list_contains_all_jobs(self) -> None:
         own_job = self.create_job(self.user)
@@ -208,6 +252,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"isLoginFailure", response.body)
         self.assertIn("当前账号没有任务查询权限".encode("utf-8"), response.body)
         self.assertIn(b"hasJobReadPermission", response.body)
+        self.assertIn(b"/api/v1/trade-access/ip/allow", response.body)
+        self.assertIn(b"/api/v1/trade-access/ports/allow", response.body)
+        self.assertIn(b"/api/v1/trade-access/ports/deny", response.body)
+        self.assertIn(b"/api/v1/trade-access/ip/deny", response.body)
+        self.assertIn("完全撤销".encode("utf-8"), response.body)
         self.assertIn("上一页".encode("utf-8"), response.body)
         self.assertIn("下一页".encode("utf-8"), response.body)
         self.assertIn(b"jobsPaginationMeta", response.body)
@@ -222,7 +271,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.media_type, "text/html")
         self.assertIn("MicroTrade Access 用户管理平台".encode("utf-8"), response.body)
         self.assertIn(b"/static/oidc.js", response.body)
-        self.assertIn("更新时间（北京时间）".encode("utf-8"), response.body)
+        self.assertIn("更新时间".encode("utf-8"), response.body)
         self.assertIn(b' timeZone:"Asia/Shanghai"', response.body)
         self.assertIn("刷新列表".encode("utf-8"), response.body)
         self.assertNotIn("机器 Client".encode("utf-8"), response.body)

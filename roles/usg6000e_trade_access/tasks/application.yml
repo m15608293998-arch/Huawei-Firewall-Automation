@@ -70,7 +70,7 @@
       {{ application_details_result.stdout | default('') }}
   changed_when: false
 
-- name: Build additive application port plan
+- name: Build application port plan
   ansible.builtin.command:
     argv:
       - "{{ local_python_interpreter | default('python3.12') }}"
@@ -85,6 +85,8 @@
       - "{{ access_request.mask | default(32) | string }}"
       - "--requested-ports-json"
       - "{{ application_ports_int | to_json }}"
+      - "--mode"
+      - "{{ application_port_mode | default('add') }}"
       - "--rule-port-limit"
       - "{{ rule_port_limit | int | string }}"
       - "--application-rule-limit"
@@ -111,12 +113,14 @@
       an application name belonging to {{ access_request.target_ip }} contains a
       different target IP or mask.
 
-- name: Show additive application plan
+- name: Show application port plan
   ansible.builtin.debug:
     msg:
+      mode: "{{ application_plan.mode }}"
       requested_ports: "{{ application_plan.requested_ports }}"
       existing_ports: "{{ application_plan.existing_ports }}"
       new_ports: "{{ application_plan.new_ports }}"
+      removed_ports: "{{ application_plan.removed_ports }}"
       effective_ports: "{{ application_plan.effective_ports }}"
       application_names: "{{ application_plan.desired_names }}"
       rebuild_needed: "{{ application_plan.rebuild_needed }}"
@@ -222,7 +226,7 @@
       Expected plan: {{ application_plan }}.
       Actual state: {{ application_validation_state }}.
     success_msg: >-
-      Firewall applications contain the union of existing and requested ports.
+      Firewall applications match the requested port operation result.
   vars:
     application_validation_state: "{{ application_validation_parse_result.stdout | from_json }}"
   when: application_plan.rebuild_needed | bool
@@ -230,6 +234,6 @@
 - name: Confirm requested ports already exist
   ansible.builtin.debug:
     msg: >-
-      No application rebuild was needed. All requested ports already exist for
-      {{ access_request.target_ip }} and all application-group memberships are present.
+      No application rebuild was needed. The requested {{ application_port_mode | default('add') }}
+      port operation is already reflected for {{ access_request.target_ip }}.
   when: not application_plan.rebuild_needed | bool

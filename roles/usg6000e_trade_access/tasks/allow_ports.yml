@@ -1,0 +1,12 @@
+---
+- name: Validate target IP is already present before port operation
+  ansible.builtin.include_tasks: validate_address_vsystem.yml
+  loop: "{{ address_vsystems }}"
+  loop_control:
+    loop_var: address_context
+
+- name: Configure user-defined application in private virtual system
+  ansible.builtin.include_tasks: application.yml
+  vars:
+    application_port_mode: add
+  when: enable_application_config | default(true) | bool

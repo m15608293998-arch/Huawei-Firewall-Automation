@@ -74,17 +74,38 @@ class RoleStaticTests(unittest.TestCase):
             ).read_text()
             self.assertIn("firewall_mutated: true", task_text)
 
-    def test_deny_uses_structured_application_name_parser(self) -> None:
+    def test_full_deny_removes_ports_before_removing_ip(self) -> None:
         deny_yml = (
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/deny.yml"
+        ).read_text()
+        deny_all_ports_yml = (
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/deny_all_ports.yml"
         ).read_text()
         discovery_template = (
             PROJECT_ROOT
             / "roles/usg6000e_trade_access/templates/query_applications_by_ip.cli.j2"
         ).read_text()
 
-        self.assertIn("extract_usg_application_names.py", deny_yml)
+        self.assertLess(
+            deny_yml.index("deny_all_ports.yml"),
+            deny_yml.index("deny_ip.yml"),
+        )
+        self.assertIn("extract_usg_application_names.py", deny_all_ports_yml)
         self.assertIn("display current-configuration | include {{ base_app_name }}", discovery_template)
+
+    def test_split_actions_have_dedicated_task_files(self) -> None:
+        main_yml = (
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/main.yml"
+        ).read_text()
+
+        self.assertIn("'allow_ip'", main_yml)
+        self.assertIn("'allow_ports'", main_yml)
+        self.assertIn("'deny_ports'", main_yml)
+        self.assertIn("'deny_ip'", main_yml)
+        self.assertIn("allow_ip.yml", main_yml)
+        self.assertIn("allow_ports.yml", main_yml)
+        self.assertIn("deny_ports.yml", main_yml)
+        self.assertIn("deny_ip.yml", main_yml)
 
 
 if __name__ == "__main__":

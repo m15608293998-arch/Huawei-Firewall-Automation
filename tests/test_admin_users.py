@@ -45,7 +45,13 @@ class AdminUserServiceTests(unittest.TestCase):
         self.assertEqual(result["subject_id"], "user-subject")
         self.assertEqual(
             result["permissions"],
-            ["firewall.allow", "firewall.deny", "firewall.job.read"],
+            [
+                "firewall.ip.allow",
+                "firewall.ip.deny",
+                "firewall.job.read",
+                "firewall.ports.allow",
+                "firewall.ports.deny",
+            ],
         )
         self.assertEqual(
             self.storage.get_subject_allowed_ips("user-subject"),

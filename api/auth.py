@@ -19,8 +19,12 @@ from api.offline_api_keys import (
 from api.permissions import (
     FIREWALL_ALLOW,
     FIREWALL_DENY,
+    FIREWALL_IP_ALLOW,
+    FIREWALL_IP_DENY,
     FIREWALL_JOB_AUDIT,
     FIREWALL_JOB_READ,
+    FIREWALL_PORTS_ALLOW,
+    FIREWALL_PORTS_DENY,
     IDENTITY_USER_MANAGE,
     VALID_PERMISSIONS,
 )
@@ -46,6 +50,9 @@ class Principal(BaseModel):
 
     def has_permission(self, permission: str) -> bool:
         return permission in self.permissions
+
+    def has_any_permission(self, permissions: set[str]) -> bool:
+        return bool(permissions.intersection(self.permissions))
 
     @property
     def is_admin(self) -> bool:
@@ -269,16 +276,65 @@ def require_permission(principal: Principal, permission: str) -> Principal:
     return principal
 
 
+def require_any_permission(principal: Principal, permissions: set[str]) -> Principal:
+    if not principal.has_any_permission(permissions):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This subject is not allowed to access this API operation.",
+        )
+    return principal
+
+
 def require_firewall_allow(
     principal: Principal = Depends(require_trade_access_user),
 ) -> Principal:
-    return require_permission(principal, FIREWALL_ALLOW)
+    permissions = set(principal.permissions)
+    if principal.has_permission(FIREWALL_ALLOW) or {
+        FIREWALL_IP_ALLOW,
+        FIREWALL_PORTS_ALLOW,
+    }.issubset(permissions):
+        return principal
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="This subject is not allowed to access this API operation.",
+    )
 
 
 def require_firewall_deny(
     principal: Principal = Depends(require_trade_access_user),
 ) -> Principal:
-    return require_permission(principal, FIREWALL_DENY)
+    if principal.has_permission(FIREWALL_DENY) or {FIREWALL_PORTS_DENY, FIREWALL_IP_DENY}.issubset(
+        set(principal.permissions)
+    ):
+        return principal
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="This subject is not allowed to access this API operation.",
+    )
+
+
+def require_firewall_ip_allow(
+    principal: Principal = Depends(require_trade_access_user),
+) -> Principal:
+    return require_any_permission(principal, {FIREWALL_IP_ALLOW, FIREWALL_ALLOW})
+
+
+def require_firewall_ports_allow(
+    principal: Principal = Depends(require_trade_access_user),
+) -> Principal:
+    return require_any_permission(principal, {FIREWALL_PORTS_ALLOW, FIREWALL_ALLOW})
+
+
+def require_firewall_ports_deny(
+    principal: Principal = Depends(require_trade_access_user),
+) -> Principal:
+    return require_any_permission(principal, {FIREWALL_PORTS_DENY, FIREWALL_DENY})
+
+
+def require_firewall_ip_deny(
+    principal: Principal = Depends(require_trade_access_user),
+) -> Principal:
+    return require_any_permission(principal, {FIREWALL_IP_DENY, FIREWALL_DENY})
 
 
 def require_firewall_job_read(

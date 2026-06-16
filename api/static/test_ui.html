@@ -81,11 +81,10 @@
     .access-scope.ready { box-shadow: inset 3px 0 var(--success); }
     .access-scope.denied { box-shadow: inset 3px 0 var(--danger); }
 
-    .segmented { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line-strong); border-radius: 9px; overflow: hidden; }
-    .segmented button { min-height: 40px; border: 0; border-right: 1px solid var(--line-strong); background: #fff; color: #4b5563; cursor: pointer; }
-    .segmented button:last-child { border-right: 0; }
+    .segmented { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 1px; border: 1px solid var(--line-strong); border-radius: 9px; overflow: hidden; background: var(--line-strong); }
+    .segmented button { min-height: 40px; border: 0; background: #fff; color: #4b5563; cursor: pointer; }
     .segmented button.active { background: #eff6ff; color: #1d4ed8; font-weight: 650; }
-    .segmented button[data-action="deny"].active { background: #fff1f2; color: var(--danger); }
+    .segmented button[data-action^="deny"].active { background: #fff1f2; color: var(--danger); }
 
     .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
     button.command { min-height: 40px; border: 1px solid transparent; border-radius: 9px; padding: 0 16px; cursor: pointer; font-weight: 650; transition: background 140ms ease, border-color 140ms ease, opacity 140ms ease; }
@@ -216,8 +215,11 @@
         <div class="panel-body">
           <label>操作</label>
           <div class="segmented" role="group" aria-label="操作类型">
-            <button class="active" type="button" data-action="allow">放行</button>
-            <button type="button" data-action="deny">取消放行</button>
+            <button class="active" type="button" data-action="allow_ip">放行 IP</button>
+            <button type="button" data-action="allow_ports">新增端口</button>
+            <button type="button" data-action="deny_ports">取消端口</button>
+            <button type="button" data-action="deny_ip">取消 IP</button>
+            <button type="button" data-action="deny">完全撤销</button>
           </div>
 
           <div id="accessScope" class="access-scope">正在读取 Keycloak 用户权限</div>
@@ -253,7 +255,7 @@
           </div>
 
           <div class="actions">
-            <button id="submitAction" class="command primary" type="button">提交放行</button>
+            <button id="submitAction" class="command primary" type="button">提交放行 IP</button>
             <button id="clearForm" class="command secondary" type="button">清空</button>
           </div>
         </div>
@@ -373,8 +375,45 @@
     const TEST_UI_LOGIN_KEY = "trade_access_test_ui_login";
     const API_KEY_RESULT_KEY = "trade-access.api-key.result";
     const terminalStatuses = new Set(["successful", "failed", "canceled"]);
+    const actionConfig = {
+      allow_ip: {
+        endpoint: "/api/v1/trade-access/ip/allow",
+        permissions: ["firewall.ip.allow", "firewall.allow"],
+        needsPorts: false,
+        submitText: "提交放行 IP",
+        buttonClass: "primary",
+      },
+      allow_ports: {
+        endpoint: "/api/v1/trade-access/ports/allow",
+        permissions: ["firewall.ports.allow", "firewall.allow"],
+        needsPorts: true,
+        submitText: "提交新增端口",
+        buttonClass: "primary",
+      },
+      deny_ports: {
+        endpoint: "/api/v1/trade-access/ports/deny",
+        permissions: ["firewall.ports.deny", "firewall.deny"],
+        needsPorts: true,
+        submitText: "提交取消端口",
+        buttonClass: "danger",
+      },
+      deny_ip: {
+        endpoint: "/api/v1/trade-access/ip/deny",
+        permissions: ["firewall.ip.deny", "firewall.deny"],
+        needsPorts: false,
+        submitText: "提交取消 IP",
+        buttonClass: "danger",
+      },
+      deny: {
+        endpoint: "/api/v1/trade-access/deny",
+        permissions: ["firewall.deny"],
+        needsPorts: false,
+        submitText: "提交完全撤销",
+        buttonClass: "danger",
+      },
+    };
     const state = {
-      action: "allow",
+      action: "allow_ip",
       pollingTimer: null,
       pollingJobId: null,
       accessProfile: null,
@@ -501,10 +540,9 @@
 
     function renderAccessProfile(profile) {
       state.accessProfile = profile;
-      const allowButton = document.querySelector('[data-action="allow"]');
-      const denyButton = document.querySelector('[data-action="deny"]');
-      allowButton.disabled = !profile.permissions.includes("firewall.allow");
-      denyButton.disabled = !profile.permissions.includes("firewall.deny");
+      document.querySelectorAll("[data-action]").forEach((button) => {
+        button.disabled = !hasActionPermission(button.dataset.action, profile);
+      });
 
       if (profile.is_admin) {
         document.querySelector("#createApiKey").disabled = true;
@@ -547,11 +585,31 @@
         elements.submitAction.disabled = true;
         return;
       }
-      const permission = `firewall.${state.action}`;
-      const operationDenied = !state.accessProfile.permissions.includes(permission);
+      const operationDenied = !hasActionPermission(state.action);
       const noAssignedTargets = !state.accessProfile.is_admin
         && state.accessProfile.allowed_ips.length === 0;
       elements.submitAction.disabled = operationDenied || noAssignedTargets;
+    }
+
+    function hasAnyPermission(profile, permissions) {
+      return Boolean(profile && permissions.some((permission) => profile.permissions.includes(permission)));
+    }
+
+    function hasActionPermission(action, profile = state.accessProfile) {
+      if (!profile) return false;
+      if (action === "deny") {
+        return profile.permissions.includes("firewall.deny")
+          || (
+            profile.permissions.includes("firewall.ports.deny")
+            && profile.permissions.includes("firewall.ip.deny")
+          );
+      }
+      const config = actionConfig[action];
+      return Boolean(config && hasAnyPermission(profile, config.permissions));
+    }
+
+    function currentActionConfig() {
+      return actionConfig[state.action] || actionConfig.allow_ip;
     }
 
     function hasJobReadPermission(profile = state.accessProfile) {
@@ -873,7 +931,7 @@
 
     function parsePorts(value) {
       const raw = value.split(/[\s,，;；]+/).filter(Boolean);
-      if (!raw.length) throw new Error("放行操作至少需要一个端口");
+      if (!raw.length) throw new Error("端口操作至少需要一个端口");
       const ports = [...new Set(raw.map(Number))].sort((a, b) => a - b);
       if (ports.some((port) => !Number.isInteger(port) || port < 1 || port > 65535)) {
         throw new Error("端口必须是 1 到 65535 之间的整数");
@@ -894,7 +952,9 @@
       const requestId = document.querySelector("#requestId").value.trim();
       if (description) payload.description = description;
       if (requestId) payload.client_request_id = requestId;
-      if (state.action === "allow") payload.ports = parsePorts(document.querySelector("#ports").value);
+      if (currentActionConfig().needsPorts) {
+        payload.ports = parsePorts(document.querySelector("#ports").value);
+      }
       return payload;
     }
 
@@ -903,7 +963,7 @@
       updateSubmitAvailability();
       try {
         if (!state.accessProfile) await loadAccessProfile(false);
-        const data = await request(`/api/v1/trade-access/${state.action}`, {
+        const data = await request(currentActionConfig().endpoint, {
           method: "POST",
           body: JSON.stringify(buildPayload()),
         });
@@ -1071,12 +1131,13 @@
 
     function setAction(action) {
       state.action = action;
+      const config = currentActionConfig();
       document.querySelectorAll("[data-action]").forEach((button) => {
         button.classList.toggle("active", button.dataset.action === action);
       });
-      elements.portsField.classList.toggle("hidden", action === "deny");
-      elements.submitAction.textContent = action === "allow" ? "提交放行" : "提交取消放行";
-      elements.submitAction.className = `command ${action === "allow" ? "primary" : "danger"}`;
+      elements.portsField.classList.toggle("hidden", !config.needsPorts);
+      elements.submitAction.textContent = config.submitText;
+      elements.submitAction.className = `command ${config.buttonClass}`;
       updateSubmitAvailability();
     }
 
@@ -1169,6 +1230,7 @@
     document.querySelector("#prevJobsPage").addEventListener("click", () => changeJobsPage(-1));
     document.querySelector("#nextJobsPage").addEventListener("click", () => changeJobsPage(1));
 
+    setAction(state.action);
     resetAccessProfile();
     resetJobsPagination();
     document.querySelector("#switchAccount").addEventListener("click", () => {
