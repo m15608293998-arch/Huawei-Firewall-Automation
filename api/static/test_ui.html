@@ -382,6 +382,7 @@
         needsPorts: false,
         submitText: "提交放行 IP",
         buttonClass: "primary",
+        description: "只放行目标 IP，不配置端口。适合先开放地址后进行 SSH 或连通性测试。",
       },
       allow_ports: {
         endpoint: "/api/v1/trade-access/ports/allow",
@@ -389,6 +390,7 @@
         needsPorts: true,
         submitText: "提交新增端口",
         buttonClass: "primary",
+        description: "在已放行 IP 的基础上新增端口，不会覆盖或删除已有端口。",
       },
       deny_ports: {
         endpoint: "/api/v1/trade-access/ports/deny",
@@ -396,6 +398,7 @@
         needsPorts: true,
         submitText: "提交取消端口",
         buttonClass: "danger",
+        description: "只取消填写的端口，目标 IP 仍保留在地址组中。",
       },
       deny_ip: {
         endpoint: "/api/v1/trade-access/ip/deny",
@@ -403,6 +406,7 @@
         needsPorts: false,
         submitText: "提交取消 IP",
         buttonClass: "danger",
+        description: "取消 IP 前必须先删除此 IP 的所有端口，否则系统会拒绝执行。",
       },
       deny: {
         endpoint: "/api/v1/trade-access/deny",
@@ -410,6 +414,7 @@
         needsPorts: false,
         submitText: "提交完全撤销",
         buttonClass: "danger",
+        description: "一键撤销该 IP 的全部访问：系统会先删除所有端口，再取消 IP 放行。",
       },
     };
     const state = {
@@ -549,8 +554,7 @@
         elements.adminTargetField.classList.remove("hidden");
         elements.userTargetField.classList.add("hidden");
         elements.mask.disabled = false;
-        elements.accessScope.className = "access-scope ready";
-        elements.accessScope.textContent = `管理员 ${profile.subject}：可操作任意合法 IP 或网段`;
+        renderActionDescription();
         updateSubmitAvailability();
         return;
       }
@@ -569,10 +573,7 @@
       });
       const hasTargets = profile.allowed_ips.length > 0;
       elements.allowedTargetIp.disabled = !hasTargets;
-      elements.accessScope.className = `access-scope ${hasTargets ? "ready" : "denied"}`;
-      elements.accessScope.textContent = hasTargets
-        ? `普通用户 ${profile.subject}：仅可操作 ${profile.allowed_ips.join(", ")}`
-        : `普通用户 ${profile.subject}：管理员尚未分配可操作 IP`;
+      renderActionDescription();
       updateSubmitAvailability();
     }
 
@@ -610,6 +611,26 @@
 
     function currentActionConfig() {
       return actionConfig[state.action] || actionConfig.allow_ip;
+    }
+
+    function renderActionDescription() {
+      if (!state.accessProfile) {
+        elements.accessScope.className = "access-scope";
+        elements.accessScope.textContent = "正在读取 Keycloak 用户权限";
+        return;
+      }
+      if (!state.accessProfile.is_admin && state.accessProfile.allowed_ips.length === 0) {
+        elements.accessScope.className = "access-scope denied";
+        elements.accessScope.textContent = "管理员尚未分配可操作 IP，暂时无法提交防火墙操作。";
+        return;
+      }
+      if (!hasActionPermission(state.action)) {
+        elements.accessScope.className = "access-scope denied";
+        elements.accessScope.textContent = "当前账号没有此操作权限。";
+        return;
+      }
+      elements.accessScope.className = "access-scope ready";
+      elements.accessScope.textContent = currentActionConfig().description;
     }
 
     function hasJobReadPermission(profile = state.accessProfile) {
@@ -1138,6 +1159,7 @@
       elements.portsField.classList.toggle("hidden", !config.needsPorts);
       elements.submitAction.textContent = config.submitText;
       elements.submitAction.className = `command ${config.buttonClass}`;
+      renderActionDescription();
       updateSubmitAvailability();
     }
 
