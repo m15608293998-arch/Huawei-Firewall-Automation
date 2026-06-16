@@ -104,6 +104,7 @@ def build_ssh_cmd(args):
             "-o PreferredAuthentications=password,keyboard-interactive "
             "-o PubkeyAuthentication=no "
             "-o PasswordAuthentication=yes "
+            "-o KexAlgorithms=+diffie-hellman-group-exchange-sha1,diffie-hellman-group14-sha1 "
         )
 
     ssh_cmd = (
