@@ -107,6 +107,22 @@ class RoleStaticTests(unittest.TestCase):
         self.assertIn("deny_ports.yml", main_yml)
         self.assertIn("deny_ip.yml", main_yml)
 
+    def test_ip_deny_requires_ports_to_be_removed_first(self) -> None:
+        deny_ip_yml = (
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/deny_ip.yml"
+        ).read_text()
+        validate_yml = (
+            PROJECT_ROOT
+            / "roles/usg6000e_trade_access/tasks/validate_no_applications_for_ip.yml"
+        ).read_text()
+
+        self.assertLess(
+            deny_ip_yml.index("validate_no_applications_for_ip.yml"),
+            deny_ip_yml.index("remove_address_vsystem.yml"),
+        )
+        self.assertIn("Reject IP deny while ports still exist", validate_yml)
+        self.assertIn("Remove its ports first or use the full deny workflow", validate_yml)
+
     def test_port_operation_ip_validation_uses_address_parser_arguments(self) -> None:
         validate_yml = (
             PROJECT_ROOT

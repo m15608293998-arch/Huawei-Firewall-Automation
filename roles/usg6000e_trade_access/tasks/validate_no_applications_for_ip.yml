@@ -1,0 +1,62 @@
+---
+- name: Render application query before IP deny
+  ansible.builtin.template:
+    src: query_applications_by_ip.cli.j2
+    dest: "{{ local_tmp_dir }}/query_applications_before_ip_deny_{{ access_request.target_ip }}.cli"
+    mode: "0600"
+  when: enable_application_config | default(true) | bool
+
+- name: Query applications before IP deny
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_applications_before_ip_deny_' ~ access_request.target_ip ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_ip_deny_discovery
+  changed_when: false
+  failed_when:
+    - application_ip_deny_discovery.rc != 0 or
+      'Unrecognized command' in application_ip_deny_discovery.stdout or
+      'Too many parameters' in application_ip_deny_discovery.stdout
+  when: enable_application_config | default(true) | bool
+
+- name: Save application query output before IP deny
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/query_applications_before_ip_deny_{{ access_request.target_ip }}.out"
+    mode: "0600"
+    content: "{{ application_ip_deny_discovery.stdout }}"
+  changed_when: false
+  when: enable_application_config | default(true) | bool
+
+- name: Parse applications before IP deny
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_application_names.py"
+      - "--file"
+      - "{{ local_tmp_dir }}/query_applications_before_ip_deny_{{ access_request.target_ip }}.out"
+      - "--base-app-name"
+      - "{{ base_app_name }}"
+  register: application_ip_deny_parse
+  changed_when: false
+  failed_when:
+    - application_ip_deny_parse.rc != 0
+  when: enable_application_config | default(true) | bool
+
+- name: Set application state before IP deny
+  ansible.builtin.set_fact:
+    application_names_before_ip_deny: "{{ (application_ip_deny_parse.stdout | from_json).names }}"
+    application_lines_before_ip_deny: "{{ (application_ip_deny_parse.stdout | from_json).lines }}"
+  when: enable_application_config | default(true) | bool
+
+- name: Reject IP deny while ports still exist
+  ansible.builtin.assert:
+    that:
+      - application_names_before_ip_deny | default([]) | length == 0
+    fail_msg: >-
+      Cannot remove {{ access_request.target_ip }} from address sets because
+      user-defined applications still exist for this IP:
+      {{ application_names_before_ip_deny | default([]) }}.
+      Remove its ports first or use the full deny workflow.
+    success_msg: >-
+      No user-defined applications remain for {{ access_request.target_ip }};
+      IP deny can continue.
+  when: enable_application_config | default(true) | bool
