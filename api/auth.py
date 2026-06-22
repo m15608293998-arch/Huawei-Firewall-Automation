@@ -30,7 +30,6 @@ from api.permissions import (
 )
 from api.schemas import TradeAccessJobCreate
 from api.storage import JobStorage
-from api.user_secret_keys import UserSecretKeyError, UserSecretKeyService
 
 
 class Principal(BaseModel):
@@ -60,7 +59,6 @@ class Principal(BaseModel):
 
 
 permission_storage = JobStorage(settings.database_path)
-user_secret_key_service = UserSecretKeyService(permission_storage)
 token_verifier = KeycloakTokenVerifier(
     issuer=settings.keycloak_issuer,
     audience=settings.keycloak_client_id,
@@ -89,24 +87,8 @@ bearer_scheme = HTTPBearer(
 )
 
 
-def principal_from_user_secret_key(raw_key: str) -> Principal:
-    record, user = user_secret_key_service.verify(raw_key)
-    subject_id = str(user["subject_id"])
-    return Principal(
-        subject_id=subject_id,
-        subject=str(user["username"]),
-        auth_type="user_secret_key",
-        roles=[settings.keycloak_user_role],
-        client_id=None,
-        subject_type="user",
-        access_enabled=bool(user["enabled"]),
-        permissions=permission_storage.get_subject_permissions(subject_id),
-        allowed_ips=permission_storage.get_subject_allowed_ips(subject_id),
-        key_id=str(record["key_id"]),
-    )
-
-
 def principal_from_offline_api_key(raw_key: str) -> Principal:
+    # 长效 SK 本质上还是 Keycloak offline token，认证成功后再还原成统一 Principal。
     record, claims = offline_api_key_service.authenticate(raw_key)
     principal = principal_from_claims(claims, auth_type="offline_api_key")
     return principal.model_copy(update={"key_id": str(record["key_id"])})
@@ -131,6 +113,7 @@ def principal_from_claims(
 
     raw_client_id = claims.get("azp") or claims.get("clientId")
     client_id = str(raw_client_id) if raw_client_id else None
+    # 权限和 allowed IP 走本地业务库，不信任 token 里自带的业务授权。
     managed_user = permission_storage.get_managed_user(subject_id)
     permissions = permission_storage.get_subject_permissions(subject_id)
     allowed_ips = permission_storage.get_subject_allowed_ips(subject_id)
@@ -179,6 +162,7 @@ def authenticate_request(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing Bearer credential.",
             )
+        # sk- 前缀只用于分流；真正身份仍通过 Keycloak offline token 换回 access token。
         if offline_api_key_service.is_api_key(access_token):
             try:
                 return principal_from_offline_api_key(access_token)
@@ -193,19 +177,6 @@ def authenticate_request(
                     detail=str(exc),
                 ) from exc
             except OfflineApiKeyError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=str(exc),
-                ) from exc
-        if user_secret_key_service.is_secret_key(access_token):
-            if not settings.legacy_user_secret_key_auth_enabled:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="User SK authentication is disabled; use a Keycloak access token.",
-                )
-            try:
-                return principal_from_user_secret_key(access_token)
-            except UserSecretKeyError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail=str(exc),
@@ -249,6 +220,7 @@ def require_trade_access_user(
 def require_trade_access_admin(
     principal: Principal = Depends(get_principal),
 ) -> Principal:
+    # 管理端接口要求从 admin portal 登录，避免普通前端 token 直接调用管理 API。
     if principal.auth_type != "keycloak_admin_bearer" and settings.auth_enabled:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -288,6 +260,7 @@ def require_any_permission(principal: Principal, permissions: set[str]) -> Princ
 def require_firewall_allow(
     principal: Principal = Depends(require_trade_access_user),
 ) -> Principal:
+    # firewall.allow 是兼容性总权限；新权限模型优先拆成 IP 和端口两类。
     permissions = set(principal.permissions)
     if principal.has_permission(FIREWALL_ALLOW) or {
         FIREWALL_IP_ALLOW,
@@ -360,19 +333,16 @@ def authorize_trade_access_request(
     principal: Principal,
     request: TradeAccessJobCreate,
 ) -> None:
-    if not principal.is_admin and request.mask != 32:
+    # 当前自动化只处理单 IP，网段批量操作先在 API 层挡掉。
+    if request.mask != 32:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Ordinary users may only operate on a single IPv4 address (/32).",
-        )
-    if not principal.is_admin and request.target_ip not in principal.allowed_ips:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Target IP is not assigned to this user.",
+            detail="Trade access operations require a single IPv4 address (/32).",
         )
 
 
 def authorize_job_read(principal: Principal, job: dict[str, Any]) -> None:
+    # 对非本人任务返回 404，避免泄露任务是否存在。
     if job.get("principal_id") != principal.subject_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

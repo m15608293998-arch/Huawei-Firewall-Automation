@@ -88,6 +88,7 @@ class OfflineApiKeyService:
 
         state = secrets.token_urlsafe(32)
         code_verifier = secrets.token_urlsafe(64)
+        # 生成 PKCE challenge，回调时不需要在浏览器保存 client secret。
         challenge = base64.urlsafe_b64encode(
             hashlib.sha256(code_verifier.encode("ascii")).digest()
         ).rstrip(b"=").decode("ascii")
@@ -95,6 +96,7 @@ class OfflineApiKeyService:
         expires_at = created_at + timedelta(seconds=self.authorization_ttl_seconds)
         self.storage.save_offline_api_key_authorization(
             {
+                # state 只存 hash，数据库泄露时也不能直接复用 OAuth 回调。
                 "state_hash": self._hash(state),
                 "subject_id": subject_id,
                 "label": label,
@@ -122,6 +124,7 @@ class OfflineApiKeyService:
 
     def complete_authorization(self, state: str, code: str) -> dict[str, Any]:
         self._require_configured()
+        # consume 保证授权码流程只能完成一次，防止回调被重复提交。
         transaction = self.storage.consume_offline_api_key_authorization(
             self._hash(state)
         )
@@ -152,6 +155,7 @@ class OfflineApiKeyService:
         if "offline_access" not in granted_scope.split():
             raise OfflineApiKeyError("Keycloak did not grant offline_access.")
 
+        # 用短 access token 校验登录人，真正发给调用方的是 sk-<offline_token>。
         claims = self._verify_access_token(access_token)
         subject_id = str(transaction["subject_id"])
         if claims.get("sub") != subject_id:
@@ -183,6 +187,7 @@ class OfflineApiKeyService:
     def authenticate(self, raw_key: str) -> tuple[dict[str, Any], dict[str, Any]]:
         self._require_configured()
         offline_token = self._parse_offline_token(raw_key)
+        # 数据库只保存 hash，原始 offline token 只存在调用方手里。
         record = self.storage.get_offline_api_key_by_hash(self._hash(raw_key))
         if record is None:
             raise OfflineApiKeyError("Invalid API key.")
@@ -197,6 +202,7 @@ class OfflineApiKeyService:
             if cached is not None and now < cached[0]:
                 claims = cached[1]
             else:
+                # 缓存短期 claims，避免每个 API 请求都打 Keycloak token endpoint。
                 payload = self._token_request(
                     {
                         "grant_type": "refresh_token",
@@ -257,6 +263,7 @@ class OfflineApiKeyService:
             )
 
     def _require_eligible_user(self, subject_id: str) -> dict[str, Any]:
+        # 离线 Key 只给已纳管的普通用户，管理员仍走管理端登录。
         user = self.storage.get_managed_user(subject_id)
         if user is None:
             raise OfflineApiKeyError("The Keycloak user has no saved business access.")
@@ -309,6 +316,7 @@ class OfflineApiKeyService:
         return claims
 
     def _touch_if_needed(self, record: dict[str, Any]) -> None:
+        # last_used_at 不必每次请求都写库，降低高频调用时的 SQLite 写压力。
         now = datetime.now(timezone.utc)
         last_used_at = record.get("last_used_at")
         if last_used_at is None or now - self._parse_datetime(

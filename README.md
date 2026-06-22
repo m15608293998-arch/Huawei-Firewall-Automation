@@ -23,7 +23,7 @@ http://<API节点IP>:8000/test-ui
 http://<API节点IP>:8000/admin-ui
 ```
 
-管理员使用 Keycloak User 登录 `/admin-ui`，为已有 Keycloak User 配置接口权限和精确 IP。
+管理员使用 Keycloak User 登录 `/admin-ui`，为已有 Keycloak User 配置接口权限和启停状态。
 普通员工访问 `/test-ui` 完成 Keycloak 登录后，可以创建以 `sk-` 开头的长期 API Key。
 该 Key 可通过 `curl`、Postman 或自动化脚本调用业务 API，不需要重复登录页面获取短期 Token。
 
@@ -667,7 +667,7 @@ canceled    预留状态，当前未实现取消
 ```bash
 curl -s \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
-  http://127.0.0.1:8000/api/v1/trade-access/jobs/<job_id>/events
+  http://127.0.0.1:8000/api/v1/trade-access/jobs/events/<job_id>
 ```
 
 该接口返回经过简化的 ansible-runner 事件，不默认暴露完整防火墙输出。
@@ -687,7 +687,7 @@ API 字段：
 
 ```text
 target_ip          目标交易服务器 IPv4 地址
-mask               掩码长度，默认 32；普通员工只能使用 32
+mask               掩码长度，固定 32
 ports              allow 必填的 TCP 端口数组；deny 不需要
 description        描述信息，禁止换行和控制字符
 client_request_id  调用方业务请求号，可选，用于追踪
@@ -759,7 +759,7 @@ Authorization: Bearer sk-<keycloak_offline_token>
 ```
 
 后端使用一个固定的 Confidential Client，把 Offline Token 换成短期 Access Token，验证
-RS256签名、`iss`、`aud`、`exp`、`sub` 和 Client Role，再按 `sub` 读取最新本地权限和精确 IP。
+RS256签名、`iss`、`aud`、`exp`、`sub` 和 Client Role，再按 `sub` 读取最新本地接口权限。
 Access Token 会缓存到过期前30秒，用户不需要处理300秒Token续签。
 
 管理员流程：
@@ -822,15 +822,15 @@ Optional client scope:
 `Revoke Refresh Token`。推荐只通过Client Policy影响该专用Client。
 
 Keycloak User 使用稳定的 `sub` 作为本地权限主体。FastAPI 验证 Access Token 后，按 Token 的
-`sub` 读取最新接口权限和精确 IP；业务权限变化不需要修改 Token 自定义属性。
+`sub` 读取最新接口权限；业务权限变化不需要修改 Token 自定义属性。
 
 首次管理员必须是 trade-access Realm User。分配 `trade-access-api:trade-access-admin` 后，仍需按
 该 User 的 Keycloak UUID 执行 `scripts/manage_permissions.py grant --profile admin` 完成本地管理权限引导。
 
 之后管理员登录 `/admin-ui`，可以：
 
-- 搜索现有 Keycloak User，并按 `sub` 配置角色、本地接口权限和精确 IP。
-- 管理普通用户和管理员的角色、接口权限及精确 IP。
+- 搜索现有 Keycloak User，并按 `sub` 配置角色、本地接口权限和启停状态。
+- 管理普通用户和管理员的角色、接口权限和启停状态。
 
 浏览器登录的 Access Token 和 Refresh Token 仍只保存在 `sessionStorage`。新建 API Key 时，
 Keycloak Offline Token只在创建结果中显示一次；关闭结果弹窗后页面会清除明文。
@@ -913,26 +913,12 @@ export TRADE_ACCESS_API_KEYCLOAK_CA_CERT=/path/to/internal-ca.pem
 ```bash
 python3.12 scripts/manage_permissions.py grant \
   --client-id trade-access-zhangsan \
-  --profile user \
-  --ip 192.168.5.224 \
-  --ip 192.168.66.22
+  --profile user
 ```
 
-`--ip` 可以重复。普通用户只能对管理员分配的这些精确 IPv4 地址执行 allow 和
-deny，并且只能使用 `/32`。权限由 API 后端强制校验，不能通过绕过前端规避。
-管理员角色不受此 IP 白名单限制。
-
-后续增加或撤销单个 IP：
-
-```bash
-python3.12 scripts/manage_permissions.py grant \
-  --client-id trade-access-zhangsan \
-  --ip 192.168.66.23
-
-python3.12 scripts/manage_permissions.py revoke \
-  --client-id trade-access-zhangsan \
-  --ip 192.168.66.22
-```
+当前业务不再按管理员分配的 IP 白名单限制普通用户。普通用户和管理员都只能对合法
+IPv4 单地址执行 allow/deny，并且只能使用 `/32`。接口权限仍由 API 后端按用户 `sub`
+强制校验，不能通过绕过前端规避。
 
 管理员 Client 使用：
 
@@ -1024,10 +1010,10 @@ python3.12 scripts/manage_permissions.py grant \
   --profile admin
 ```
 
-重启服务后，管理员可以在界面中搜索 Keycloak User、配置角色和接口权限，并设置普通用户可操作的
-精确 IP。普通用户在 `/test-ui` 中自行创建和删除 `sk-<offline_token>` API Key。
+重启服务后，管理员可以在界面中搜索 Keycloak User、配置角色、接口权限和启停状态。普通用户在
+`/test-ui` 中自行创建和删除 `sk-<offline_token>` API Key。
 
-调用方可以查询自己的角色、接口权限和可操作 IP：
+调用方可以查询自己的角色和接口权限：
 
 ```text
 GET /api/v1/trade-access/me
@@ -1038,7 +1024,7 @@ GET /api/v1/trade-access/me
 ```text
 GET /api/v1/admin/trade-access/jobs
 GET /api/v1/admin/trade-access/jobs/{job_id}
-GET /api/v1/admin/trade-access/jobs/{job_id}/events
+GET /api/v1/admin/trade-access/jobs/events/{job_id}
 ```
 
 每个新任务会审计 Keycloak `sub`、浏览器 Client ID、认证类型和本次使用的接口权限代码，

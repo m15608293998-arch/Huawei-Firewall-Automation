@@ -239,37 +239,6 @@ class OfflineApiKeyResponse(BaseModel):
     revoked_at: str | None = None
 
 
-class UserSecretKeyCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    label: str | None = Field(default=None, max_length=120)
-    expires_in_days: int = Field(default=365, ge=1, le=3650)
-
-    @field_validator("label")
-    @classmethod
-    def normalize_secret_key_label(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        return normalized or None
-
-
-class UserSecretKeyResponse(BaseModel):
-    key_id: str
-    subject_id: str
-    label: str | None = None
-    key_prefix: str
-    created_by: str
-    created_at: str
-    expires_at: str
-    last_used_at: str | None = None
-    revoked_at: str | None = None
-
-
-class UserSecretKeyCreatedResponse(UserSecretKeyResponse):
-    secret_key: str
-
-
 class UserProfile(str, Enum):
     user = "user"
     admin = "admin"

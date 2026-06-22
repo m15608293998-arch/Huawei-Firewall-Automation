@@ -42,6 +42,7 @@ class KeycloakTokenVerifier:
         except jwt.PyJWTError as exc:
             raise InvalidAccessTokenError("Malformed access token.") from exc
 
+        # 只接受 Keycloak 当前配置使用的 RS256，避免降级到非预期算法。
         if header.get("alg") != "RS256":
             raise InvalidAccessTokenError("Access token must use RS256.")
 
@@ -70,6 +71,7 @@ class KeycloakTokenVerifier:
     def _get_jwk(self, key_id: str) -> dict[str, Any]:
         now = time.monotonic()
         with self._lock:
+            # kid 不在缓存里时也主动刷新，兼容 Keycloak 轮换签名证书。
             if now >= self._cache_expires_at or key_id not in self._keys:
                 self._refresh_jwks()
             jwk = self._keys.get(key_id)

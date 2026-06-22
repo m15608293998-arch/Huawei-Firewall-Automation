@@ -71,7 +71,7 @@ POST /api/v1/trade-access/allow
 POST /api/v1/trade-access/deny
 GET  /api/v1/trade-access/jobs
 GET  /api/v1/trade-access/jobs/{job_id}
-GET  /api/v1/trade-access/jobs/{job_id}/events
+GET  /api/v1/trade-access/jobs/events/{job_id}
 ```
 
 Normal reads are owner-scoped by the stable Keycloak `sub`. Access token
@@ -82,7 +82,7 @@ Administrator-only routes:
 ```text
 GET /api/v1/admin/trade-access/jobs
 GET /api/v1/admin/trade-access/jobs/{job_id}
-GET /api/v1/admin/trade-access/jobs/{job_id}/events
+GET /api/v1/admin/trade-access/jobs/events/{job_id}
 GET /api/v1/admin/clients
 POST /api/v1/admin/clients
 PATCH /api/v1/admin/clients/{client_id}
@@ -123,8 +123,8 @@ Rules:
 - `deny` rejects `ports` and removes all access for the target.
 - The selected endpoint determines `allow` or `deny`; callers do not submit an
   `action` field.
-- Ordinary users may only submit an administrator-assigned IP with mask `32`.
-- Administrators may submit a valid network target.
+- Callers may submit any valid IPv4 single address with mask `32`.
+- Network targets are rejected for trade-access operations.
 - `requester` and `requester_id` are never accepted from request JSON.
 - `requester` is derived from the authenticated Keycloak principal.
 

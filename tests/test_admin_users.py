@@ -55,21 +55,11 @@ class AdminUserServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             self.storage.get_subject_allowed_ips("user-subject"),
-            ["192.168.5.224"],
+            [],
         )
         self.assertIn(("user-subject", "user"), self.keycloak.profiles)
 
-    def test_user_requires_ip_and_cannot_receive_admin_permission(self) -> None:
-        with self.assertRaises(ManagedUserValidationError):
-            self.service.update(
-                "user-subject",
-                ManagedUserUpdate(
-                    username="employee-a",
-                    profile="user",
-                    allowed_ips=[],
-                ),
-            )
-
+    def test_user_cannot_receive_admin_permission(self) -> None:
         with self.assertRaises(ManagedUserValidationError):
             self.service.update(
                 "user-subject",

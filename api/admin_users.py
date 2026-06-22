@@ -51,10 +51,10 @@ class AdminUserService:
 
         profile = request.profile.value
         permissions = self._permissions_for(profile, request.permissions)
-        allowed_ips = self._allowed_ips_for(profile, request.allowed_ips)
         current = self.storage.get_managed_user(subject_id)
 
         try:
+            # 先改 Keycloak 角色，再写本地业务授权；失败时尽量回滚 Keycloak 角色。
             self.keycloak_admin.set_user_profile(subject_id, profile)
             self.storage.save_managed_user_access(
                 subject_id=subject_id,
@@ -63,7 +63,7 @@ class AdminUserService:
                 profile=profile,
                 enabled=request.enabled,
                 permissions=permissions,
-                allowed_ips=allowed_ips,
+                allowed_ips=[],
                 updated_at=utc_now_iso(),
             )
         except Exception:
@@ -91,6 +91,7 @@ class AdminUserService:
             if profile == UserProfile.admin.value
             else USER_PERMISSIONS
         )
+        # 未指定权限时给该 profile 的默认权限，指定后必须落在 profile 允许范围内。
         permissions = (
             allowed
             if requested is None
@@ -120,6 +121,7 @@ class AdminUserService:
         permissions: set[str] = set()
         for permission in requested:
             normalized = permission.strip().lower()
+            # 兼容旧的总权限名，内部仍展开成拆分后的精细权限。
             if normalized == "firewall.allow":
                 permissions.update({"firewall.ip.allow", "firewall.ports.allow"})
             elif normalized == "firewall.deny":
@@ -127,17 +129,6 @@ class AdminUserService:
             else:
                 permissions.add(normalized)
         return permissions
-
-    @staticmethod
-    def _allowed_ips_for(profile: str, allowed_ips: list[str]) -> list[str]:
-        if profile == UserProfile.admin.value:
-            return []
-        if not allowed_ips:
-            raise ManagedUserValidationError(
-                "User profile requires at least one allowed IP."
-            )
-        return sorted(set(allowed_ips))
-
 
 keycloak_admin_client = KeycloakAdminClient(
     token_url=settings.keycloak_token_url,

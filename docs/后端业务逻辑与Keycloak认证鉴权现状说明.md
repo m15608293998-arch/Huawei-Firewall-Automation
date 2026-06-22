@@ -61,7 +61,7 @@
 | --- | --- | --- |
 | 用户界面 | `/test-ui`、`/admin-ui` | 登录、输入业务参数、管理授权和查询任务 |
 | 身份认证 | Keycloak Access Token + Offline API Key | 浏览器短期登录与普通用户长期调用 |
-| 业务鉴权 | FastAPI + SQLite | 接口权限、精确 IP、任务所有权和本地启用状态 |
+| 业务鉴权 | FastAPI + SQLite | 接口权限、IPv4 `/32` 校验、任务所有权和本地启用状态 |
 | 任务队列 | SQLite `jobs` 表 | 持久化、FIFO 领取、状态和审计记录 |
 | 执行层 | Worker + Ansible Runner | 串行执行 Playbook，更新任务结果 |
 | 设备层 | Ansible Role + SSH CLI | 修改防火墙并确认安全引擎提交完成 |
@@ -111,43 +111,10 @@ sk-<keycloak_offline_token>
 数据库只保存完整SK的SHA-256哈希和管理元数据，不保存明文。用户可命名、查看使用状态和删除Key。
 删除后本地认证立即拒绝。完整SK只在创建成功后显示一次。
 
-### 3.3 保留但默认停用的旧应用用户 SK
+### 3.3 已下线的旧应用用户 SK
 
-代码仍保留 `sk1.*` 实现，但当前默认不再接受它作为业务 API 凭据。它不是 Keycloak Token，
-也不是 Access Token 的封装或转换结果。
-格式为：
-
-```text
-sk1.<32位key_id>.<密码学安全随机值>
-```
-
-生成流程是：
-
-```text
-管理员已通过 Keycloak 登录
--> 管理员选择一个已存在的 Keycloak User
--> 保存该 User 的本地权限和精确 IP
--> FastAPI 自行随机生成 sk1.*
--> SK 绑定该 User 的 Keycloak sub
--> 数据库只保存 SHA-256 哈希，不保存完整明文
-```
-
-旧 SK 校验完全由 FastAPI 和本地 SQLite 完成，不会拿 SK 去 Keycloak 换 Access Token。当前配置：
-
-```text
-TRADE_ACCESS_API_LEGACY_USER_SECRET_KEY_AUTH_ENABLED=false
-```
-
-因此 `Bearer sk1.*` 默认返回 `401`。旧代码、数据库表和管理 API 暂时保留，仅用于迁移或回退。
-若显式开启兼容开关，则旧 SK 仍具有以下特性：
-
-- SK 默认有效期为 365 天。
-- 接口允许设置 1 到 3650 天。
-- SK 有效期不受 Keycloak Access Token、Refresh Token 或 Offline Token 有效期影响。
-- 每个普通用户同一时间只能有一把有效 SK。
-- 完整 SK 只在创建响应中显示一次。
-- 管理员可以立即吊销，再重新生成。
-- 修改用户权限或 IP 不需要重新生成 SK，下一次请求立即读取最新权限。
+旧 `sk1.*` 自定义 SK 生成、认证和管理员代用户管理接口已下线。管理员只负责在 `admin-ui`
+维护用户本地接口权限和启停状态；长期 API Key 由普通用户在 `/test-ui` 中自行创建和删除。
 
 普通用户可以使用浏览器Access Token或新的`sk-<offline_token>`调用业务API。
 
@@ -177,17 +144,15 @@ Authorization: Bearer <credential>
 Keycloak Access Token
   -> 按 RS256 JWT 校验
   -> 从 Token 读取 sub 和 Client Role
-  -> 按 sub 查询本地权限和 allowed_ips
+  -> 按 sub 查询本地接口权限
   -> 在 API 边界执行实际业务鉴权
 
 sk-<offline_token>
   -> 查询本地哈希和吊销状态
   -> 向Keycloak换取短期Access Token
   -> 验证Keycloak签名和sub
-  -> 按sub读取最新权限和allowed_ips
+  -> 按sub读取最新接口权限
 
-sk1.*
-  -> 默认拒绝并返回 401
 ```
 
 所以当前运行模式是Keycloak签发的短期/离线凭据认证、本地数据库细粒度授权。
@@ -257,7 +222,7 @@ Keycloak 只保存基础身份和粗粒度角色。动态业务权限保存在 S
 - `profile`：`user` 或 `admin`。
 - `enabled`：是否允许使用本业务。
 - `permissions`：可调用的 API 操作。
-- `allowed_ips`：普通用户可操作的精确 IPv4 地址。
+- `allowed_ips`：历史兼容字段，当前业务授权不再使用它限制目标 IP。
 
 当前权限代码：
 
@@ -284,14 +249,14 @@ firewall.job.read
 AND Keycloak 基础角色满足接口要求
 AND 本地 enabled=true
 AND 本地 permissions 包含当前接口权限
-AND 普通用户请求的 IP 在 allowed_ips 中
-AND 普通用户 mask=32
+AND 请求目标是合法 IPv4 单地址
+AND mask=32
 ```
 
-普通用户只能操作管理员分配的精确 IP，不能因为某个 IP 位于同一个 `/24` 就操作整个网段。
+普通用户可以提交任意合法 IPv4 单地址，但不能因为某个 IP 位于同一个 `/24` 就操作整个网段。
 端口是每次请求的业务参数，不存入 Keycloak Token、SK 或固定权限记录。
 
-管理员不受 `allowed_ips` 限制，但仍必须通过管理员 Portal 登录，并同时具备：
+管理员同样使用 `/32` 单地址提交防火墙操作；管理员后台能力仍必须通过管理员 Portal 登录，并同时具备：
 
 - Keycloak `trade-access-admin` Client Role。
 - 本地对应的管理员权限。
@@ -340,8 +305,7 @@ python3.12 scripts/configure_runtime.py \
 3. 搜索已经存在的 Keycloak User。
 4. 选择普通用户 Profile。
 5. 勾选 `allow`、`deny`、任务查询等接口权限。
-6. 添加该用户允许操作的一个或多个精确 IPv4 地址。
-7. 点击“保存用户授权”。
+6. 点击“保存用户授权”。
 
 保存时后端会同时：
 
@@ -421,7 +385,7 @@ curl -sS \
 ```bash
 curl -sS \
   -H "Authorization: Bearer $TRADE_ACCESS_SK" \
-  http://192.168.6.38:8000/api/v1/trade-access/jobs/<job_id>/events
+  http://192.168.6.38:8000/api/v1/trade-access/jobs/events/<job_id>
 ```
 
 ## 8. 当前 API 接口
@@ -449,7 +413,7 @@ curl -sS \
 | `POST` | `/api/v1/trade-access/deny` | `firewall.deny` |
 | `GET` | `/api/v1/trade-access/jobs` | `firewall.job.read` |
 | `GET` | `/api/v1/trade-access/jobs/{job_id}` | `firewall.job.read` |
-| `GET` | `/api/v1/trade-access/jobs/{job_id}/events` | `firewall.job.read` |
+| `GET` | `/api/v1/trade-access/jobs/events/{job_id}` | `firewall.job.read` |
 
 普通用户只能查询 `principal_id` 等于自身 Keycloak `sub` 的任务。查询其他用户任务返回 `404`。
 
@@ -461,12 +425,9 @@ curl -sS \
 | `GET` | `/api/v1/admin/users` | `identity.user.manage` |
 | `GET` | `/api/v1/admin/users/search` | `identity.user.manage` |
 | `PUT` | `/api/v1/admin/users/{subject_id}` | `identity.user.manage` |
-| `GET` | `/api/v1/admin/users/{subject_id}/secret-keys` | `identity.user.manage` |
-| `POST` | `/api/v1/admin/users/{subject_id}/secret-keys` | `identity.user.manage` |
-| `DELETE` | `/api/v1/admin/users/{subject_id}/secret-keys/{key_id}` | `identity.user.manage` |
 | `GET` | `/api/v1/admin/trade-access/jobs` | `firewall.job.audit` |
 | `GET` | `/api/v1/admin/trade-access/jobs/{job_id}` | `firewall.job.audit` |
-| `GET` | `/api/v1/admin/trade-access/jobs/{job_id}/events` | `firewall.job.audit` |
+| `GET` | `/api/v1/admin/trade-access/jobs/events/{job_id}` | `firewall.job.audit` |
 
 管理员接口只接受来自 `trade-access-admin-portal` 的有效 Keycloak Access Token，不接受用户 SK。
 
@@ -562,7 +523,7 @@ CLI 已接受提交命令。
 ## 11. 当前安全边界和已知限制
 
 - 生产环境必须使用 HTTPS。JWT Payload 可读，SK 也可被窃取后重放。
-- 业务 API 接受短期 Keycloak Access Token 和 `sk-<offline_token>`；旧 `sk1.*` 认证默认关闭。
+- 业务 API 接受短期 Keycloak Access Token 和 `sk-<offline_token>`。
 - Access Token 是短期凭据，复制到 Postman 后只能使用到其 `exp` 时间；外部工具应使用长期 `sk-`。
 - 后端使用 `sk-` 中的 Offline Token 自动换取短期Access Token，并缓存到过期前30秒。
 - 管理员 Access Token 和 Refresh Token 当前保存在浏览器 `sessionStorage`，关闭标签页后不会作为
@@ -584,7 +545,7 @@ Keycloak
 
 FastAPI + SQLite
   -> 验证 Keycloak JWT
-  -> 保存动态接口权限和精确 IP
+  -> 保存动态接口权限和启停状态
   -> 根据 Keycloak sub 执行业务鉴权
   -> 创建任务并隔离任务所有权
 

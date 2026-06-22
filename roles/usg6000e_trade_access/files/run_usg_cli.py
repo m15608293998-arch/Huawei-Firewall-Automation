@@ -11,6 +11,7 @@ import pexpect
 os.environ["LANG"] = "en_US.UTF-8"
 os.environ["LC_ALL"] = "en_US.UTF-8"
 
+# Huawei CLI 输出会夹杂分页、确认和不同形态的提示符，统一用正则兜住。
 PROMPT_PATTERN = r"(<[^>\r\n]+>|\[[^\]\r\n]+\])"
 MORE_PATTERN = r"(---- More ----|More:|<--- More --->|--- More ---)"
 CONFIRM_PATTERN = r"(Are you sure.*\([Yy]/[Nn]\).*|Are you sure.*\(y/n\)\[n\]:|Are you sure.*\[Y/N\].*|continue\? \[Y/N\].*)"
@@ -66,6 +67,7 @@ def expect_prompt_or_more(child, timeout):
     output = []
 
     while True:
+        # 每次命令都读到设备提示符为止，中途分页或确认直接自动处理。
         index = child.expect(
             [PROMPT_PATTERN, MORE_PATTERN, CONFIRM_PATTERN],
             timeout=timeout,
@@ -93,6 +95,7 @@ def build_ssh_cmd(args):
     control_path = str(control_dir / "usg6000e-%C")
 
     if args.identity_file:
+        # key 模式关闭密码认证，避免本机 agent 或交互密码影响验证结果。
         identity_file = str(pathlib.Path(args.identity_file).expanduser())
         auth_args = (
             f"-i {identity_file} "
@@ -100,6 +103,7 @@ def build_ssh_cmd(args):
             "-o PasswordAuthentication=no "
         )
     else:
+        # 密码模式关闭公钥认证，确保真正走账号密码登录华为设备。
         auth_args = (
             "-o PreferredAuthentications=password,keyboard-interactive "
             "-o PubkeyAuthentication=no "
@@ -143,6 +147,7 @@ def establish_ssh_session(child, timeout, password=None):
     password_sent = False
 
     while True:
+        # 登录阶段比普通命令多处理密码提示和认证失败提示。
         index = child.expect(
             [
                 PROMPT_PATTERN,
@@ -224,6 +229,7 @@ def wait_for_engine_commit_completion(
     while time.monotonic() < deadline:
         time.sleep(poll_interval)
         remaining = max(1, int(deadline - time.monotonic()))
+        # Huawei 编译可能异步进行，用同一条 commit 命令轮询最终状态。
         poll_output = run_command_with_busy_retry(
             child,
             "engine configuration commit",
@@ -267,6 +273,7 @@ def run_command_with_busy_retry(
         if not DEVICE_BUSY_PATTERN.search(command_output):
             return "".join(output)
 
+        # 保存/比较配置占用设备时等待重试，避免把临时 busy 当作任务失败。
         if attempt == max_retries:
             break
 
@@ -354,6 +361,7 @@ def main():
             )
 
             if cmd.strip().lower() == "engine configuration commit":
+                # 安全引擎提交有自己的完成状态，不能只看命令返回提示符。
                 command_output = wait_for_engine_commit_completion(
                     child,
                     command_output,

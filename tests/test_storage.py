@@ -65,7 +65,7 @@ class StorageMigrationTests(unittest.TestCase):
             self.assertNotIn("client_permissions", tables)
             self.assertNotIn("client_allowed_ips", tables)
             self.assertNotIn("subject_api_keys", tables)
-            self.assertIn("user_secret_keys", tables)
+            self.assertNotIn("user_secret_keys", tables)
             self.assertIn("offline_api_keys", tables)
             self.assertIn("offline_api_key_authorizations", tables)
 

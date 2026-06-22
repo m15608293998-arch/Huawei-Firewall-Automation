@@ -31,7 +31,6 @@ class Settings(BaseSettings):
         default_factory=lambda: project_root() / ".runtime" / "api" / "jobs.sqlite3"
     )
     auth_enabled: bool = True
-    legacy_user_secret_key_auth_enabled: bool = False
     development_subject: str = "api-placeholder"
     keycloak_server_url: str = "http://127.0.0.1:8080"
     keycloak_realm: str = "trade-access"

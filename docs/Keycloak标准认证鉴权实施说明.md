@@ -8,16 +8,10 @@
 Authorization: Bearer <keycloak_access_token>
 ```
 
-Keycloak 负责认证和基础角色，FastAPI 使用 Token 中稳定的 `sub` 查询 SQLite 中的动态业务权限与
-精确 IP。IP、端口和接口权限不写入 Token。
+Keycloak 负责认证和基础角色，FastAPI 使用 Token 中稳定的 `sub` 查询 SQLite 中的动态接口权限。
+IP、端口和接口权限不写入 Token。
 
-旧 `sk1.*` 服务、数据库表和管理 API 暂时保留，但默认配置为：
-
-```text
-TRADE_ACCESS_API_LEGACY_USER_SECRET_KEY_AUTH_ENABLED=false
-```
-
-因此业务 API 默认拒绝 `sk1.*`。
+旧 `sk1.*` 自定义 SK 已下线。后端不再生成、校验或提供管理员代用户创建旧 SK 的管理接口。
 
 普通用户还可以通过固定的`trade-access-offline` Confidential Client创建长期凭据：
 
@@ -35,7 +29,7 @@ Authorization: Bearer sk-<keycloak_offline_token>
 -> 获得管理员 Access Token
 -> FastAPI 验证 Token、管理员角色和本地管理权限
 -> 管理员搜索 Keycloak User
--> 按 User sub 保存 allow/deny/read 权限和精确 IP
+-> 按 User sub 保存 allow/deny/read 权限和启停状态
 
 普通用户访问 test-ui
 -> Keycloak Authorization Code Flow + PKCE
@@ -172,7 +166,7 @@ python3.12 scripts/configure_runtime.py \
 python3.12 scripts/run_services.py
 ```
 
-6. 打开 `http://192.168.6.38:8000/admin-ui`，登录并给普通用户保存权限和精确 IP。
+6. 打开 `http://192.168.6.38:8000/admin-ui`，登录并给普通用户保存接口权限和启停状态。
 
 ## 6. 普通用户调用
 
@@ -203,8 +197,8 @@ curl -sS \
 
 - FastAPI 验证 RS256 签名、`iss`、`aud`、`exp`、`iat` 和 `sub`。
 - 普通用户必须具有 `trade-access-user`，管理员必须具有 `trade-access-admin`。
-- 每次请求按 `sub` 读取本地接口权限和精确 IP。
-- 普通用户只能操作管理员分配的精确 IPv4 地址，掩码固定 `/32`。
+- 每次请求按 `sub` 读取本地接口权限。
+- 防火墙操作只接受合法 IPv4 单地址，掩码固定 `/32`。
 - 管理员页面只接受来自 `trade-access-admin-portal` 的管理员 Token。
 - Access Token 是 Bearer 凭据，泄露后可在过期前被重放，生产环境必须使用 HTTPS。
 - 不得在代理、应用日志或错误输出中记录 Access Token 和 Refresh Token。

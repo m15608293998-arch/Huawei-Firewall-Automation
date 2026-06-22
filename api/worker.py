@@ -27,6 +27,7 @@ class JobWorker:
         self.poll_interval = poll_interval
 
     def run_once(self) -> bool:
+        # claim_next_pending_job 已在存储层做原子抢占，这里只关心执行。
         job = self.storage.claim_next_pending_job(utc_now_iso())
         if job is None:
             return False
@@ -57,6 +58,7 @@ class JobWorker:
             final_status = JobStatus.successful.value
             error_message = result.error_message
 
+            # ansible-runner 的 status 和 rc 都要看，任何一个异常都算任务失败。
             if result.rc != 0 or result.status not in ("successful", "ok"):
                 final_status = JobStatus.failed.value
                 if not error_message:
@@ -117,6 +119,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
+    # worker 和 API 共用同一 SQLite 库，任务状态通过数据库交接。
     storage = JobStorage(settings.database_path)
     worker = JobWorker(storage, runner_service, args.poll_interval)
     print(

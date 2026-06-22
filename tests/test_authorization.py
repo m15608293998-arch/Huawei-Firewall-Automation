@@ -199,55 +199,6 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(principal.key_id, "offline-key-id")
         self.assertEqual(principal.permissions, ["firewall.allow"])
 
-    def test_user_secret_key_is_rejected_by_default(self) -> None:
-        credentials = HTTPAuthorizationCredentials(
-            scheme="Bearer",
-            credentials="sk1.0123456789abcdef0123456789abcdef.secret",
-        )
-
-        with self.assertRaises(HTTPException) as caught:
-            authenticate_request(credentials)
-
-        self.assertEqual(caught.exception.status_code, 401)
-        self.assertIn("disabled", str(caught.exception.detail))
-
-    def test_user_secret_key_compatibility_can_be_enabled(self) -> None:
-        credentials = HTTPAuthorizationCredentials(
-            scheme="Bearer",
-            credentials="sk1.0123456789abcdef0123456789abcdef.secret",
-        )
-        user = {
-            "subject_id": "human-user-subject",
-            "username": "employee-a",
-            "enabled": True,
-        }
-        record = {"key_id": "0123456789abcdef0123456789abcdef"}
-        with patch.object(
-            settings,
-            "legacy_user_secret_key_auth_enabled",
-            True,
-        ), patch(
-            "api.auth.user_secret_key_service.verify",
-            return_value=(record, user),
-        ), patch(
-            "api.auth.permission_storage.get_subject_permissions",
-            return_value=["firewall.allow"],
-        ), patch(
-            "api.auth.permission_storage.get_subject_allowed_ips",
-            return_value=["192.168.5.224"],
-        ):
-            principal = authenticate_request(credentials)
-
-        self.assertEqual(principal.subject_id, "human-user-subject")
-        self.assertEqual(principal.auth_type, "user_secret_key")
-        self.assertEqual(principal.key_id, record["key_id"])
-        self.assertEqual(principal.permissions, ["firewall.allow"])
-        self.assertEqual(principal.allowed_ips, ["192.168.5.224"])
-
-        with self.assertRaises(HTTPException) as caught:
-            require_trade_access_admin(principal)
-        self.assertEqual(caught.exception.status_code, 403)
-
     def test_permissions_are_loaded_by_stable_token_subject(self) -> None:
         claims = {
             "sub": "human-user-subject",
@@ -396,7 +347,7 @@ class AuthorizationTests(unittest.TestCase):
             require_identity_user_manage(admin_without_permission)
         self.assertEqual(caught.exception.status_code, 403)
 
-    def test_user_may_only_submit_an_assigned_single_ip(self) -> None:
+    def test_user_may_submit_any_valid_single_ip(self) -> None:
         authorize_trade_access_request(
             user_principal(),
             TradeAccessJobCreate(
@@ -406,16 +357,14 @@ class AuthorizationTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaises(HTTPException) as caught:
-            authorize_trade_access_request(
-                user_principal(),
-                TradeAccessJobCreate(
-                    action="allow",
-                    target_ip="192.168.66.23",
-                    ports=[443],
-                ),
-            )
-        self.assertEqual(caught.exception.status_code, 403)
+        authorize_trade_access_request(
+            user_principal(),
+            TradeAccessJobCreate(
+                action="allow",
+                target_ip="192.168.66.23",
+                ports=[443],
+            ),
+        )
 
         with self.assertRaises(HTTPException) as caught:
             authorize_trade_access_request(
@@ -453,15 +402,17 @@ class AuthorizationTests(unittest.TestCase):
                 }
             )
 
-    def test_admin_may_submit_a_network_target(self) -> None:
-        authorize_trade_access_request(
-            admin_principal(),
-            TradeAccessJobCreate(
-                action="deny",
-                target_ip="192.168.66.0",
-                mask=24,
-            ),
-        )
+    def test_admin_must_submit_a_single_ip(self) -> None:
+        with self.assertRaises(HTTPException) as caught:
+            authorize_trade_access_request(
+                admin_principal(),
+                TradeAccessJobCreate(
+                    action="deny",
+                    target_ip="192.168.66.0",
+                    mask=24,
+                ),
+            )
+        self.assertEqual(caught.exception.status_code, 403)
 
     def test_job_ownership_uses_stable_keycloak_subject(self) -> None:
         job = {"principal_id": "user-subject"}

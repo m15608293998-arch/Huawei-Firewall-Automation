@@ -76,7 +76,8 @@
     textarea { min-height: 82px; resize: vertical; }
     input:focus, select:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
     input::placeholder, textarea::placeholder { color: #9aa0aa; }
-    .row { display: grid; grid-template-columns: 1fr 110px; gap: 12px; }
+    .row { display: grid; grid-template-columns: 1fr 110px; gap: 12px; align-items: start; }
+    .row .field + .field { margin-top: 0; }
     .access-scope { margin-top: 16px; padding: 11px 13px; border-radius: 8px; background: var(--surface-soft); color: #505762; font-size: 13px; }
     .access-scope.ready { box-shadow: inset 3px 0 var(--success); }
     .access-scope.denied { box-shadow: inset 3px 0 var(--danger); }
@@ -229,13 +230,9 @@
               <label for="targetIp">目标 IP</label>
               <input id="targetIp" inputmode="decimal" placeholder="192.168.66.22">
             </div>
-            <div id="userTargetField" class="field hidden">
-              <label for="allowedTargetIp">管理员分配的 IP</label>
-              <select id="allowedTargetIp"></select>
-            </div>
             <div class="field">
               <label for="mask">掩码</label>
-              <input id="mask" type="number" min="0" max="32" value="32">
+              <input id="mask" type="number" min="0" max="32" value="32" disabled>
             </div>
           </div>
 
@@ -377,15 +374,15 @@
     const terminalStatuses = new Set(["successful", "failed", "canceled"]);
     const actionConfig = {
       allow_ip: {
-        endpoint: "/api/v1/trade-access/ip/allow",
+        endpoint: "/api/v1/trade-access/allow/ip",
         permissions: ["firewall.ip.allow", "firewall.allow"],
         needsPorts: false,
         submitText: "提交放行 IP",
         buttonClass: "primary",
-        description: "只放行目标 IP，不配置端口。适合先开放地址后进行 SSH 或连通性测试。",
+        description: "只放行目标 IP，不配置端口。",
       },
       allow_ports: {
-        endpoint: "/api/v1/trade-access/ports/allow",
+        endpoint: "/api/v1/trade-access/allow/ports",
         permissions: ["firewall.ports.allow", "firewall.allow"],
         needsPorts: true,
         submitText: "提交新增端口",
@@ -393,7 +390,7 @@
         description: "在已放行 IP 的基础上新增端口，不会覆盖或删除已有端口。",
       },
       deny_ports: {
-        endpoint: "/api/v1/trade-access/ports/deny",
+        endpoint: "/api/v1/trade-access/deny/ports",
         permissions: ["firewall.ports.deny", "firewall.deny"],
         needsPorts: true,
         submitText: "提交取消端口",
@@ -401,7 +398,7 @@
         description: "只取消填写的端口，目标 IP 仍保留在地址组中。",
       },
       deny_ip: {
-        endpoint: "/api/v1/trade-access/ip/deny",
+        endpoint: "/api/v1/trade-access/deny/ip",
         permissions: ["firewall.ip.deny", "firewall.deny"],
         needsPorts: false,
         submitText: "提交取消 IP",
@@ -441,8 +438,6 @@
       healthText: document.querySelector("#healthText"),
       accessScope: document.querySelector("#accessScope"),
       adminTargetField: document.querySelector("#adminTargetField"),
-      userTargetField: document.querySelector("#userTargetField"),
-      allowedTargetIp: document.querySelector("#allowedTargetIp"),
       mask: document.querySelector("#mask"),
       portsField: document.querySelector("#portsField"),
       submitAction: document.querySelector("#submitAction"),
@@ -549,30 +544,17 @@
         button.disabled = !hasActionPermission(button.dataset.action, profile);
       });
 
+      elements.adminTargetField.classList.remove("hidden");
+      elements.mask.value = "32";
+      elements.mask.disabled = true;
       if (profile.is_admin) {
         document.querySelector("#createApiKey").disabled = true;
-        elements.adminTargetField.classList.remove("hidden");
-        elements.userTargetField.classList.add("hidden");
-        elements.mask.disabled = false;
         renderActionDescription();
         updateSubmitAvailability();
         return;
       }
 
-      elements.adminTargetField.classList.add("hidden");
       document.querySelector("#createApiKey").disabled = false;
-      elements.userTargetField.classList.remove("hidden");
-      elements.mask.value = "32";
-      elements.mask.disabled = true;
-      elements.allowedTargetIp.replaceChildren();
-      profile.allowed_ips.forEach((ipAddress) => {
-        const option = document.createElement("option");
-        option.value = ipAddress;
-        option.textContent = ipAddress;
-        elements.allowedTargetIp.append(option);
-      });
-      const hasTargets = profile.allowed_ips.length > 0;
-      elements.allowedTargetIp.disabled = !hasTargets;
       renderActionDescription();
       updateSubmitAvailability();
     }
@@ -587,9 +569,7 @@
         return;
       }
       const operationDenied = !hasActionPermission(state.action);
-      const noAssignedTargets = !state.accessProfile.is_admin
-        && state.accessProfile.allowed_ips.length === 0;
-      elements.submitAction.disabled = operationDenied || noAssignedTargets;
+      elements.submitAction.disabled = operationDenied;
     }
 
     function hasAnyPermission(profile, permissions) {
@@ -617,11 +597,6 @@
       if (!state.accessProfile) {
         elements.accessScope.className = "access-scope";
         elements.accessScope.textContent = "正在读取 Keycloak 用户权限";
-        return;
-      }
-      if (!state.accessProfile.is_admin && state.accessProfile.allowed_ips.length === 0) {
-        elements.accessScope.className = "access-scope denied";
-        elements.accessScope.textContent = "管理员尚未分配可操作 IP，暂时无法提交防火墙操作。";
         return;
       }
       if (!hasActionPermission(state.action)) {
@@ -662,8 +637,8 @@
     function resetAccessProfile() {
       state.accessProfile = null;
       elements.adminTargetField.classList.remove("hidden");
-      elements.userTargetField.classList.add("hidden");
-      elements.mask.disabled = false;
+      elements.mask.value = "32";
+      elements.mask.disabled = true;
       elements.submitAction.disabled = true;
       elements.accessScope.className = "access-scope";
       elements.accessScope.textContent = "正在读取 Keycloak 用户权限";
@@ -961,13 +936,11 @@
     }
 
     function buildPayload() {
-      const targetIp = state.accessProfile && !state.accessProfile.is_admin
-        ? elements.allowedTargetIp.value
-        : document.querySelector("#targetIp").value.trim();
+      const targetIp = document.querySelector("#targetIp").value.trim();
       if (!targetIp) throw new Error("请输入目标 IP");
       const payload = {
         target_ip: targetIp,
-        mask: Number(document.querySelector("#mask").value || 32),
+        mask: 32,
       };
       const description = document.querySelector("#description").value.trim();
       const requestId = document.querySelector("#requestId").value.trim();
@@ -1025,7 +998,7 @@
       if (!hasJobReadPermission()) throw new Error("当前账号没有任务查询权限");
       const jobId = document.querySelector("#jobId").value.trim();
       if (!jobId) throw new Error("请输入 Job ID");
-      return request(`/api/v1/trade-access/jobs/${encodeURIComponent(jobId)}/events`);
+      return request(`/api/v1/trade-access/jobs/events/${encodeURIComponent(jobId)}`);
     }
 
     async function listJobs(displayResponse = true) {
@@ -1235,7 +1208,6 @@
     elements.submitAction.addEventListener("click", submitAction);
     document.querySelector("#clearForm").addEventListener("click", () => {
       ["targetIp", "ports", "description", "requestId"].forEach((id) => { document.querySelector(`#${id}`).value = ""; });
-      if (elements.allowedTargetIp.options.length) elements.allowedTargetIp.selectedIndex = 0;
       document.querySelector("#mask").value = "32";
     });
     document.querySelector("#getJob").addEventListener("click", () => getJob().catch(showLocalError));

@@ -22,7 +22,6 @@ from api.auth import (
     require_identity_user_manage,
     require_trade_access_user,
     offline_api_key_service,
-    user_secret_key_service,
 )
 from api.jobs import (
     create_job,
@@ -51,9 +50,6 @@ from api.schemas import (
     TradeAccessJobCreate,
     TradeAccessPortAllowRequest,
     TradeAccessPortDenyRequest,
-    UserSecretKeyCreate,
-    UserSecretKeyCreatedResponse,
-    UserSecretKeyResponse,
 )
 from api.permissions import (
     FIREWALL_ALLOW,
@@ -72,7 +68,6 @@ from api.keycloak_admin import (
     KeycloakAdminConfigurationError,
     KeycloakAdminError,
 )
-from api.user_secret_keys import UserSecretKeyError, UserSecretKeyNotFoundError
 from api.offline_api_keys import (
     OfflineApiKeyConfigurationError,
     OfflineApiKeyError,
@@ -88,6 +83,7 @@ app = FastAPI(
 )
 
 TEST_UI_PATH = Path(__file__).resolve().parent / "static" / "test_ui.html"
+# 页面内容启动时读入内存，生产环境改 HTML 后需要重启服务才会生效。
 TEST_UI_HTML = TEST_UI_PATH.read_text(encoding="utf-8")
 ADMIN_UI_PATH = Path(__file__).resolve().parent / "static" / "admin_ui.html"
 ADMIN_UI_HTML = ADMIN_UI_PATH.read_text(encoding="utf-8")
@@ -118,6 +114,7 @@ def healthz():
     response_model=OidcBrowserConfigResponse,
 )
 def get_oidc_browser_config(portal: str = Query(default="test", pattern="^(test|admin)$")):
+    # 普通测试页和管理员页使用不同的浏览器端 client，避免前端拿错登录入口。
     if portal == "admin":
         return {
             "issuer": settings.keycloak_issuer,
@@ -157,6 +154,7 @@ def get_current_trade_access(
 
 
 def raise_offline_api_key_error(exc: Exception) -> None:
+    # service 层只抛业务异常，HTTP 状态码统一在 API 边界转换。
     if isinstance(exc, OfflineApiKeyNotFoundError):
         code = status.HTTP_404_NOT_FOUND
     elif isinstance(
@@ -194,6 +192,7 @@ def authorize_offline_api_key(
 
 
 def _api_key_callback_html(payload: dict[str, object]) -> HTMLResponse:
+    # OAuth 回调页只负责把结果交给前端，避免把 api_key 留在 URL 或 referrer 里。
     serialized = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
     return HTMLResponse(
         (
@@ -289,15 +288,6 @@ def raise_admin_user_error(exc: Exception) -> None:
     raise HTTPException(status_code=code, detail=str(exc)) from exc
 
 
-def raise_user_secret_key_error(exc: Exception) -> None:
-    code = (
-        status.HTTP_404_NOT_FOUND
-        if isinstance(exc, UserSecretKeyNotFoundError)
-        else status.HTTP_400_BAD_REQUEST
-    )
-    raise HTTPException(status_code=code, detail=str(exc)) from exc
-
-
 @app.get("/api/v1/admin/users/status")
 def get_managed_user_status(
     principal: Principal = Depends(require_identity_user_manage),
@@ -353,59 +343,6 @@ def update_managed_user(
         raise_admin_user_error(exc)
 
 
-@app.get(
-    "/api/v1/admin/users/{subject_id}/secret-keys",
-    response_model=list[UserSecretKeyResponse],
-)
-def list_user_secret_keys(
-    subject_id: str,
-    principal: Principal = Depends(require_identity_user_manage),
-):
-    del principal
-    try:
-        return user_secret_key_service.list(subject_id)
-    except (UserSecretKeyError, UserSecretKeyNotFoundError) as exc:
-        raise_user_secret_key_error(exc)
-
-
-@app.post(
-    "/api/v1/admin/users/{subject_id}/secret-keys",
-    response_model=UserSecretKeyCreatedResponse,
-    status_code=201,
-)
-def create_user_secret_key(
-    subject_id: str,
-    request: UserSecretKeyCreate,
-    principal: Principal = Depends(require_identity_user_manage),
-):
-    try:
-        return user_secret_key_service.create(
-            subject_id=subject_id,
-            created_by=principal.subject_id,
-            label=request.label,
-            expires_in_days=request.expires_in_days,
-        )
-    except (UserSecretKeyError, UserSecretKeyNotFoundError) as exc:
-        raise_user_secret_key_error(exc)
-
-
-@app.delete(
-    "/api/v1/admin/users/{subject_id}/secret-keys/{key_id}",
-    status_code=204,
-)
-def revoke_user_secret_key(
-    subject_id: str,
-    key_id: str,
-    principal: Principal = Depends(require_identity_user_manage),
-):
-    del principal
-    try:
-        user_secret_key_service.revoke(subject_id, key_id)
-    except (UserSecretKeyError, UserSecretKeyNotFoundError) as exc:
-        raise_user_secret_key_error(exc)
-    return Response(status_code=204)
-
-
 @app.post(
     "/api/v1/trade-access/allow",
     response_model=JobCreateResponse,
@@ -415,13 +352,14 @@ def create_trade_access_allow_job(
     request: TradeAccessAllowRequest,
     principal: Principal = Depends(require_firewall_allow),
 ):
+    # 兼容老的一键放行接口，实际落库后仍由 worker 串行执行。
     job_request = TradeAccessJobCreate(action="allow", **request.model_dump())
     authorize_trade_access_request(principal, job_request)
     return create_job(job_request, principal, FIREWALL_ALLOW)
 
 
 @app.post(
-    "/api/v1/trade-access/ip/allow",
+    "/api/v1/trade-access/allow/ip",
     response_model=JobCreateResponse,
     status_code=202,
 )
@@ -435,7 +373,7 @@ def create_trade_access_ip_allow_job(
 
 
 @app.post(
-    "/api/v1/trade-access/ports/allow",
+    "/api/v1/trade-access/allow/ports",
     response_model=JobCreateResponse,
     status_code=202,
 )
@@ -449,7 +387,7 @@ def create_trade_access_ports_allow_job(
 
 
 @app.post(
-    "/api/v1/trade-access/ports/deny",
+    "/api/v1/trade-access/deny/ports",
     response_model=JobCreateResponse,
     status_code=202,
 )
@@ -463,7 +401,7 @@ def create_trade_access_ports_deny_job(
 
 
 @app.post(
-    "/api/v1/trade-access/ip/deny",
+    "/api/v1/trade-access/deny/ip",
     response_model=JobCreateResponse,
     status_code=202,
 )
@@ -500,6 +438,7 @@ def list_trade_access_jobs(
     job_status: JobStatus | None = Query(default=None, alias="status"),
     principal: Principal = Depends(require_firewall_job_read),
 ):
+    # 普通用户只能看到自己的任务，管理员审计接口走 include_all。
     return list_jobs(
         principal=principal,
         limit=limit,
@@ -522,7 +461,7 @@ def get_trade_access_job(
 
 
 @app.get(
-    "/api/v1/trade-access/jobs/{job_id}/events",
+    "/api/v1/trade-access/jobs/events/{job_id}",
     response_model=JobEventsResponse,
 )
 def get_trade_access_job_events(
@@ -567,7 +506,7 @@ def get_any_trade_access_job(
 
 
 @app.get(
-    "/api/v1/admin/trade-access/jobs/{job_id}/events",
+    "/api/v1/admin/trade-access/jobs/events/{job_id}",
     response_model=JobEventsResponse,
 )
 def get_any_trade_access_job_events(

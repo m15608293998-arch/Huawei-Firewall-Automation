@@ -100,11 +100,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(job["target_ip"], "192.168.66.22")
         self.assertEqual(job["ports"], [22, 443, 12001])
 
-    def test_user_secret_key_id_is_recorded_in_job_audit(self) -> None:
+    def test_offline_api_key_id_is_recorded_in_job_audit(self) -> None:
         sk_user = self.user.model_copy(
             update={
-                "auth_type": "user_secret_key",
-                "key_id": "0123456789abcdef0123456789abcdef",
+                "auth_type": "offline_api_key",
+                "key_id": "offline-api-key-id",
             }
         )
         job = self.create_job(sk_user)
@@ -252,14 +252,21 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"isLoginFailure", response.body)
         self.assertIn("当前账号没有任务查询权限".encode("utf-8"), response.body)
         self.assertIn(b"hasJobReadPermission", response.body)
-        self.assertIn(b"/api/v1/trade-access/ip/allow", response.body)
-        self.assertIn(b"/api/v1/trade-access/ports/allow", response.body)
-        self.assertIn(b"/api/v1/trade-access/ports/deny", response.body)
-        self.assertIn(b"/api/v1/trade-access/ip/deny", response.body)
+        self.assertIn(b"/api/v1/trade-access/allow/ip", response.body)
+        self.assertIn(b"/api/v1/trade-access/allow/ports", response.body)
+        self.assertIn(b"/api/v1/trade-access/deny/ports", response.body)
+        self.assertIn(b"/api/v1/trade-access/deny/ip", response.body)
+        self.assertIn(b"/api/v1/trade-access/jobs/events/", response.body)
+        self.assertNotIn(b"/api/v1/trade-access/ip/allow", response.body)
+        self.assertNotIn(b"/api/v1/trade-access/ports/allow", response.body)
+        self.assertNotIn(b"/api/v1/trade-access/ports/deny", response.body)
+        self.assertNotIn(b"/api/v1/trade-access/ip/deny", response.body)
         self.assertIn("只放行目标 IP，不配置端口".encode("utf-8"), response.body)
         self.assertIn("取消 IP 前必须先删除此 IP 的所有端口".encode("utf-8"), response.body)
         self.assertIn("完全撤销".encode("utf-8"), response.body)
         self.assertNotIn(b"profile.allowed_ips.join", response.body)
+        self.assertNotIn(b"allowedTargetIp", response.body)
+        self.assertNotIn("管理员分配的 IP".encode("utf-8"), response.body)
         self.assertIn("上一页".encode("utf-8"), response.body)
         self.assertIn("下一页".encode("utf-8"), response.body)
         self.assertIn(b"jobsPaginationMeta", response.body)
@@ -278,16 +285,17 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b' timeZone:"Asia/Shanghai"', response.body)
         self.assertIn("刷新列表".encode("utf-8"), response.body)
         self.assertNotIn("机器 Client".encode("utf-8"), response.body)
-        self.assertIn(b"generateUserSk", response.body)
-        self.assertIn(b"userSkDialog", response.body)
-        self.assertIn(b'<section class="subsection hidden"', response.body)
-        self.assertIn(b"showModal", response.body)
-        self.assertIn("完整密钥仅显示一次".encode("utf-8"), response.body)
-        self.assertIn(b"secret-keys", response.body)
+        self.assertNotIn(b"generateUserSk", response.body)
+        self.assertNotIn(b"userSkDialog", response.body)
+        self.assertNotIn(b"showModal", response.body)
+        self.assertNotIn(b"secret-keys", response.body)
         self.assertIn(b'font-family:"IBM Plex Sans","Noto Sans SC"', response.body)
         self.assertIn(b"saveFeedback", response.body)
         self.assertIn("正在保存用户授权".encode("utf-8"), response.body)
         self.assertIn("保存成功，授权已立即生效".encode("utf-8"), response.body)
+        self.assertNotIn(b"userAllowedIps", response.body)
+        self.assertNotIn("允许操作的精确 IP".encode("utf-8"), response.body)
+        self.assertNotIn("IP 数量".encode("utf-8"), response.body)
 
     def test_job_detail_times_are_serialized_as_china_standard_time(self) -> None:
         response = JobDetailResponse.model_validate(

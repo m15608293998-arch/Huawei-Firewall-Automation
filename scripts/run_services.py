@@ -19,6 +19,7 @@ def stop_processes(processes: list[subprocess.Popen[bytes]]) -> None:
         if process.poll() is None:
             process.terminate()
 
+    # 先给子进程正常退出时间，超时后再 kill，避免残留 worker 或 uvicorn。
     deadline = time.monotonic() + 10
     for process in processes:
         if process.poll() is not None:
@@ -96,6 +97,7 @@ def main() -> int:
     processes: list[tuple[str, subprocess.Popen[bytes]]] = []
     try:
         for name, command in commands:
+            # 两个进程共用同一环境文件，API 收请求，worker 消费数据库任务。
             process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=os.environ.copy())
             processes.append((name, process))
             print(

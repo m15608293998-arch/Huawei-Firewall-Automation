@@ -36,6 +36,7 @@ class AnsibleRunnerService:
         local_tmp_dir = Path(str(job["local_tmp_dir"]))
         local_tmp_dir.mkdir(parents=True, exist_ok=True)
 
+        # API 只组装业务请求，真正的华为设备操作仍交给原 playbook/role 链路。
         extravars = {
             "access_request": {
                 "action": job["action"],
@@ -46,6 +47,7 @@ class AnsibleRunnerService:
                 "description": job.get("description") or "trade-server-{0}".format(job["target_ip"]),
             },
             "local_tmp_dir": str(local_tmp_dir),
+            # helper 脚本使用当前 API 解释器，避免系统 python 版本不一致。
             "local_python_interpreter": sys.executable,
         }
         if job["action"] in {"allow", "allow_ports", "deny_ports"}:
@@ -88,6 +90,7 @@ class AnsibleRunnerService:
             return []
 
         def event_counter(event_file: Path) -> int:
+            # ansible-runner 事件文件名前缀是递增序号，用它保持输出顺序。
             try:
                 return int(event_file.name.split("-", 1)[0])
             except ValueError:
@@ -99,6 +102,7 @@ class AnsibleRunnerService:
                 with event_file.open("r", encoding="utf-8") as handle:
                     payload = json.load(handle)
             except Exception:
+                # 单个坏事件文件不影响接口返回已有事件。
                 continue
 
             event_data = payload.get("event_data") or {}

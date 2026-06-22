@@ -40,6 +40,7 @@ def extract_application_config(
     mask: int | None = None,
 ) -> dict[str, Any]:
     normalized_text = normalize_text(text)
+    # 同时兼容配置视图和 display 输出，两种格式里应用名称/端口字段不完全一样。
     target_name_pattern = _application_name_pattern(base_app_name)
     declaration_pattern = re.compile(r"^user-defined-application\s+name\s+(\S+)$")
     group_pattern = re.compile(r"^add\s+application\s+(\S+)$")
@@ -60,6 +61,7 @@ def extract_application_config(
         if not line:
             continue
 
+        # 解析到非目标应用时清空上下文，避免后续端口/IP 记到上一条目标应用上。
         declaration_match = declaration_pattern.match(line)
         if declaration_match:
             name = declaration_match.group(1)
@@ -149,6 +151,7 @@ def extract_application_config(
     all_target_ips_match = True
     invalid_target_applications = []
     if target_ip is not None and mask is not None:
+        # 删除端口前确认应用对象仍指向目标 IP，避免改到同名但不同地址的对象。
         expected_pair = {"ip": target_ip, "mask": int(mask)}
         for application in application_list:
             pairs = application["ip_addresses"]
@@ -191,6 +194,7 @@ def build_application_plan(
     application_capacity = rule_port_limit * application_rule_limit
 
     units = []
+    # Huawei 一个应用对象能容纳的端口有限，超出后按 base、base_2... 分片。
     for offset in range(0, len(effective), application_capacity):
         index = offset // application_capacity + 1
         ports = effective[offset : offset + application_capacity]

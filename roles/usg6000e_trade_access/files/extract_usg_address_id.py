@@ -33,6 +33,7 @@ def main():
 
     # 只匹配真正的 address 成员行：
     # address 190 192.168.66.13 mask 32 description xxx
+    # 这里不做模糊匹配，避免把描述或别的 IP 输出误当成地址对象。
     pattern = re.compile(
         r"\baddress\s+(\d+)\s+"
         + re.escape(args.ip)

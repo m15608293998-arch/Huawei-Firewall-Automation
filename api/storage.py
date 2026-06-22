@@ -44,6 +44,7 @@ class JobStorage:
     def initialize(self) -> None:
         with self._connect() as conn:
             conn.execute("pragma journal_mode = wal")
+            # SQLite 没有独立迁移工具，这里用 create + ensure_column 做轻量升级。
             conn.execute(
                 """
                 create table if not exists jobs (
@@ -122,26 +123,6 @@ class JobStorage:
             )
             conn.execute(
                 """
-                create table if not exists user_secret_keys (
-                    key_id text primary key,
-                    subject_id text not null,
-                    label text,
-                    key_hash text not null,
-                    key_prefix text not null,
-                    created_by text not null,
-                    created_at text not null,
-                    expires_at text not null,
-                    last_used_at text,
-                    revoked_at text
-                )
-                """
-            )
-            conn.execute(
-                "create index if not exists user_secret_keys_subject_idx "
-                "on user_secret_keys (subject_id, created_at)"
-            )
-            conn.execute(
-                """
                 create table if not exists offline_api_keys (
                     key_id text primary key,
                     subject_id text not null,
@@ -181,6 +162,7 @@ class JobStorage:
                 where permission = 'identity.client.manage'
                 """
             )
+            # 旧权限名迁移到新的用户管理权限，避免历史库升级后权限丢失。
             conn.execute(
                 "delete from subject_permissions "
                 "where permission = 'identity.client.manage'"
@@ -211,6 +193,7 @@ class JobStorage:
         columns = JOB_COLUMNS
         placeholders = ", ".join(["?"] * len(columns))
         column_sql = ", ".join(columns)
+        # ports 是结构化字段，落 SQLite 时统一序列化为 JSON。
         values = [
             json.dumps(job.get(column) or []) if column == "ports" else job.get(column)
             for column in columns
@@ -255,6 +238,7 @@ class JobStorage:
             where_sql = " where " + " and ".join(conditions)
         values.extend([limit, offset])
 
+        # 条件只来自白名单参数，值仍全部走占位符绑定。
         with self._connect() as conn:
             rows = conn.execute(
                 "select {0} from jobs{1} order by created_at desc, job_id desc limit ? offset ?".format(
@@ -269,6 +253,7 @@ class JobStorage:
         """Atomically claim the oldest pending job for one worker."""
         with self._lock:
             with self._connect() as conn:
+                # begin immediate 抢写锁，保证多个 worker 不会拿到同一个 pending job。
                 conn.execute("begin immediate")
                 row = conn.execute(
                     """
@@ -443,6 +428,7 @@ class JobStorage:
         with self._lock:
             with self._connect() as conn:
                 conn.execute("begin immediate")
+                # 用户资料和权限/IP 列表在一个事务里更新，避免前端看到半更新状态。
                 conn.execute(
                     """
                     insert into managed_users (
@@ -519,94 +505,6 @@ class JobStorage:
             ).fetchall()
         return [self._managed_user_record(row) for row in rows]
 
-    def create_user_secret_key(self, record: dict[str, Any]) -> bool:
-        columns = (
-            "key_id",
-            "subject_id",
-            "label",
-            "key_hash",
-            "key_prefix",
-            "created_by",
-            "created_at",
-            "expires_at",
-            "last_used_at",
-            "revoked_at",
-        )
-        with self._lock:
-            with self._connect() as conn:
-                active = conn.execute(
-                    """
-                    select 1
-                    from user_secret_keys
-                    where subject_id = ?
-                      and revoked_at is null
-                      and expires_at > ?
-                    limit 1
-                    """,
-                    (record["subject_id"], record["created_at"]),
-                ).fetchone()
-                if active is not None:
-                    return False
-                conn.execute(
-                    "insert into user_secret_keys ({0}) values ({1})".format(
-                        ", ".join(columns),
-                        ", ".join(["?"] * len(columns)),
-                    ),
-                    [record.get(column) for column in columns],
-                )
-                conn.commit()
-        return True
-
-    def get_user_secret_key(self, key_id: str) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "select * from user_secret_keys where key_id = ?",
-                (key_id,),
-            ).fetchone()
-        return dict(row) if row is not None else None
-
-    def list_user_secret_keys(self, subject_id: str) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                select key_id, subject_id, label, key_prefix, created_by,
-                       created_at, expires_at, last_used_at, revoked_at
-                from user_secret_keys
-                where subject_id = ?
-                order by created_at desc
-                """,
-                (subject_id,),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def touch_user_secret_key(self, key_id: str, used_at: str) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute(
-                    "update user_secret_keys set last_used_at = ? where key_id = ?",
-                    (used_at, key_id),
-                )
-                conn.commit()
-
-    def revoke_user_secret_key(
-        self,
-        subject_id: str,
-        key_id: str,
-        revoked_at: str,
-    ) -> bool:
-        with self._lock:
-            with self._connect() as conn:
-                cursor = conn.execute(
-                    """
-                    update user_secret_keys
-                    set revoked_at = ?
-                    where subject_id = ? and key_id = ? and revoked_at is null
-                    """,
-                    (revoked_at, subject_id, key_id),
-                )
-                conn.commit()
-        return cursor.rowcount > 0
-
     def save_offline_api_key_authorization(self, record: dict[str, Any]) -> None:
         with self._lock:
             with self._connect() as conn:
@@ -640,6 +538,7 @@ class JobStorage:
         with self._lock:
             with self._connect() as conn:
                 conn.execute("begin immediate")
+                # OAuth state 读出后立即删除，回调重放会自然失败。
                 row = conn.execute(
                     "select * from offline_api_key_authorizations where state_hash = ?",
                     (state_hash,),
@@ -774,6 +673,7 @@ class JobStorage:
         allowed_ips: list[str],
         updated_at: str,
     ) -> None:
+        # 权限列表规模很小，整表替换比做差量更新更直接。
         conn.execute(
             "delete from subject_permissions where subject_id = ?",
             (subject_id,),

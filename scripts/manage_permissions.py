@@ -28,6 +28,7 @@ ADMIN_PROFILE = USER_PROFILE | {
 
 def selected_permissions(args: argparse.Namespace) -> list[str]:
     permissions = set(args.permission or [])
+    # profile 是快捷模板，仍然会经过 validate_permission 做统一校验。
     if args.profile == "user":
         permissions.update(USER_PROFILE)
     elif args.profile == "admin":
@@ -79,6 +80,7 @@ def main() -> int:
         allowed_ips = selected_ips(args)
         if not permissions and not allowed_ips:
             parser.error("grant requires --profile, --permission, or --ip")
+        # 普通用户必须绑定具体 IP，防止误发一个没有范围限制的账号。
         if args.profile == "user" and not allowed_ips:
             parser.error("grant --profile user requires at least one --ip")
         for permission in permissions:

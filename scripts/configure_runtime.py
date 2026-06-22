@@ -55,9 +55,9 @@ def main() -> int:
     if not offline_client_secret:
         parser.error("Offline API Key Client Secret must not be empty")
 
+    # 只生成 API 进程需要的环境变量，设备登录密钥仍由 Ansible 配置负责。
     values = {
         "TRADE_ACCESS_API_AUTH_ENABLED": "true",
-        "TRADE_ACCESS_API_LEGACY_USER_SECRET_KEY_AUTH_ENABLED": "false",
         "TRADE_ACCESS_API_KEYCLOAK_SERVER_URL": args.keycloak_server_url.rstrip("/"),
         "TRADE_ACCESS_API_KEYCLOAK_REALM": args.realm,
         "TRADE_ACCESS_API_KEYCLOAK_CLIENT_ID": args.resource_client_id,
@@ -82,6 +82,7 @@ def main() -> int:
     temporary = output.with_suffix(output.suffix + ".tmp")
     temporary.write_text(content, encoding="utf-8")
     os.chmod(temporary, 0o600)
+    # 先写临时文件再 replace，避免服务读到半截 env 文件。
     temporary.replace(output)
     os.chmod(output, 0o600)
 

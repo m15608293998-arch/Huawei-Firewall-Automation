@@ -20,6 +20,7 @@ def create_job(
     permission_code: str | None = None,
 ) -> dict[str, Any]:
     job_id = str(uuid.uuid4())
+    # 每个任务使用独立临时目录和 artifact 目录，方便失败后按 job_id 排查。
     local_tmp_dir = str(settings.job_tmp_root / job_id)
     artifact_dir = str(settings.runner_private_data_dir / "artifacts" / job_id)
 
@@ -80,6 +81,7 @@ def list_jobs(
     job_status: str | None,
     include_all: bool = False,
 ) -> list[dict[str, Any]]:
+    # 管理端传 include_all；普通端始终按 principal_id 收敛。
     principal_id = None if include_all else principal.subject_id
     return storage.list_jobs(
         limit=limit,

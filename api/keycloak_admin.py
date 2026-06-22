@@ -83,6 +83,7 @@ class KeycloakAdminClient:
         removable = [
             role for role in current_roles if role.get("name") in managed_role_names
         ]
+        # 这个系统只管理 user/admin 两个角色，其他 Keycloak 角色不能被误删。
         if removable:
             response = self._admin_request("DELETE", role_path, json=removable)
             self._require_status(response, {204}, "remove old user role")
@@ -188,6 +189,7 @@ class KeycloakAdminClient:
                 raise KeycloakAdminError("Unable to reach Keycloak Admin API.") from exc
             if response.status_code != 401 or attempt == 1:
                 return response
+            # token 可能刚好过期，清缓存后重试一次即可。
             with self._lock:
                 self._access_token = None
                 self._token_usable_until = 0.0
@@ -228,6 +230,7 @@ class KeycloakAdminClient:
         except (TypeError, ValueError):
             usable_for = 30.0
         with self._lock:
+            # 提前 30 秒过期，减少临界点请求拿到 401 的概率。
             self._access_token = token
             self._token_usable_until = time.monotonic() + usable_for
         return token
