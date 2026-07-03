@@ -138,7 +138,7 @@ class RoleStaticTests(unittest.TestCase):
 
     def test_snapshot_workflow_is_read_only(self) -> None:
         paths = [
-            PROJECT_ROOT / "playbooks/trade_server_snapshot.yml",
+            PROJECT_ROOT / "playbooks/trade_server_access.yml",
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot.yml",
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot/main.yml",
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot/address_vsystem.yml",
@@ -153,6 +153,13 @@ class RoleStaticTests(unittest.TestCase):
         self.assertNotIn("undo ", combined)
         self.assertNotIn("engine configuration commit", combined)
         self.assertNotIn("\nsave\n", combined)
+
+    def test_access_playbook_is_single_role_entrypoint(self) -> None:
+        playbook = (
+            PROJECT_ROOT / "playbooks/trade_server_access.yml"
+        ).read_text()
+        self.assertIn("tasks_from: \"{{ trade_access_tasks_from | default('main') }}\"", playbook)
+        self.assertFalse((PROJECT_ROOT / "playbooks/trade_server_snapshot.yml").exists())
 
 
 if __name__ == "__main__":

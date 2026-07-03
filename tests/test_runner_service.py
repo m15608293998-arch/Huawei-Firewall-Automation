@@ -101,6 +101,8 @@ class RunnerServiceTests(unittest.TestCase):
 
         self.assertEqual(result.rc, 0)
         self.assertEqual(result.payload["items"], [])
+        self.assertEqual(captured_calls[0]["playbook"], str(settings.project_root / settings.playbook_path))
+        self.assertEqual(captured_calls[0]["extravars"]["trade_access_tasks_from"], "snapshot")
         self.assertEqual(captured_calls[0]["extravars"]["snapshot_mode"], "ips")
         self.assertIn("firewall_ips_snapshot.json", captured_calls[0]["extravars"]["snapshot_output_path"])
 

@@ -1,7 +1,11 @@
 ---
-- name: Manage trade server access on Huawei USG6000E
+- name: Run trade access automation on Huawei USG6000E
   hosts: localhost
   gather_facts: false
+  connection: local
 
-  roles:
-    - usg6000e_trade_access
+  tasks:
+    - name: Run selected trade access role task set
+      ansible.builtin.include_role:
+        name: usg6000e_trade_access
+        tasks_from: "{{ trade_access_tasks_from | default('main') }}"

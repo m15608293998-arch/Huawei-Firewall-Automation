@@ -125,7 +125,7 @@ class AnsibleRunnerService:
             )
 
         project_root = settings.project_root
-        playbook = str(project_root / settings.snapshot_playbook_path)
+        playbook = str(project_root / settings.playbook_path)
         private_data_dir = settings.runner_private_data_dir
         private_data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -139,6 +139,7 @@ class AnsibleRunnerService:
         extravars = {
             "local_tmp_dir": str(local_tmp_dir),
             "local_python_interpreter": sys.executable,
+            "trade_access_tasks_from": "snapshot",
             "snapshot_mode": snapshot_mode,
             "snapshot_output_path": str(snapshot_output_path),
         }
