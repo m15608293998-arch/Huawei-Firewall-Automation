@@ -24,6 +24,22 @@ def read_text(path: str | None) -> str:
     return Path(path).read_text(encoding="utf-8", errors="ignore")
 
 
+def extract_cli_file_section(text: str, cli_file: str | None) -> str:
+    if not cli_file:
+        return text
+    marker_pattern = re.compile(r"^===== CLI FILE: (.+?) =====$", re.MULTILINE)
+    matches = list(marker_pattern.finditer(text))
+    if not matches:
+        return text
+    for index, match in enumerate(matches):
+        if match.group(1).strip() != cli_file:
+            continue
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        return text[start:end]
+    return ""
+
+
 def valid_ipv4(value: str) -> str | None:
     try:
         return str(ipaddress.IPv4Address(value))
@@ -74,7 +90,7 @@ def parse_address_inventory(text: str) -> dict[str, int]:
 
 
 def parse_application_config(text: str, prefix: str) -> dict[str, Any]:
-    declaration_pattern = re.compile(r"^user-defined-application\s+name\s+(\S+)$")
+    declaration_prefix = "user-defined-application name "
     display_header_pattern = re.compile(r"^Application\s+(\S+)\s+Information:$")
     group_pattern = re.compile(r"^add\s+application\s+(\S+)$")
     config_ip_pattern = re.compile(r"^ip-address\s+(\S+)\s+(\d+)$")
@@ -105,9 +121,8 @@ def parse_application_config(text: str, prefix: str) -> dict[str, Any]:
         if not line:
             continue
 
-        declaration_match = declaration_pattern.match(line)
-        if declaration_match:
-            name = declaration_match.group(1)
+        if line.startswith(declaration_prefix):
+            name = line[len(declaration_prefix) :].strip().strip('"')
             if application_ip_from_name(name, prefix):
                 object_names.add(name)
                 ensure_application(name)
@@ -219,7 +234,9 @@ def build_address_state(address_sources: list[dict[str, str]]) -> dict[str, Any]
     vsystems = [source["vsystem"] for source in address_sources]
     by_vsystem: dict[str, dict[str, int]] = {}
     for source in address_sources:
-        by_vsystem[source["vsystem"]] = parse_address_inventory(read_text(source["path"]))
+        source_text = read_text(source["path"])
+        source_text = extract_cli_file_section(source_text, source.get("cli_file"))
+        by_vsystem[source["vsystem"]] = parse_address_inventory(source_text)
     return {"vsystems": vsystems, "by_vsystem": by_vsystem}
 
 

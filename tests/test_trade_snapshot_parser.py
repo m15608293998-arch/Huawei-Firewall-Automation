@@ -152,6 +152,42 @@ class TradeSnapshotParserTests(unittest.TestCase):
         )
         self.assertEqual(port_payload["items"][0]["port"], 12001)
 
+    def test_combined_address_cli_output_is_split_by_cli_file_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            combined = self.write_file(
+                root,
+                "address_inventory_all.out",
+                "===== CLI FILE: /tmp/query_public.cli =====\n"
+                "address 1 192.168.66.22 mask 32\n"
+                "===== CLI FILE: /tmp/query_private.cli =====\n"
+                "address 2 192.168.66.44 mask 32\n",
+            )
+            payload = snapshot_parser.build_ip_snapshot(
+                [
+                    {
+                        "vsystem": "public",
+                        "path": combined,
+                        "cli_file": "/tmp/query_public.cli",
+                    },
+                    {
+                        "vsystem": "private",
+                        "path": combined,
+                        "cli_file": "/tmp/query_private.cli",
+                    },
+                ]
+            )
+
+        by_ip = {item["target_ip"]: item for item in payload["items"]}
+        self.assertEqual(
+            by_ip["192.168.66.22"]["address_presence"],
+            {"public": True, "private": False},
+        )
+        self.assertEqual(
+            by_ip["192.168.66.44"]["address_presence"],
+            {"public": False, "private": True},
+        )
+
     def test_group_missing_is_reported_per_application(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -176,6 +212,43 @@ class TradeSnapshotParserTests(unittest.TestCase):
 
         self.assertEqual(payload["items"][0]["state"], "group_missing")
         self.assertFalse(payload["items"][0]["in_application_group"])
+
+    def test_invalid_application_declaration_resets_current_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            public = self.write_file(root, "public.out", "address 1 192.168.66.22 mask 32\n")
+            internet = self.write_file(root, "internet.out", "address 2 192.168.66.22 mask 32\n")
+            private = self.write_file(root, "private.out", "address 3 192.168.66.22 mask 32\n")
+            full_config = (
+                "user-defined-application name UD_TS_192.168.66.22\n"
+                " rule name 1\n"
+                "  ip-address 192.168.66.22 32\n"
+                "  port 12001\n"
+                "user-defined-application name \"UD_TS_ 192.168.66.23\"\n"
+                " rule name 1\n"
+                "  ip-address 192.168.66.23 32\n"
+                "  port 12002\n"
+                "application-group name UD_TradeGroup_Internet\n"
+                " add application UD_TS_192.168.66.22\n"
+            )
+
+            payload = snapshot_parser.build_port_snapshot(
+                [
+                    {"vsystem": "public", "path": public},
+                    {"vsystem": "Internet", "path": internet},
+                    {"vsystem": "private", "path": private},
+                ],
+                full_config,
+                "",
+                full_config,
+                "UD_TS_",
+                "private",
+                "UD_TradeGroup_Internet",
+            )
+
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertEqual(payload["items"][0]["target_ip"], "192.168.66.22")
+        self.assertEqual(payload["items"][0]["port"], 12001)
 
 
 if __name__ == "__main__":

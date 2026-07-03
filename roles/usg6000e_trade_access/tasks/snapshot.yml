@@ -91,6 +91,42 @@
   loop_control:
     loop_var: address_context
 
+- name: Render application full snapshot query
+  ansible.builtin.template:
+    src: query_application_full_inventory.cli.j2
+    dest: "{{ local_tmp_dir }}/query_application_full_inventory.cli"
+    mode: "0600"
+  changed_when: false
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Query firewall snapshot CLI files in one SSH session
+  ansible.builtin.command:
+    argv: >-
+      {{
+        firewall_cli_command_prefix
+        + ['--cli-files']
+        + (snapshot_address_sources | map(attribute='cli_file') | list)
+        + (
+          [local_tmp_dir ~ '/query_application_full_inventory.cli']
+          if resolved_snapshot_mode in ['snapshot', 'ports']
+          else []
+        )
+      }}
+  environment: "{{ firewall_cli_environment }}"
+  register: snapshot_cli_result
+  changed_when: false
+  failed_when:
+    - snapshot_cli_result.rc != 0 or
+      'Unrecognized command' in snapshot_cli_result.stdout or
+      'Too many parameters' in snapshot_cli_result.stdout
+
+- name: Save combined address-set snapshot output
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/address_inventory_all.out"
+    mode: "0600"
+    content: "{{ snapshot_cli_result.stdout }}"
+  changed_when: false
+
 - name: Build firewall IP snapshot JSON
   ansible.builtin.command:
     argv:
@@ -109,113 +145,11 @@
   failed_when: firewall_snapshot_result.rc != 0
   when: resolved_snapshot_mode == 'ips'
 
-- name: Render application object snapshot query
-  ansible.builtin.template:
-    src: query_application_inventory_all.cli.j2
-    dest: "{{ local_tmp_dir }}/query_application_inventory_all.cli"
-    mode: "0600"
-  changed_when: false
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
-
-- name: Query application object snapshot
-  ansible.builtin.command:
-    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_inventory_all.cli'] }}"
-  environment: "{{ firewall_cli_environment }}"
-  register: application_inventory_snapshot_result
-  changed_when: false
-  failed_when:
-    - application_inventory_snapshot_result.rc != 0 or
-      'Unrecognized command' in application_inventory_snapshot_result.stdout or
-      'Too many parameters' in application_inventory_snapshot_result.stdout
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
-
-- name: Save application object snapshot output
+- name: Save application full snapshot output
   ansible.builtin.copy:
-    dest: "{{ local_tmp_dir }}/application_inventory_all.out"
+    dest: "{{ local_tmp_dir }}/application_full_inventory.out"
     mode: "0600"
-    content: "{{ application_inventory_snapshot_result.stdout }}"
-  changed_when: false
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
-
-- name: Discover application objects for detail query
-  ansible.builtin.command:
-    argv:
-      - "{{ local_python_interpreter | default('python3.12') }}"
-      - "{{ role_path }}/files/extract_usg_trade_snapshot.py"
-      - "--mode"
-      - "discover"
-      - "--application-inventory-file"
-      - "{{ local_tmp_dir }}/application_inventory_all.out"
-      - "--application-prefix"
-      - "{{ user_defined_application.name_prefix }}"
-  register: application_snapshot_discovery_result
-  changed_when: false
-  failed_when: application_snapshot_discovery_result.rc != 0
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
-
-- name: Set application objects to query
-  ansible.builtin.set_fact:
-    application_names_to_query: "{{ (application_snapshot_discovery_result.stdout | from_json).object_names }}"
-  changed_when: false
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
-
-- name: Render application detail snapshot queries
-  ansible.builtin.template:
-    src: query_application_details.cli.j2
-    dest: "{{ local_tmp_dir }}/query_application_details_all.cli"
-    mode: "0600"
-  when:
-    - resolved_snapshot_mode in ['snapshot', 'ports']
-    - (application_names_to_query | default([])) | length > 0
-  changed_when: false
-
-- name: Query application detail snapshot in one SSH session
-  ansible.builtin.command:
-    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_details_all.cli'] }}"
-  environment: "{{ firewall_cli_environment }}"
-  register: application_details_snapshot_result
-  changed_when: false
-  failed_when:
-    - application_details_snapshot_result.rc != 0 or
-      'Unrecognized command' in application_details_snapshot_result.stdout or
-      'Too many parameters' in application_details_snapshot_result.stdout
-  when:
-    - resolved_snapshot_mode in ['snapshot', 'ports']
-    - (application_names_to_query | default([])) | length > 0
-
-- name: Save application detail snapshot output
-  ansible.builtin.copy:
-    dest: "{{ local_tmp_dir }}/application_details_all.out"
-    mode: "0600"
-    content: "{{ application_details_snapshot_result.stdout | default('') }}"
-  changed_when: false
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
-
-- name: Render application group snapshot query
-  ansible.builtin.template:
-    src: query_application_group_inventory.cli.j2
-    dest: "{{ local_tmp_dir }}/query_application_group_inventory.cli"
-    mode: "0600"
-  changed_when: false
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
-
-- name: Query application group snapshot
-  ansible.builtin.command:
-    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_group_inventory.cli'] }}"
-  environment: "{{ firewall_cli_environment }}"
-  register: application_group_snapshot_result
-  changed_when: false
-  failed_when:
-    - application_group_snapshot_result.rc != 0 or
-      'Unrecognized command' in application_group_snapshot_result.stdout or
-      'Too many parameters' in application_group_snapshot_result.stdout
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
-
-- name: Save application group snapshot output
-  ansible.builtin.copy:
-    dest: "{{ local_tmp_dir }}/application_group_inventory.out"
-    mode: "0600"
-    content: "{{ application_group_snapshot_result.stdout }}"
+    content: "{{ snapshot_cli_result.stdout }}"
   changed_when: false
   when: resolved_snapshot_mode in ['snapshot', 'ports']
 
@@ -229,11 +163,11 @@
       - "--address-sources-json"
       - "{{ snapshot_address_sources | to_json }}"
       - "--application-inventory-file"
-      - "{{ local_tmp_dir }}/application_inventory_all.out"
+      - "{{ local_tmp_dir }}/application_full_inventory.out"
       - "--application-details-file"
-      - "{{ local_tmp_dir }}/application_details_all.out"
+      - "{{ local_tmp_dir }}/application_full_inventory.out"
       - "--application-group-file"
-      - "{{ local_tmp_dir }}/application_group_inventory.out"
+      - "{{ local_tmp_dir }}/application_full_inventory.out"
       - "--application-prefix"
       - "{{ user_defined_application.name_prefix }}"
       - "--application-vsystem"

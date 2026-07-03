@@ -138,8 +138,7 @@ class RoleStaticTests(unittest.TestCase):
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot.yml",
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot_address_vsystem.yml",
             PROJECT_ROOT / "roles/usg6000e_trade_access/templates/query_address_set_inventory.cli.j2",
-            PROJECT_ROOT / "roles/usg6000e_trade_access/templates/query_application_inventory_all.cli.j2",
-            PROJECT_ROOT / "roles/usg6000e_trade_access/templates/query_application_group_inventory.cli.j2",
+            PROJECT_ROOT / "roles/usg6000e_trade_access/templates/query_application_full_inventory.cli.j2",
         ]
 
         combined = "\n".join(path.read_text() for path in paths)
