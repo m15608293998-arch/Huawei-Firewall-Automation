@@ -19,6 +19,7 @@ from api.auth import (
     require_firewall_job_read,
     require_firewall_ports_allow,
     require_firewall_ports_deny,
+    require_firewall_snapshot_read,
     require_identity_user_manage,
     require_trade_access_user,
     offline_api_key_service,
@@ -32,6 +33,9 @@ from api.jobs import (
 )
 from api.schemas import (
     CurrentAccessResponse,
+    FirewallIpSnapshotResponse,
+    FirewallPortSnapshotResponse,
+    FirewallSnapshotResponse,
     JobCreateResponse,
     JobDetailResponse,
     JobEventsResponse,
@@ -74,6 +78,7 @@ from api.offline_api_keys import (
     OfflineApiKeyNotFoundError,
     OfflineApiKeyUnavailableError,
 )
+from api.runner_service import runner_service
 
 
 app = FastAPI(
@@ -426,6 +431,60 @@ def create_trade_access_deny_job(
     job_request = TradeAccessJobCreate(action="deny", **request.model_dump())
     authorize_trade_access_request(principal, job_request)
     return create_job(job_request, principal, FIREWALL_DENY)
+
+
+@app.get(
+    "/api/v1/trade-access/firewall/snapshot",
+    response_model=FirewallSnapshotResponse,
+)
+def get_firewall_snapshot(
+    principal: Principal = Depends(require_firewall_snapshot_read),
+):
+    del principal
+    result = runner_service.run_firewall_snapshot("snapshot")
+    if result.rc != 0 or result.payload is None:
+        detail = result.error_message or "Firewall snapshot query failed."
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail,
+        )
+    return result.payload
+
+
+@app.get(
+    "/api/v1/trade-access/firewall/snapshot/ips",
+    response_model=FirewallIpSnapshotResponse,
+)
+def get_firewall_ip_snapshot(
+    principal: Principal = Depends(require_firewall_snapshot_read),
+):
+    del principal
+    result = runner_service.run_firewall_snapshot("ips")
+    if result.rc != 0 or result.payload is None:
+        detail = result.error_message or "Firewall IP snapshot query failed."
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail,
+        )
+    return result.payload
+
+
+@app.get(
+    "/api/v1/trade-access/firewall/snapshot/ports",
+    response_model=FirewallPortSnapshotResponse,
+)
+def get_firewall_port_snapshot(
+    principal: Principal = Depends(require_firewall_snapshot_read),
+):
+    del principal
+    result = runner_service.run_firewall_snapshot("ports")
+    if result.rc != 0 or result.payload is None:
+        detail = result.error_message or "Firewall port snapshot query failed."
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail,
+        )
+    return result.payload
 
 
 @app.get(

@@ -17,6 +17,9 @@ from api.main import (
     create_trade_access_ip_deny_job,
     create_trade_access_ports_allow_job,
     create_trade_access_ports_deny_job,
+    get_firewall_ip_snapshot,
+    get_firewall_port_snapshot,
+    get_firewall_snapshot,
     get_any_trade_access_job,
     get_any_trade_access_job_events,
     get_trade_access_job,
@@ -29,6 +32,9 @@ from api.main import (
     test_ui,
 )
 from api.schemas import (
+    FirewallIpSnapshotResponse,
+    FirewallPortSnapshotResponse,
+    FirewallSnapshotResponse,
     JobDetailResponse,
     TradeAccessAllowRequest,
     TradeAccessDenyRequest,
@@ -37,6 +43,7 @@ from api.schemas import (
     TradeAccessPortDenyRequest,
 )
 from api.storage import JobStorage
+from api.runner_service import SnapshotRunnerResult
 
 
 def principal(subject_id: str, admin: bool = False) -> Principal:
@@ -186,6 +193,133 @@ class ApiTests(unittest.TestCase):
         job = self.create_job(self.user)
         response = get_any_trade_access_job(job_id=job["job_id"], principal=self.admin)
         self.assertEqual(response["job_id"], job["job_id"])
+
+    def test_firewall_snapshot_endpoint_returns_runner_payload(self) -> None:
+        import api.main as main_module
+
+        original_runner = main_module.runner_service.run_firewall_snapshot
+        payload = {
+            "generated_at": "2026-07-03T10:30:00+08:00",
+            "items": [
+                {
+                    "target_ip": "192.168.66.22",
+                    "mask": 32,
+                    "port": 12001,
+                    "state": "allowed",
+                    "address_presence": {
+                        "public": True,
+                        "Internet": True,
+                        "private": True,
+                    },
+                    "application_vsystem": "private",
+                    "application": "UD_TS_192.168.66.22",
+                    "application_group": "UD_TradeGroup_Internet",
+                    "in_application_group": True,
+                }
+            ],
+        }
+        main_module.runner_service.run_firewall_snapshot = lambda snapshot_mode="snapshot": SnapshotRunnerResult(
+            status="successful",
+            rc=0,
+            artifact_dir="/tmp/artifacts/snapshot",
+            payload=payload,
+        )
+        try:
+            response = get_firewall_snapshot(principal=self.user)
+        finally:
+            main_module.runner_service.run_firewall_snapshot = original_runner
+
+        validated = FirewallSnapshotResponse.model_validate(response)
+        self.assertEqual(validated.items[0].target_ip, "192.168.66.22")
+        self.assertEqual(validated.items[0].port, 12001)
+
+    def test_split_firewall_snapshot_endpoints_use_separate_modes(self) -> None:
+        import api.main as main_module
+
+        original_runner = main_module.runner_service.run_firewall_snapshot
+        requested_modes = []
+
+        def fake_snapshot(snapshot_mode="snapshot"):
+            requested_modes.append(snapshot_mode)
+            if snapshot_mode == "ips":
+                payload = {
+                    "generated_at": "2026-07-03T10:30:00+08:00",
+                    "items": [
+                        {
+                            "target_ip": "192.168.66.22",
+                            "mask": 32,
+                            "state": "allowed",
+                            "address_presence": {
+                                "public": True,
+                                "Internet": True,
+                                "private": True,
+                            },
+                        }
+                    ],
+                }
+            else:
+                payload = {
+                    "generated_at": "2026-07-03T10:30:00+08:00",
+                    "items": [
+                        {
+                            "target_ip": "192.168.66.22",
+                            "mask": 32,
+                            "port": 12001,
+                            "state": "allowed",
+                            "address_presence": {
+                                "public": True,
+                                "Internet": True,
+                                "private": True,
+                            },
+                            "application_vsystem": "private",
+                            "application": "UD_TS_192.168.66.22",
+                            "application_group": "UD_TradeGroup_Internet",
+                            "in_application_group": True,
+                        }
+                    ],
+                }
+            return SnapshotRunnerResult(
+                status="successful",
+                rc=0,
+                artifact_dir="/tmp/artifacts/snapshot",
+                payload=payload,
+            )
+
+        main_module.runner_service.run_firewall_snapshot = fake_snapshot
+        try:
+            ip_response = get_firewall_ip_snapshot(principal=self.user)
+            port_response = get_firewall_port_snapshot(principal=self.user)
+        finally:
+            main_module.runner_service.run_firewall_snapshot = original_runner
+
+        self.assertEqual(requested_modes, ["ips", "ports"])
+        self.assertEqual(
+            FirewallIpSnapshotResponse.model_validate(ip_response).items[0].target_ip,
+            "192.168.66.22",
+        )
+        self.assertEqual(
+            FirewallPortSnapshotResponse.model_validate(port_response).items[0].port,
+            12001,
+        )
+
+    def test_firewall_snapshot_endpoint_reports_runner_failure(self) -> None:
+        import api.main as main_module
+
+        original_runner = main_module.runner_service.run_firewall_snapshot
+        main_module.runner_service.run_firewall_snapshot = lambda snapshot_mode="snapshot": SnapshotRunnerResult(
+            status="failed",
+            rc=1,
+            artifact_dir="/tmp/artifacts/snapshot",
+            error_message="snapshot failed",
+        )
+        try:
+            with self.assertRaises(HTTPException) as caught:
+                get_firewall_snapshot(principal=self.user)
+        finally:
+            main_module.runner_service.run_firewall_snapshot = original_runner
+
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.detail, "snapshot failed")
 
     def test_api_job_creation_has_no_background_task_parameter(self) -> None:
         allow_parameters = inspect.signature(create_trade_access_allow_job).parameters

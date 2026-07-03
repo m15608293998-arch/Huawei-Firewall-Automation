@@ -24,6 +24,7 @@ from api.auth import (
     require_firewall_ip_deny,
     require_firewall_ports_allow,
     require_firewall_ports_deny,
+    require_firewall_snapshot_read,
     require_identity_user_manage,
 )
 from api.config import settings
@@ -197,7 +198,10 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(principal.subject_id, "human-user-subject")
         self.assertEqual(principal.auth_type, "offline_api_key")
         self.assertEqual(principal.key_id, "offline-key-id")
-        self.assertEqual(principal.permissions, ["firewall.allow"])
+        self.assertEqual(
+            principal.permissions,
+            ["firewall.allow", "firewall.snapshot.read"],
+        )
 
     def test_permissions_are_loaded_by_stable_token_subject(self) -> None:
         claims = {
@@ -230,7 +234,10 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(principal.client_id, settings.keycloak_browser_client_id)
         self.assertEqual(principal.subject_type, "user")
         self.assertEqual(principal.auth_type, "keycloak_bearer")
-        self.assertEqual(principal.permissions, ["firewall.allow"])
+        self.assertEqual(
+            principal.permissions,
+            ["firewall.allow", "firewall.snapshot.read"],
+        )
         self.assertEqual(principal.allowed_ips, ["192.168.5.224"])
 
     def test_trade_access_admin_portal_token_is_mapped_to_admin_principal(self) -> None:
@@ -329,6 +336,17 @@ class AuthorizationTests(unittest.TestCase):
         )
         with self.assertRaises(HTTPException) as caught:
             require_firewall_deny(missing_ip_deny)
+        self.assertEqual(caught.exception.status_code, 403)
+
+    def test_snapshot_read_permission_is_checked_at_endpoint_boundary(self) -> None:
+        principal = user_principal().model_copy(
+            update={"permissions": ["firewall.snapshot.read"]}
+        )
+        self.assertEqual(require_firewall_snapshot_read(principal), principal)
+
+        denied = user_principal().model_copy(update={"permissions": ["firewall.job.read"]})
+        with self.assertRaises(HTTPException) as caught:
+            require_firewall_snapshot_read(denied)
         self.assertEqual(caught.exception.status_code, 403)
 
     def test_user_management_requires_admin_role_and_permission(self) -> None:

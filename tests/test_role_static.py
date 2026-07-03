@@ -132,6 +132,24 @@ class RoleStaticTests(unittest.TestCase):
         self.assertIn('"--ip"', validate_yml)
         self.assertNotIn('"--target-ip"', validate_yml)
 
+    def test_snapshot_workflow_is_read_only(self) -> None:
+        paths = [
+            PROJECT_ROOT / "playbooks/trade_server_snapshot.yml",
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot.yml",
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot_address_vsystem.yml",
+            PROJECT_ROOT / "roles/usg6000e_trade_access/templates/query_address_set_inventory.cli.j2",
+            PROJECT_ROOT / "roles/usg6000e_trade_access/templates/query_application_inventory_all.cli.j2",
+            PROJECT_ROOT / "roles/usg6000e_trade_access/templates/query_application_group_inventory.cli.j2",
+        ]
+
+        combined = "\n".join(path.read_text() for path in paths)
+        self.assertIn("display this", combined)
+        self.assertIn("display current-configuration", combined)
+        self.assertNotIn("add application", combined)
+        self.assertNotIn("undo ", combined)
+        self.assertNotIn("engine configuration commit", combined)
+        self.assertNotIn("\nsave\n", combined)
+
 
 if __name__ == "__main__":
     unittest.main()

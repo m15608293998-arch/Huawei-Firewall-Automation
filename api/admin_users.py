@@ -13,6 +13,7 @@ USER_PERMISSIONS = {
     "firewall.ip.deny",
     "firewall.ports.allow",
     "firewall.ports.deny",
+    "firewall.snapshot.read",
     "firewall.job.read",
 }
 ADMIN_PERMISSIONS = set(VALID_PERMISSIONS)

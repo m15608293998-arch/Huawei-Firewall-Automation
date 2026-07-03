@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     project_root: Path = Field(default_factory=project_root)
     playbook_path: str = "playbooks/trade_server_access.yml"
+    snapshot_playbook_path: str = "playbooks/trade_server_snapshot.yml"
     runner_private_data_dir: Path = Field(
         default_factory=lambda: project_root() / ".runtime" / "runner"
     )

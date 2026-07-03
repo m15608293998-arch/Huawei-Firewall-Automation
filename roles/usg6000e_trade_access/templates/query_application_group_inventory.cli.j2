@@ -1,0 +1,12 @@
+system-view
+{% if application_vsystem | lower != 'public' %}
+switch vsys {{ application_vsystem }}
+system-view
+{% endif %}
+display current-configuration | begin application-group name {{ user_defined_application.application_group_name }}
+{% if application_vsystem | lower != 'public' %}
+quit
+quit
+{% else %}
+quit
+{% endif %}

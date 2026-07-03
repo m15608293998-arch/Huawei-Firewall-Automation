@@ -1,0 +1,252 @@
+---
+- name: Resolve firewall SSH auth type
+  ansible.builtin.set_fact:
+    firewall_ssh_auth_type: "{{ firewall_device.auth_type | default('publickey') | lower }}"
+  changed_when: false
+
+- name: Validate firewall snapshot configuration
+  ansible.builtin.assert:
+    that:
+      - firewall_device is defined
+      - firewall_device.device_host is defined
+      - firewall_device.device_user is defined
+      - firewall_ssh_auth_type in ['publickey', 'password']
+      - >-
+        (
+          firewall_ssh_auth_type == 'publickey'
+          and (firewall_device.identity_file | default('') | string | length > 0)
+        )
+        or
+        (
+          firewall_ssh_auth_type == 'password'
+          and (firewall_device.device_password | default('') | string | length > 0)
+        )
+      - address_vsystems is defined
+      - address_vsystems | length > 0
+      - application_vsystem is defined
+      - user_defined_application is defined
+      - user_defined_application.name_prefix is defined
+      - user_defined_application.application_group_name is defined
+      - snapshot_mode | default('snapshot') in ['snapshot', 'ips', 'ports']
+    fail_msg: >-
+      Snapshot query requires firewall_device, address_vsystems, application_vsystem,
+      user_defined_application.name_prefix and user_defined_application.application_group_name.
+
+- name: Check firewall SSH identity file for snapshot
+  ansible.builtin.stat:
+    path: "{{ firewall_device.identity_file }}"
+  register: firewall_identity_file
+  when: firewall_ssh_auth_type == 'publickey'
+  changed_when: false
+
+- name: Validate firewall SSH identity file for snapshot
+  ansible.builtin.assert:
+    that:
+      - firewall_identity_file.stat.exists
+      - firewall_identity_file.stat.isreg
+      - firewall_identity_file.stat.readable | default(false)
+    fail_msg: >-
+      Firewall SSH identity file {{ firewall_device.identity_file }} is not present
+      or not readable by the API service user.
+  when: firewall_ssh_auth_type == 'publickey'
+
+- name: Set snapshot runtime facts
+  ansible.builtin.set_fact:
+    snapshot_address_sources: []
+    resolved_snapshot_mode: "{{ snapshot_mode | default('snapshot') }}"
+    snapshot_output_path: "{{ snapshot_output_path | default(local_tmp_dir ~ '/firewall_snapshot.json') }}"
+    firewall_cli_environment: >-
+      {{
+        {'USG6000E_DEVICE_PASSWORD': firewall_device.device_password}
+        if firewall_ssh_auth_type == 'password'
+        else {}
+      }}
+    firewall_cli_command_prefix: >-
+      {{
+        [
+          local_python_interpreter | default('python3.12'),
+          role_path ~ '/files/run_usg_cli.py',
+          '--host',
+          firewall_device.device_host,
+          '--user',
+          firewall_device.device_user,
+        ] + (
+          ['--password-env-var', 'USG6000E_DEVICE_PASSWORD']
+          if firewall_ssh_auth_type == 'password'
+          else ['--identity-file', firewall_device.identity_file]
+        )
+      }}
+  changed_when: false
+
+- name: Ensure local snapshot temp directory exists
+  ansible.builtin.file:
+    path: "{{ local_tmp_dir }}"
+    state: directory
+    mode: "0700"
+  changed_when: false
+
+- name: Query address-set snapshot in each virtual system
+  ansible.builtin.include_tasks: snapshot_address_vsystem.yml
+  loop: "{{ address_vsystems }}"
+  loop_control:
+    loop_var: address_context
+
+- name: Build firewall IP snapshot JSON
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_trade_snapshot.py"
+      - "--mode"
+      - "ips"
+      - "--address-sources-json"
+      - "{{ snapshot_address_sources | to_json }}"
+      - "--application-prefix"
+      - "{{ user_defined_application.name_prefix }}"
+      - "--output"
+      - "{{ snapshot_output_path }}"
+  register: firewall_snapshot_result
+  changed_when: false
+  failed_when: firewall_snapshot_result.rc != 0
+  when: resolved_snapshot_mode == 'ips'
+
+- name: Render application object snapshot query
+  ansible.builtin.template:
+    src: query_application_inventory_all.cli.j2
+    dest: "{{ local_tmp_dir }}/query_application_inventory_all.cli"
+    mode: "0600"
+  changed_when: false
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Query application object snapshot
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_inventory_all.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_inventory_snapshot_result
+  changed_when: false
+  failed_when:
+    - application_inventory_snapshot_result.rc != 0 or
+      'Unrecognized command' in application_inventory_snapshot_result.stdout or
+      'Too many parameters' in application_inventory_snapshot_result.stdout
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Save application object snapshot output
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/application_inventory_all.out"
+    mode: "0600"
+    content: "{{ application_inventory_snapshot_result.stdout }}"
+  changed_when: false
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Discover application objects for detail query
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_trade_snapshot.py"
+      - "--mode"
+      - "discover"
+      - "--application-inventory-file"
+      - "{{ local_tmp_dir }}/application_inventory_all.out"
+      - "--application-prefix"
+      - "{{ user_defined_application.name_prefix }}"
+  register: application_snapshot_discovery_result
+  changed_when: false
+  failed_when: application_snapshot_discovery_result.rc != 0
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Set application objects to query
+  ansible.builtin.set_fact:
+    application_names_to_query: "{{ (application_snapshot_discovery_result.stdout | from_json).object_names }}"
+  changed_when: false
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Render application detail snapshot queries
+  ansible.builtin.template:
+    src: query_application_details.cli.j2
+    dest: "{{ local_tmp_dir }}/query_application_details_all.cli"
+    mode: "0600"
+  when:
+    - resolved_snapshot_mode in ['snapshot', 'ports']
+    - (application_names_to_query | default([])) | length > 0
+  changed_when: false
+
+- name: Query application detail snapshot in one SSH session
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_details_all.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_details_snapshot_result
+  changed_when: false
+  failed_when:
+    - application_details_snapshot_result.rc != 0 or
+      'Unrecognized command' in application_details_snapshot_result.stdout or
+      'Too many parameters' in application_details_snapshot_result.stdout
+  when:
+    - resolved_snapshot_mode in ['snapshot', 'ports']
+    - (application_names_to_query | default([])) | length > 0
+
+- name: Save application detail snapshot output
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/application_details_all.out"
+    mode: "0600"
+    content: "{{ application_details_snapshot_result.stdout | default('') }}"
+  changed_when: false
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Render application group snapshot query
+  ansible.builtin.template:
+    src: query_application_group_inventory.cli.j2
+    dest: "{{ local_tmp_dir }}/query_application_group_inventory.cli"
+    mode: "0600"
+  changed_when: false
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Query application group snapshot
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_group_inventory.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_group_snapshot_result
+  changed_when: false
+  failed_when:
+    - application_group_snapshot_result.rc != 0 or
+      'Unrecognized command' in application_group_snapshot_result.stdout or
+      'Too many parameters' in application_group_snapshot_result.stdout
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Save application group snapshot output
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/application_group_inventory.out"
+    mode: "0600"
+    content: "{{ application_group_snapshot_result.stdout }}"
+  changed_when: false
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Build firewall snapshot JSON
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_trade_snapshot.py"
+      - "--mode"
+      - "{{ resolved_snapshot_mode }}"
+      - "--address-sources-json"
+      - "{{ snapshot_address_sources | to_json }}"
+      - "--application-inventory-file"
+      - "{{ local_tmp_dir }}/application_inventory_all.out"
+      - "--application-details-file"
+      - "{{ local_tmp_dir }}/application_details_all.out"
+      - "--application-group-file"
+      - "{{ local_tmp_dir }}/application_group_inventory.out"
+      - "--application-prefix"
+      - "{{ user_defined_application.name_prefix }}"
+      - "--application-vsystem"
+      - "{{ application_vsystem }}"
+      - "--application-group"
+      - "{{ user_defined_application.application_group_name }}"
+      - "--output"
+      - "{{ snapshot_output_path }}"
+  register: firewall_snapshot_result
+  changed_when: false
+  failed_when: firewall_snapshot_result.rc != 0
+  when: resolved_snapshot_mode in ['snapshot', 'ports']
+
+- name: Show firewall snapshot summary
+  ansible.builtin.debug:
+    msg: "Firewall snapshot written to {{ snapshot_output_path }}"

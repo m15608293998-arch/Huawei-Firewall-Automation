@@ -25,6 +25,7 @@ from api.permissions import (
     FIREWALL_JOB_READ,
     FIREWALL_PORTS_ALLOW,
     FIREWALL_PORTS_DENY,
+    FIREWALL_SNAPSHOT_READ,
     IDENTITY_USER_MANAGE,
     VALID_PERMISSIONS,
 )
@@ -115,7 +116,9 @@ def principal_from_claims(
     client_id = str(raw_client_id) if raw_client_id else None
     # 权限和 allowed IP 走本地业务库，不信任 token 里自带的业务授权。
     managed_user = permission_storage.get_managed_user(subject_id)
-    permissions = permission_storage.get_subject_permissions(subject_id)
+    permissions = set(permission_storage.get_subject_permissions(subject_id))
+    if {settings.keycloak_user_role, settings.keycloak_admin_role}.intersection(roles):
+        permissions.add(FIREWALL_SNAPSHOT_READ)
     allowed_ips = permission_storage.get_subject_allowed_ips(subject_id)
     access_enabled = bool(managed_user.get("enabled", True)) if managed_user else True
     subject = claims.get("preferred_username") or client_id or subject_id
@@ -130,7 +133,7 @@ def principal_from_claims(
         client_id=client_id,
         subject_type="user",
         access_enabled=access_enabled,
-        permissions=permissions,
+        permissions=sorted(permissions),
         allowed_ips=allowed_ips,
     )
 
@@ -314,6 +317,12 @@ def require_firewall_job_read(
     principal: Principal = Depends(require_trade_access_user),
 ) -> Principal:
     return require_permission(principal, FIREWALL_JOB_READ)
+
+
+def require_firewall_snapshot_read(
+    principal: Principal = Depends(require_trade_access_user),
+) -> Principal:
+    return require_permission(principal, FIREWALL_SNAPSHOT_READ)
 
 
 def require_firewall_job_audit(

@@ -1,0 +1,39 @@
+---
+- name: Render address-set snapshot query for {{ address_context.name }}
+  ansible.builtin.template:
+    src: query_address_set_inventory.cli.j2
+    dest: "{{ local_tmp_dir }}/query_address_set_inventory_{{ address_context.name }}.cli"
+    mode: "0600"
+  changed_when: false
+
+- name: Query address-set snapshot for {{ address_context.name }}
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_address_set_inventory_' ~ address_context.name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: address_snapshot_result
+  changed_when: false
+  failed_when:
+    - address_snapshot_result.rc != 0 or
+      'Unrecognized command' in address_snapshot_result.stdout or
+      'Too many parameters' in address_snapshot_result.stdout
+
+- name: Save address-set snapshot output for {{ address_context.name }}
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/address_inventory_{{ address_context.name }}.out"
+    mode: "0600"
+    content: "{{ address_snapshot_result.stdout }}"
+  changed_when: false
+
+- name: Track address-set snapshot source for {{ address_context.name }}
+  ansible.builtin.set_fact:
+    snapshot_address_sources: >-
+      {{
+        (snapshot_address_sources | default([]))
+        + [
+          {
+            'vsystem': address_context.name,
+            'path': local_tmp_dir ~ '/address_inventory_' ~ address_context.name ~ '.out'
+          }
+        ]
+      }}
+  changed_when: false

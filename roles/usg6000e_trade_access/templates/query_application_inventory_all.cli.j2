@@ -1,0 +1,12 @@
+system-view
+{% if application_vsystem | lower != 'public' %}
+switch vsys {{ application_vsystem }}
+system-view
+{% endif %}
+display current-configuration | include {{ user_defined_application.name_prefix }}
+{% if application_vsystem | lower != 'public' %}
+quit
+quit
+{% else %}
+quit
+{% endif %}

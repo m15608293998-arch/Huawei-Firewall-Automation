@@ -51,6 +51,7 @@ class AdminUserServiceTests(unittest.TestCase):
                 "firewall.job.read",
                 "firewall.ports.allow",
                 "firewall.ports.deny",
+                "firewall.snapshot.read",
             ],
         )
         self.assertEqual(
