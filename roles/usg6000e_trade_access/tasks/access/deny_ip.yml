@@ -1,9 +1,9 @@
 ---
 - name: Validate all ports are removed before IP deny
-  ansible.builtin.include_tasks: validate_no_applications_for_ip.yml
+  ansible.builtin.include_tasks: application/validate_absent_for_ip.yml
 
 - name: Remove target IP from address set in each virtual system
-  ansible.builtin.include_tasks: remove_address_vsystem.yml
+  ansible.builtin.include_tasks: address/remove_member.yml
   loop: "{{ address_vsystems }}"
   loop_control:
     loop_var: address_context

@@ -1,7 +1,7 @@
 ---
 - name: Render application inventory query
   ansible.builtin.template:
-    src: query_application_inventory.cli.j2
+    src: application/query_inventory.cli.j2
     dest: "{{ local_tmp_dir }}/query_application_inventory_{{ access_request.target_ip }}.cli"
     mode: "0600"
 
@@ -43,7 +43,7 @@
 
 - name: Render exact application detail queries
   ansible.builtin.template:
-    src: query_application_details.cli.j2
+    src: application/query_details.cli.j2
     dest: "{{ local_tmp_dir }}/query_application_details_{{ access_request.target_ip }}.cli"
     mode: "0600"
   when: application_names_to_query | length > 0
@@ -128,7 +128,7 @@
 
 - name: Render batched application replacement
   ansible.builtin.template:
-    src: replace_applications_batch.cli.j2
+    src: application/replace_batch.cli.j2
     dest: "{{ local_tmp_dir }}/replace_applications_batch_{{ access_request.target_ip }}.cli"
     mode: "0600"
   when: application_plan.rebuild_needed | bool
@@ -165,7 +165,7 @@
 
 - name: Render exact application validation query
   ansible.builtin.template:
-    src: query_application_validation.cli.j2
+    src: application/query_validation.cli.j2
     dest: "{{ local_tmp_dir }}/query_application_validation_{{ access_request.target_ip }}.cli"
     mode: "0600"
   when: application_plan.rebuild_needed | bool

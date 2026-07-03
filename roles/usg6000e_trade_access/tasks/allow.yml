@@ -1,6 +1,0 @@
----
-- name: Run address-set allow workflow
-  ansible.builtin.include_tasks: allow_ip.yml
-
-- name: Run port allow workflow
-  ansible.builtin.include_tasks: allow_ports.yml

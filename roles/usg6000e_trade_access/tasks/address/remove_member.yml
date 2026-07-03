@@ -1,7 +1,7 @@
 ---
 - name: Render query address-set member command before remove for {{ address_context.name }}
   ansible.builtin.template:
-    src: query_address_set_member.cli.j2
+    src: address/query_member.cli.j2
     dest: "{{ local_tmp_dir }}/query_address_set_member_before_remove_{{ address_context.name }}.cli"
     mode: "0600"
 
@@ -81,7 +81,7 @@
 
 - name: Render remove address-set member command for {{ address_context.name }}
   ansible.builtin.template:
-    src: remove_address_set_member.cli.j2
+    src: address/remove_member.cli.j2
     dest: "{{ local_tmp_dir }}/remove_address_set_member_{{ address_context.name }}.cli"
     mode: "0600"
   when: address_exists_before_remove | bool

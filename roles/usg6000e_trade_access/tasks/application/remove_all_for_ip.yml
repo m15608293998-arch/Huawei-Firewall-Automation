@@ -1,7 +1,7 @@
 ---
 - name: Render query commands for applications belonging to target IP
   ansible.builtin.template:
-    src: query_applications_by_ip.cli.j2
+    src: application/query_by_ip.cli.j2
     dest: "{{ local_tmp_dir }}/query_applications_by_ip_{{ access_request.target_ip }}.cli"
     mode: "0600"
   when: enable_application_config | default(true) | bool
@@ -70,7 +70,7 @@
   when: enable_application_config | default(true) | bool
 
 - name: Remove user-defined applications belonging to target IP
-  ansible.builtin.include_tasks: remove_application.yml
+  ansible.builtin.include_tasks: application/remove_object.yml
   loop: "{{ application_units_to_remove | default([]) | reverse | list }}"
   loop_control:
     loop_var: application_unit

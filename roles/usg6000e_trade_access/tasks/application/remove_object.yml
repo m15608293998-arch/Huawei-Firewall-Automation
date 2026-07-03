@@ -6,7 +6,7 @@
 
 - name: Render query user-defined application command before remove
   ansible.builtin.template:
-    src: query_application.cli.j2
+    src: application/query_object.cli.j2
     dest: "{{ local_tmp_dir }}/query_application_before_remove_{{ app_name }}.cli"
     mode: "0600"
 
@@ -23,7 +23,7 @@
 
 - name: Render query application group command before remove
   ansible.builtin.template:
-    src: query_application_group.cli.j2
+    src: application/query_group.cli.j2
     dest: "{{ local_tmp_dir }}/query_application_group_before_remove_{{ app_name }}.cli"
     mode: "0600"
 
@@ -72,7 +72,7 @@
 
 - name: Render remove user-defined application command
   ansible.builtin.template:
-    src: remove_application.cli.j2
+    src: application/remove_object.cli.j2
     dest: "{{ local_tmp_dir }}/remove_application_{{ app_name }}.cli"
     mode: "0600"
 

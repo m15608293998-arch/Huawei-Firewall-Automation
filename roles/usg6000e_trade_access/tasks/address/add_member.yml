@@ -1,7 +1,7 @@
 ---
 - name: Render query address-set member command before add for {{ address_context.name }}
   ansible.builtin.template:
-    src: query_address_set_member.cli.j2
+    src: address/query_member.cli.j2
     dest: "{{ local_tmp_dir }}/query_address_set_member_before_add_{{ address_context.name }}.cli"
     mode: "0600"
 
@@ -60,7 +60,7 @@
 
 - name: Render add address-set member command for {{ address_context.name }}
   ansible.builtin.template:
-    src: add_address_set_member.cli.j2
+    src: address/add_member.cli.j2
     dest: "{{ local_tmp_dir }}/add_address_set_member_{{ address_context.name }}.cli"
     mode: "0600"
   when: not address_exists_before | bool

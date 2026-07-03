@@ -1,6 +1,0 @@
----
-- name: Remove all ports before full IP deny
-  ansible.builtin.include_tasks: deny_all_ports.yml
-
-- name: Remove target IP after full port cleanup
-  ansible.builtin.include_tasks: deny_ip.yml

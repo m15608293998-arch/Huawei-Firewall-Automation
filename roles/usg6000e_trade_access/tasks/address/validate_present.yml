@@ -1,7 +1,7 @@
 ---
 - name: Render query address-set member command before port operation for {{ address_context.name }}
   ansible.builtin.template:
-    src: query_address_set_member.cli.j2
+    src: address/query_member.cli.j2
     dest: "{{ local_tmp_dir }}/query_address_set_member_before_port_{{ address_context.name }}.cli"
     mode: "0600"
 

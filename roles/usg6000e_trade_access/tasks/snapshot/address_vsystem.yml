@@ -1,7 +1,7 @@
 ---
 - name: Render address-set snapshot query for {{ address_context.name }}
   ansible.builtin.template:
-    src: query_address_set_inventory.cli.j2
+    src: snapshot/query_address_inventory.cli.j2
     dest: "{{ local_tmp_dir }}/query_address_set_inventory_{{ address_context.name }}.cli"
     mode: "0600"
   changed_when: false

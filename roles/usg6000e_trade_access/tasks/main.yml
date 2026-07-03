@@ -101,27 +101,27 @@
     mode: "0700"
 
 - name: Run allow workflow
-  ansible.builtin.include_tasks: allow.yml
+  ansible.builtin.include_tasks: access/allow.yml
   when: access_request.action == 'allow'
 
 - name: Run IP allow workflow
-  ansible.builtin.include_tasks: allow_ip.yml
+  ansible.builtin.include_tasks: access/allow_ip.yml
   when: access_request.action == 'allow_ip'
 
 - name: Run port allow workflow
-  ansible.builtin.include_tasks: allow_ports.yml
+  ansible.builtin.include_tasks: access/allow_ports.yml
   when: access_request.action == 'allow_ports'
 
 - name: Run deny workflow
-  ansible.builtin.include_tasks: deny.yml
+  ansible.builtin.include_tasks: access/deny.yml
   when: access_request.action == 'deny'
 
 - name: Run port deny workflow
-  ansible.builtin.include_tasks: deny_ports.yml
+  ansible.builtin.include_tasks: access/deny_ports.yml
   when: access_request.action == 'deny_ports'
 
 - name: Run IP deny workflow
-  ansible.builtin.include_tasks: deny_ip.yml
+  ansible.builtin.include_tasks: access/deny_ip.yml
   when: access_request.action == 'deny_ip'
 
 - name: Render final commit and save command

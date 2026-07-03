@@ -1,7 +1,7 @@
 ---
 - name: Render application query before IP deny
   ansible.builtin.template:
-    src: query_applications_by_ip.cli.j2
+    src: application/query_by_ip.cli.j2
     dest: "{{ local_tmp_dir }}/query_applications_before_ip_deny_{{ access_request.target_ip }}.cli"
     mode: "0600"
   when: enable_application_config | default(true) | bool
