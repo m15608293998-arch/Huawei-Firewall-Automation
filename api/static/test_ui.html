@@ -70,17 +70,8 @@
     .jobs { grid-column: 1 / -1; }
     .snapshot { grid-column: 1 / -1; }
     .snapshot-actions { display: flex; flex-wrap: wrap; gap: 10px; }
-    .snapshot table { min-width: 1040px; }
+    .snapshot table { min-width: 520px; }
     .snapshot-meta { color: var(--muted); font-size: 12px; }
-    .presence-list { display: inline-flex; flex-wrap: wrap; gap: 5px; justify-content: center; }
-    .presence-item { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 999px; background: #f1f3f5; color: #626975; font-size: 12px; white-space: nowrap; }
-    .presence-item.ok { background: #e8f7f0; color: var(--success); }
-    .presence-item.missing { background: #fff1f2; color: var(--danger); }
-    .state-chip { display: inline-flex; min-width: 88px; justify-content: center; border-radius: 999px; padding: 3px 9px; background: #eceff2; color: #4b5563; font-size: 12px; font-weight: 650; }
-    .state-chip.allowed { background: #e8f7f0; color: var(--success); }
-    .state-chip.partial_address, .state-chip.ip_only, .state-chip.group_missing, .state-chip.application_without_port { background: #fff5d9; color: var(--warning); }
-    .state-chip.orphan_application, .state-chip.ip_mismatch { background: #fff1f2; color: var(--danger); }
-
     .field { min-width: 0; }
     .field + .field { margin-top: 16px; }
     label { display: block; margin-bottom: 7px; color: #363b44; font-size: 13px; font-weight: 650; }
@@ -313,24 +304,19 @@
         <div class="panel-header">
           <div class="section-heading">
             <h2>防火墙快照</h2>
-            <p class="section-description">查询当前业务地址组和端口应用状态</p>
+            <p class="section-description">查询当前防火墙已生效的业务 IP 和端口清单</p>
           </div>
           <div class="snapshot-actions">
-            <button id="queryIpSnapshot" class="command secondary" type="button">查询 IP 快照</button>
-            <button id="queryPortSnapshot" class="command secondary" type="button">查询端口快照</button>
+            <button id="queryIpSnapshot" class="command secondary" type="button">查询 IP 清单</button>
+            <button id="queryPortSnapshot" class="command secondary" type="button">查询端口清单</button>
           </div>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>目标 IP</th>
-                <th>掩码</th>
+                <th>IP</th>
                 <th>端口</th>
-                <th>状态</th>
-                <th>地址组</th>
-                <th>应用</th>
-                <th>应用组</th>
               </tr>
             </thead>
             <tbody id="snapshotRows"></tbody>
@@ -1136,51 +1122,21 @@
       });
     }
 
-    function snapshotStateClass(value) {
-      return String(value || "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
-    }
-
-    function renderPresence(presence) {
-      const wrapper = document.createElement("span");
-      wrapper.className = "presence-list";
-      Object.entries(presence || {}).forEach(([name, present]) => {
-        const item = document.createElement("span");
-        item.className = `presence-item ${present ? "ok" : "missing"}`;
-        item.textContent = `${name}: ${present ? "有" : "无"}`;
-        wrapper.append(item);
-      });
-      return wrapper;
-    }
-
     function renderSnapshot(snapshot, mode) {
       const items = snapshot.items || [];
       elements.snapshotRows.replaceChildren();
       elements.emptySnapshot.classList.toggle("hidden", items.length > 0);
       elements.emptySnapshot.textContent = items.length > 0 ? "" : "暂无快照数据";
-      elements.snapshotMeta.textContent = `${mode === "ips" ? "IP" : "端口"} 快照 · ${formatDateTime(snapshot.generated_at)} · ${items.length} 条`;
+      elements.snapshotMeta.textContent = `${mode === "ips" ? "IP" : "端口"} 对账清单 · ${formatDateTime(snapshot.generated_at)} · ${items.length} 条`;
       items.forEach((item) => {
         const row = document.createElement("tr");
         const values = [
-          { value: item.target_ip, mono: true },
-          { value: item.mask },
-          { value: item.port ?? "-" },
-          { value: item.state, state: true },
-          { presence: item.address_presence },
-          { value: item.application || "-" },
-          { value: item.in_application_group === undefined ? "-" : (item.in_application_group ? item.application_group : `${item.application_group}（未加入）`) },
+          { value: item.ip, mono: true },
+          { value: mode === "ips" ? "-" : item.port },
         ];
-        values.forEach(({ value, mono, state, presence }) => {
+        values.forEach(({ value, mono }) => {
           const cell = document.createElement("td");
-          if (presence) {
-            cell.append(renderPresence(presence));
-          } else if (state) {
-            const chip = document.createElement("span");
-            chip.className = `state-chip ${snapshotStateClass(value)}`;
-            chip.textContent = value;
-            cell.append(chip);
-          } else {
-            cell.textContent = value;
-          }
+          cell.textContent = value;
           if (mono) cell.className = "mono";
           row.append(cell);
         });

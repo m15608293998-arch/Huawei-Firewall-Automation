@@ -47,6 +47,37 @@ def valid_ipv4(value: str) -> str | None:
         return None
 
 
+def mask_to_prefix(value: str) -> int | None:
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.IPv4Network("0.0.0.0/{0}".format(value)).prefixlen
+    except ValueError:
+        return None
+
+
+def parse_address_value(value: str) -> dict[str, int] | None:
+    if value == "-":
+        return None
+    if "/" not in value:
+        ip_value = valid_ipv4(value)
+        if ip_value is None:
+            return None
+        return {"ip": ip_value, "mask": 32}
+    ip_value, mask_value = value.rsplit("/", 1)
+    normalized_ip = valid_ipv4(ip_value)
+    mask = mask_to_prefix(mask_value)
+    if normalized_ip is None or mask is None:
+        return None
+    return {"ip": normalized_ip, "mask": mask}
+
+
+def is_application_name(name: str) -> bool:
+    return bool(name) and not any(character.isspace() for character in name)
+
+
 def application_ip_from_name(name: str, prefix: str) -> str | None:
     if not name.startswith(prefix):
         return None
@@ -75,7 +106,7 @@ def parse_address_inventory(text: str) -> dict[str, int]:
     pattern = re.compile(
         r"\baddress\s+\d+\s+(?P<ip>"
         + IPV4_PATTERN
-        + r")\s+mask\s+(?P<mask>\d+)\b"
+        + r")\s+mask\s+(?P<mask>\S+)\b"
     )
     for raw_line in normalize_text(text).splitlines():
         line = " ".join(raw_line.strip().split())
@@ -83,25 +114,29 @@ def parse_address_inventory(text: str) -> dict[str, int]:
         if not match:
             continue
         ip_value = valid_ipv4(match.group("ip"))
-        if ip_value is None:
+        mask = mask_to_prefix(match.group("mask"))
+        if ip_value is None or mask is None:
             continue
-        addresses[ip_value] = int(match.group("mask"))
+        addresses[ip_value] = mask
     return addresses
 
 
 def parse_application_config(text: str, prefix: str) -> dict[str, Any]:
     declaration_prefix = "user-defined-application name "
     display_header_pattern = re.compile(r"^Application\s+(\S+)\s+Information:$")
+    config_rule_pattern = re.compile(r"^rule\s+name\s+(\S+)$")
+    display_rule_pattern = re.compile(r"^Rule Name\s*:\s*(\S+)$")
     group_pattern = re.compile(r"^add\s+application\s+(\S+)$")
     config_ip_pattern = re.compile(r"^ip-address\s+(\S+)\s+(\d+)$")
     config_port_pattern = re.compile(r"^port\s+(\d+)$")
-    display_ip_pattern = re.compile(r"^IP Address\s*:\s*(\S+)$")
+    display_ip_pattern = re.compile(r"^(?:IP Address|Destination)\s*:\s*(\S+)$")
     display_port_pattern = re.compile(r"^Port\s*:\s*(.*)$")
 
     applications: dict[str, dict[str, Any]] = {}
     object_names: set[str] = set()
     group_names: set[str] = set()
     current_name: str | None = None
+    current_rule: dict[str, Any] | None = None
 
     def ensure_application(name: str) -> dict[str, Any]:
         target_ip = application_ip_from_name(name, prefix)
@@ -112,40 +147,77 @@ def parse_application_config(text: str, prefix: str) -> dict[str, Any]:
                 "target_ip": target_ip,
                 "ip_addresses": [],
                 "ports": [],
+                "rules": [],
             },
         )
         return application
+
+    def ensure_rule(application: dict[str, Any], name: str) -> dict[str, Any]:
+        for rule in application["rules"]:
+            if rule["name"] == name:
+                return rule
+        rule = {"name": name, "ip_addresses": [], "ports": []}
+        application["rules"].append(rule)
+        return rule
+
+    def add_ip_address(application: dict[str, Any], pair: dict[str, int]) -> None:
+        if pair not in application["ip_addresses"]:
+            application["ip_addresses"].append(pair)
+        rule = current_rule or ensure_rule(application, "default")
+        if pair not in rule["ip_addresses"]:
+            rule["ip_addresses"].append(pair)
+
+    def add_port(application: dict[str, Any], port: int) -> None:
+        if port not in application["ports"]:
+            application["ports"].append(port)
+        rule = current_rule or ensure_rule(application, "default")
+        if port not in rule["ports"]:
+            rule["ports"].append(port)
 
     for raw_line in normalize_text(text).splitlines():
         line = " ".join(raw_line.strip().split())
         if not line:
             continue
 
+        if line == "#":
+            current_name = None
+            current_rule = None
+            continue
+
         if line.startswith(declaration_prefix):
             name = line[len(declaration_prefix) :].strip().strip('"')
-            if application_ip_from_name(name, prefix):
+            if is_application_name(name):
                 object_names.add(name)
                 ensure_application(name)
                 current_name = name
+                current_rule = None
             else:
                 current_name = None
+                current_rule = None
             continue
 
         display_header_match = display_header_pattern.match(line)
         if display_header_match:
             name = display_header_match.group(1)
-            if application_ip_from_name(name, prefix):
+            if is_application_name(name):
                 object_names.add(name)
                 ensure_application(name)
                 current_name = name
+                current_rule = None
             else:
                 current_name = None
+                current_rule = None
+            continue
+
+        if line.startswith("application-group name "):
+            current_name = None
+            current_rule = None
             continue
 
         group_match = group_pattern.match(line)
         if group_match:
             name = group_match.group(1)
-            if application_ip_from_name(name, prefix):
+            if is_application_name(name):
                 group_names.add(name)
             continue
 
@@ -153,40 +225,40 @@ def parse_application_config(text: str, prefix: str) -> dict[str, Any]:
             continue
 
         application = applications[current_name]
+        rule_match = config_rule_pattern.match(line) or display_rule_pattern.match(line)
+        if rule_match:
+            current_rule = ensure_rule(application, rule_match.group(1))
+            continue
+
         config_ip_match = config_ip_pattern.match(line)
         if config_ip_match:
             ip_value = valid_ipv4(config_ip_match.group(1))
-            if ip_value:
-                pair = {"ip": ip_value, "mask": int(config_ip_match.group(2))}
-                if pair not in application["ip_addresses"]:
-                    application["ip_addresses"].append(pair)
+            mask = mask_to_prefix(config_ip_match.group(2))
+            if ip_value and mask is not None:
+                add_ip_address(application, {"ip": ip_value, "mask": mask})
             continue
 
         config_port_match = config_port_pattern.match(line)
         if config_port_match:
-            port = int(config_port_match.group(1))
-            if port not in application["ports"]:
-                application["ports"].append(port)
+            add_port(application, int(config_port_match.group(1)))
             continue
 
         display_ip_match = display_ip_pattern.match(line)
-        if display_ip_match and display_ip_match.group(1) != "-":
-            address = display_ip_match.group(1)
-            if "/" in address:
-                ip_value, mask = address.rsplit("/", 1)
-                normalized_ip = valid_ipv4(ip_value)
-                if normalized_ip:
-                    pair = {"ip": normalized_ip, "mask": int(mask)}
-                    if pair not in application["ip_addresses"]:
-                        application["ip_addresses"].append(pair)
+        if display_ip_match:
+            pair = parse_address_value(display_ip_match.group(1))
+            if pair:
+                add_ip_address(application, pair)
+            continue
+
+        continued_address = parse_address_value(line)
+        if continued_address:
+            add_ip_address(application, continued_address)
             continue
 
         display_port_match = display_port_pattern.match(line)
         if display_port_match:
             for value in re.findall(r"\d+", display_port_match.group(1)):
-                port = int(value)
-                if port not in application["ports"]:
-                    application["ports"].append(port)
+                add_port(application, int(value))
 
     return {
         "object_names": sorted(object_names, key=lambda item: application_name_sort_key(item, prefix)),
@@ -222,7 +294,7 @@ def parse_application_group_members(text: str, prefix: str, application_group: s
         member_match = member_pattern.match(line)
         if member_match:
             name = member_match.group(1)
-            if application_ip_from_name(name, prefix):
+            if is_application_name(name):
                 group_names.add(name)
 
     if not seen_group_context:
@@ -240,44 +312,13 @@ def build_address_state(address_sources: list[dict[str, str]]) -> dict[str, Any]
     return {"vsystems": vsystems, "by_vsystem": by_vsystem}
 
 
-def address_presence_for_ip(ip_value: str, address_state: dict[str, Any]) -> dict[str, bool]:
-    return {
-        vsystem: ip_value in address_state["by_vsystem"].get(vsystem, {})
+def is_allowed_ip(ip_value: str, address_state: dict[str, Any]) -> bool:
+    if not address_state["vsystems"]:
+        return False
+    return all(
+        address_state["by_vsystem"].get(vsystem, {}).get(ip_value) == 32
         for vsystem in address_state["vsystems"]
-    }
-
-
-def mask_for_ip(ip_value: str, address_state: dict[str, Any], fallback: int = 32) -> int:
-    for vsystem in address_state["vsystems"]:
-        mask = address_state["by_vsystem"].get(vsystem, {}).get(ip_value)
-        if mask is not None:
-            return int(mask)
-    return fallback
-
-
-def state_for_item(
-    address_presence: dict[str, bool],
-    application: dict[str, Any] | None,
-    in_application_group: bool,
-    has_port: bool,
-) -> str:
-    address_complete = bool(address_presence) and all(address_presence.values())
-    has_any_address = any(address_presence.values())
-    if application is None:
-        return "ip_only" if address_complete else "partial_address"
-
-    target_ip = application["target_ip"]
-    expected_pair = {"ip": target_ip, "mask": 32}
-    ip_pairs = application["ip_addresses"]
-    if ip_pairs and expected_pair not in ip_pairs:
-        return "ip_mismatch"
-    if not address_complete:
-        return "partial_address" if has_any_address else "orphan_application"
-    if not in_application_group:
-        return "group_missing"
-    if not has_port:
-        return "application_without_port"
-    return "allowed"
+    )
 
 
 def generated_at_iso() -> str:
@@ -292,15 +333,8 @@ def build_ip_items(address_state: dict[str, Any]) -> list[dict[str, Any]]:
     }
     items = []
     for ip_value in sorted(address_ips, key=lambda value: int(ipaddress.IPv4Address(value))):
-        presence = address_presence_for_ip(ip_value, address_state)
-        items.append(
-            {
-                "target_ip": ip_value,
-                "mask": mask_for_ip(ip_value, address_state),
-                "state": "allowed" if all(presence.values()) else "partial_address",
-                "address_presence": presence,
-            }
-        )
+        if is_allowed_ip(ip_value, address_state):
+            items.append({"ip": ip_value})
     return items
 
 
@@ -333,51 +367,35 @@ def build_port_items(
         )
     )
 
-    applications_by_ip: dict[str, list[dict[str, Any]]] = {}
-    for application in application_state["applications"]:
-        target_ip = application.get("target_ip")
-        if target_ip:
-            applications_by_ip.setdefault(target_ip, []).append(application)
-
+    allowed_ips = {item["ip"] for item in build_ip_items(address_state)}
+    emitted: set[tuple[str, int]] = set()
     items: list[dict[str, Any]] = []
-    all_ips = sorted(
-        applications_by_ip,
-        key=lambda value: int(ipaddress.IPv4Address(value)),
-    )
-    for ip_value in all_ips:
-        presence = address_presence_for_ip(ip_value, address_state)
-        for application in applications_by_ip[ip_value]:
-            ports = sorted({int(port) for port in application["ports"]})
-            row_ports: list[int | None] = ports or [None]
-            in_group = application["name"] in group_names
-            fallback_mask = 32
-            if application["ip_addresses"]:
-                fallback_mask = int(application["ip_addresses"][0]["mask"])
-            for port in row_ports:
-                items.append(
-                    {
-                        "target_ip": ip_value,
-                        "mask": mask_for_ip(ip_value, address_state, fallback_mask),
-                        "port": port,
-                        "state": state_for_item(
-                            presence,
-                            application,
-                            in_group,
-                            port is not None,
-                        ),
-                        "address_presence": presence,
-                        "application_vsystem": application_vsystem,
-                        "application": application["name"],
-                        "application_group": application_group,
-                        "in_application_group": in_group,
-                    }
-                )
+    for application in application_state["applications"]:
+        if application["name"] not in group_names:
+            continue
+        for rule in application["rules"]:
+            rule_ips = [
+                pair["ip"]
+                for pair in rule["ip_addresses"]
+                if pair["mask"] == 32 and pair["ip"] in allowed_ips
+            ]
+            if not rule_ips:
+                continue
+            for target_ip in sorted(
+                set(rule_ips),
+                key=lambda value: int(ipaddress.IPv4Address(value)),
+            ):
+                for port in sorted({int(port) for port in rule["ports"]}):
+                    key = (target_ip, port)
+                    if key in emitted:
+                        continue
+                    emitted.add(key)
+                    items.append({"ip": target_ip, "port": port})
 
     items.sort(
         key=lambda item: (
-            int(ipaddress.IPv4Address(item["target_ip"])),
-            -1 if item["port"] is None else int(item["port"]),
-            item["application"] or "",
+            int(ipaddress.IPv4Address(item["ip"])),
+            int(item["port"]),
         )
     )
     return items
@@ -406,7 +424,6 @@ def build_port_snapshot(
         ),
     }
 
-
 def build_snapshot(
     address_sources: list[dict[str, str]],
     application_inventory_text: str,
@@ -416,9 +433,8 @@ def build_snapshot(
     application_vsystem: str,
     application_group: str,
 ) -> dict[str, Any]:
-    address_state = build_address_state(address_sources)
-    port_items = build_port_items(
-        address_state,
+    return build_port_snapshot(
+        address_sources,
         application_inventory_text,
         application_details_text,
         application_group_text,
@@ -426,41 +442,6 @@ def build_snapshot(
         application_vsystem,
         application_group,
     )
-    port_ips = {item["target_ip"] for item in port_items}
-    address_ips = {
-        ip_value
-        for address_map in address_state["by_vsystem"].values()
-        for ip_value in address_map
-    }
-    items: list[dict[str, Any]] = list(port_items)
-    all_ips = sorted(
-        address_ips - port_ips,
-        key=lambda value: int(ipaddress.IPv4Address(value)),
-    )
-    for ip_value in all_ips:
-        presence = address_presence_for_ip(ip_value, address_state)
-        items.append(
-            {
-                "target_ip": ip_value,
-                "mask": mask_for_ip(ip_value, address_state),
-                "port": None,
-                "state": state_for_item(presence, None, False, False),
-                "address_presence": presence,
-                "application_vsystem": application_vsystem,
-                "application": None,
-                "application_group": application_group,
-                "in_application_group": False,
-            }
-        )
-
-    items.sort(
-        key=lambda item: (
-            int(ipaddress.IPv4Address(item["target_ip"])),
-            -1 if item["port"] is None else int(item["port"]),
-            item["application"] or "",
-        )
-    )
-    return {"generated_at": generated_at_iso(), "items": items}
 
 
 def main() -> int:

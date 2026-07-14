@@ -6,6 +6,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from api.offline_api_keys import (
+    OfflineApiKeyConfigurationError,
     OfflineApiKeyError,
     OfflineApiKeyNotFoundError,
     OfflineApiKeyService,
@@ -65,6 +66,7 @@ class OfflineApiKeyServiceTests(unittest.TestCase):
             scope="openid profile offline_access",
             timeout_seconds=5,
             ca_cert=None,
+            token_encryption_key="unit-test-offline-token-encryption-key",
         )
 
     def tearDown(self) -> None:
@@ -115,7 +117,10 @@ class OfflineApiKeyServiceTests(unittest.TestCase):
         self.assertIsNotNone(stored)
         self.assertNotIn("api_key", stored)
         self.assertNotIn("offline-token-value", str(stored))
+        self.assertIn("encrypted_offline_token", stored)
         self.assertNotIn("api_key", self.service.list("user-subject")[0])
+        self.assertNotIn("encrypted_offline_token", created)
+        self.assertNotIn("offline_token_updated_at", created)
 
     def test_api_key_refreshes_at_keycloak_and_uses_cached_claims(self) -> None:
         _, state = self.begin()
@@ -131,6 +136,32 @@ class OfflineApiKeyServiceTests(unittest.TestCase):
         self.assertEqual(cached_record["key_id"], record["key_id"])
         self.assertEqual(cached_claims["sub"], "user-subject")
         self.assertEqual(post.call_count, 1)
+        self.assertEqual(
+            post.call_args.kwargs["data"]["refresh_token"],
+            "offline-token-value-with-enough-random-data",
+        )
+
+    def test_missing_encryption_key_disables_offline_api_keys(self) -> None:
+        service = OfflineApiKeyService(
+            storage=self.storage,
+            token_verifier=FakeVerifier(),
+            authorization_url="https://keycloak.example/realms/trade-access/protocol/openid-connect/auth",
+            token_url="https://keycloak.example/realms/trade-access/protocol/openid-connect/token",
+            client_id="trade-access-offline",
+            client_secret="offline-client-secret",
+            scope="openid profile offline_access",
+            timeout_seconds=5,
+            ca_cert=None,
+            token_encryption_key=None,
+        )
+
+        self.assertFalse(service.configured)
+        with self.assertRaises(OfflineApiKeyConfigurationError):
+            service.begin_authorization(
+                subject_id="user-subject",
+                label="automation",
+                redirect_uri="https://api.example/api/v1/auth/offline/callback",
+            )
 
     def test_revoke_rejects_key_immediately(self) -> None:
         _, state = self.begin()
@@ -174,7 +205,9 @@ class OfflineApiKeyServiceTests(unittest.TestCase):
                 "too late",
             )
 
-    def test_refresh_response_token_does_not_replace_or_revoke_static_api_key(self) -> None:
+    def test_refresh_response_token_rotates_stored_token_without_changing_api_key(
+        self,
+    ) -> None:
         _, state = self.begin()
         created = self.complete(state)
         with patch(
@@ -185,12 +218,76 @@ class OfflineApiKeyServiceTests(unittest.TestCase):
                     "refresh_token": "rotated-offline-token",
                 }
             ),
-        ):
+        ) as first_post:
+            record, claims = self.service.authenticate(created["api_key"])
+        self.service._claims_cache.clear()
+        with patch(
+            "api.offline_api_keys.httpx.post",
+            return_value=FakeResponse(
+                {
+                    "access_token": "second-refreshed-access-token",
+                    "refresh_token": "second-rotated-offline-token",
+                }
+            ),
+        ) as second_post:
+            second_record, second_claims = self.service.authenticate(created["api_key"])
+
+        self.assertEqual(record["key_id"], created["key_id"])
+        self.assertEqual(claims["sub"], "user-subject")
+        self.assertEqual(second_record["key_id"], created["key_id"])
+        self.assertEqual(second_claims["sub"], "user-subject")
+        self.assertEqual(len(self.service.list("user-subject")), 1)
+        self.assertEqual(
+            first_post.call_args.kwargs["data"]["refresh_token"],
+            "offline-token-value-with-enough-random-data",
+        )
+        self.assertEqual(
+            second_post.call_args.kwargs["data"]["refresh_token"],
+            "rotated-offline-token",
+        )
+
+    def test_refresh_retries_with_new_stored_token_after_concurrent_rotation(
+        self,
+    ) -> None:
+        _, state = self.begin()
+        created = self.complete(state)
+        calls = []
+
+        def post_side_effect(*args, **kwargs):
+            refresh_token = kwargs["data"]["refresh_token"]
+            calls.append(refresh_token)
+            if len(calls) == 1:
+                self.storage.update_offline_api_key_token(
+                    created["key_id"],
+                    self.service._encrypt_offline_token("already-rotated-offline-token"),
+                    "2026-06-15T00:02:00+00:00",
+                )
+                return FakeResponse(
+                    {
+                        "error": "invalid_grant",
+                        "error_description": "Maximum allowed refresh token reuse exceeded",
+                    },
+                    status_code=400,
+                )
+            return FakeResponse(
+                {
+                    "access_token": "refreshed-after-race",
+                    "refresh_token": "next-rotated-offline-token",
+                }
+            )
+
+        with patch("api.offline_api_keys.httpx.post", side_effect=post_side_effect):
             record, claims = self.service.authenticate(created["api_key"])
 
         self.assertEqual(record["key_id"], created["key_id"])
         self.assertEqual(claims["sub"], "user-subject")
-        self.assertEqual(len(self.service.list("user-subject")), 1)
+        self.assertEqual(
+            calls,
+            [
+                "offline-token-value-with-enough-random-data",
+                "already-rotated-offline-token",
+            ],
+        )
 
     def test_disabled_user_cannot_use_api_key(self) -> None:
         _, state = self.begin()

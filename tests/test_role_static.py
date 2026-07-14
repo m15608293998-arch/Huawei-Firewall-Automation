@@ -27,15 +27,46 @@ class RoleStaticTests(unittest.TestCase):
 
         self.assertIn("extract_usg_application_names.py", application_yml)
         self.assertIn("application_plan.effective_ports", application_yml)
-        self.assertIn("Replace old applications with merged port plan in one SSH session", application_yml)
+        self.assertIn("incremental_ports.cli.j2", application_yml)
+        self.assertIn("Apply incremental application port changes in one SSH session", application_yml)
+        self.assertNotIn("replace_batch.cli.j2", application_yml)
         self.assertIn("display application name", (
             PROJECT_ROOT
             / "roles/usg6000e_trade_access/templates/application/query_details.cli.j2"
         ).read_text())
 
+    def test_incremental_port_template_returns_to_sa_after_group_changes(self) -> None:
+        template = (
+            PROJECT_ROOT
+            / "roles/usg6000e_trade_access/templates/application/incremental_ports.cli.j2"
+        ).read_text()
+
+        add_to_group_block = template.split("{% elif operation.type == 'add_to_group' %}", 1)[1]
+        add_to_group_block = add_to_group_block.split("{% elif operation.type == 'remove_application' %}", 1)[0]
+        remove_application_block = template.split("{% elif operation.type == 'remove_application' %}", 1)[1]
+        remove_application_block = remove_application_block.split("{% endif %}", 1)[0]
+
+        self.assertIn("application-group name", add_to_group_block)
+        self.assertIn("add application {{ operation.app_name }}\nquit\nsa", add_to_group_block)
+        self.assertIn("undo add application {{ operation.app_name }}\nquit\nsa", remove_application_block)
+        self.assertIn("sa\nundo user-defined-application name {{ operation.app_name }}", remove_application_block)
+
+    def test_incremental_port_template_can_rewrite_rule_ports(self) -> None:
+        template = (
+            PROJECT_ROOT
+            / "roles/usg6000e_trade_access/templates/application/incremental_ports.cli.j2"
+        ).read_text()
+
+        rewrite_block = template.split("{% elif operation.type == 'replace_rule_ports' %}", 1)[1]
+        rewrite_block = rewrite_block.split("{% elif operation.type == 'remove_ports' %}", 1)[0]
+
+        self.assertIn("rule name {{ operation.rule_name }}", rewrite_block)
+        self.assertIn("{% for port in operation.old_ports %}\nundo port {{ port }}", rewrite_block)
+        self.assertIn("{% for port in operation.ports %}\nport {{ port }}", rewrite_block)
+
     def test_security_engine_commit_runs_in_application_vsystem(self) -> None:
         main_yml = (
-            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/main.yml"
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/access/main.yml"
         ).read_text()
 
         self.assertIn("firewall_device.auth_type", main_yml)
@@ -98,18 +129,18 @@ class RoleStaticTests(unittest.TestCase):
         self.assertIn("display current-configuration | include {{ base_app_name }}", discovery_template)
 
     def test_split_actions_have_dedicated_task_files(self) -> None:
-        main_yml = (
-            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/main.yml"
+        access_yml = (
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/access/main.yml"
         ).read_text()
 
-        self.assertIn("'allow_ip'", main_yml)
-        self.assertIn("'allow_ports'", main_yml)
-        self.assertIn("'deny_ports'", main_yml)
-        self.assertIn("'deny_ip'", main_yml)
-        self.assertIn("access/allow_ip.yml", main_yml)
-        self.assertIn("access/allow_ports.yml", main_yml)
-        self.assertIn("access/deny_ports.yml", main_yml)
-        self.assertIn("access/deny_ip.yml", main_yml)
+        self.assertIn("'allow_ip'", access_yml)
+        self.assertIn("'allow_ports'", access_yml)
+        self.assertIn("'deny_ports'", access_yml)
+        self.assertIn("'deny_ip'", access_yml)
+        self.assertIn("access/allow_ip.yml", access_yml)
+        self.assertIn("access/allow_ports.yml", access_yml)
+        self.assertIn("access/deny_ports.yml", access_yml)
+        self.assertIn("access/deny_ip.yml", access_yml)
 
     def test_ip_deny_requires_ports_to_be_removed_first(self) -> None:
         deny_ip_yml = (
@@ -139,7 +170,7 @@ class RoleStaticTests(unittest.TestCase):
     def test_snapshot_workflow_is_read_only(self) -> None:
         paths = [
             PROJECT_ROOT / "playbooks/trade_server_access.yml",
-            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot.yml",
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/main.yml",
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot/main.yml",
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot/address_vsystem.yml",
             PROJECT_ROOT / "roles/usg6000e_trade_access/templates/snapshot/query_address_inventory.cli.j2",
@@ -158,7 +189,9 @@ class RoleStaticTests(unittest.TestCase):
         playbook = (
             PROJECT_ROOT / "playbooks/trade_server_access.yml"
         ).read_text()
-        self.assertIn("tasks_from: \"{{ trade_access_tasks_from | default('main') }}\"", playbook)
+        self.assertIn("name: usg6000e_trade_access", playbook)
+        self.assertNotIn("tasks_from:", playbook)
+        self.assertFalse((PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/snapshot.yml").exists())
         self.assertFalse((PROJECT_ROOT / "playbooks/trade_server_snapshot.yml").exists())
 
 

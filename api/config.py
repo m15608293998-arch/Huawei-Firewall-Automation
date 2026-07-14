@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     keycloak_offline_client_id: str = "trade-access-offline"
     keycloak_offline_client_secret: str | None = None
     keycloak_offline_scope: str = "openid profile offline_access"
+    offline_api_key_token_encryption_key: str | None = None
     keycloak_user_role: str = "trade-access-user"
     keycloak_admin_role: str = "trade-access-admin"
     keycloak_http_timeout_seconds: float = 5.0

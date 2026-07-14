@@ -133,7 +133,7 @@ Optional client scope: offline_access
 
 它使用 Confidential Client，是因为后端需要用 `client_secret` 和 authorization code 换 token。这个 secret 只能保存在后端，不能放进浏览器。
 
-如果 Keycloak 开启了 refresh token rotation，需要对 `trade-access-offline` 抑制或关闭轮换。否则用户保存的 `sk-<offline_token>` 可能在首次刷新后失效。
+如果 Keycloak 开启了 refresh token rotation / Revoke Refresh Token，后端会保存并滚动更新 Keycloak 返回的新 refresh token；不需要关闭 Realm 级轮换。
 
 ## 3. 后端如何读取 Keycloak 配置
 
@@ -147,11 +147,12 @@ TRADE_ACCESS_API_KEYCLOAK_BROWSER_CLIENT_ID
 TRADE_ACCESS_API_KEYCLOAK_ADMIN_BROWSER_CLIENT_ID
 TRADE_ACCESS_API_KEYCLOAK_OFFLINE_CLIENT_ID
 TRADE_ACCESS_API_KEYCLOAK_OFFLINE_CLIENT_SECRET
+TRADE_ACCESS_API_OFFLINE_API_KEY_TOKEN_ENCRYPTION_KEY
 TRADE_ACCESS_API_KEYCLOAK_ADMIN_CLIENT_ID
 TRADE_ACCESS_API_KEYCLOAK_ADMIN_CLIENT_SECRET
 ```
 
-这些配置决定后端连接哪个 Realm、校验哪个 API audience、使用哪个 Client 创建长期 SK，以及使用哪个 Client 调 Keycloak Admin API。
+这些配置决定后端连接哪个 Realm、校验哪个 API audience、使用哪个 Client 创建长期 SK、用哪个密钥加密保存当前 offline token，以及使用哪个 Client 调 Keycloak Admin API。
 
 ## 4. 普通用户登录和业务调用
 
@@ -215,7 +216,7 @@ Keycloak Role 包含 trade-access-admin
 -> 后端用 code + code_verifier + client_secret 换 token
 -> Keycloak 返回 access_token 和 offline_token
 -> 后端校验 access_token 中的 sub 等于当前用户 sub
--> 后端生成 sk-<offline_token>
+-> 后端生成 sk-<offline_token>，并加密保存当前 offline_token
 ```
 
 这里要区分两个概念：
@@ -231,7 +232,7 @@ Keycloak Role 包含 trade-access-admin
 sk-<keycloak_offline_token>
 ```
 
-数据库不保存明文 SK，只保存 SHA-256 hash、所属 Keycloak `sub`、名称、创建时间、最后使用时间和吊销状态。
+数据库不保存明文 SK，只保存 SHA-256 hash、所属 Keycloak `sub`、名称、创建时间、最后使用时间、吊销状态，以及加密后的当前有效 offline token。
 
 ## 7. 长期 `sk-` API Key 如何使用
 
@@ -247,8 +248,9 @@ Authorization: Bearer sk-<keycloak_offline_token>
 识别 sk- 前缀
 -> 对完整 SK 做 hash，查本地记录
 -> 确认未吊销、用户未禁用
--> 取出 offline token
+-> 解密数据库中的当前有效 offline token
 -> 用 offline token + trade-access-offline client_secret 向 Keycloak 换短期 Access Token
+-> 如果 Keycloak 返回新的 refresh_token，立即加密覆盖保存
 -> 验证 Access Token 的签名、iss、aud、sub
 -> 确认换回来的 sub 和本地 SK 绑定的 subject_id 一致
 -> 按 sub 读取最新本地业务权限
@@ -289,7 +291,7 @@ Keycloak 只参与认证和基础身份确认，不参与设备 SSH 登录。
 - Access Token 和 `sk-` 都是 Bearer 凭据，生产环境必须使用 HTTPS。
 - 浏览器 Client 不保存 Secret。
 - `trade-access-offline` 和 `trade-access-provisioner` 的 Secret 只保存在后端。
-- 完整 `sk-` 只展示一次，后端只保存 hash。
+- 完整 `sk-` 只展示一次；后端保存 SK hash，并用服务端密钥加密保存当前有效 offline token。
 - 管理员接口只接受管理员 Portal 登录得到的 Token，不接受普通 Portal Token 或个人 SK。
 - 权限、启停和 SK 吊销状态由后端本地库控制，修改后下一次请求生效。
 

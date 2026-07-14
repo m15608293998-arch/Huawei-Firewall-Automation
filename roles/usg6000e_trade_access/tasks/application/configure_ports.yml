@@ -99,19 +99,24 @@
   ansible.builtin.set_fact:
     application_state: "{{ application_plan_result.stdout | from_json }}"
     application_plan: "{{ (application_plan_result.stdout | from_json).plan }}"
-    application_units: "{{ (application_plan_result.stdout | from_json).plan.units }}"
-    application_config_units: "{{ (application_plan_result.stdout | from_json).plan.units }}"
-    application_object_names_to_replace: "{{ (application_plan_result.stdout | from_json).object_names }}"
-    application_group_names_to_replace: "{{ (application_plan_result.stdout | from_json).group_names }}"
+    application_names_to_validate: "{{ (application_plan_result.stdout | from_json).plan.desired_names }}"
 
 - name: Reject an existing application object that points at another IP
   ansible.builtin.assert:
     that:
       - application_state.all_target_ips_match | bool
     fail_msg: >-
-      Refusing to replace {{ application_state.invalid_target_applications }} because
+      Refusing to modify {{ application_state.invalid_target_applications }} because
       an application name belonging to {{ access_request.target_ip }} contains a
       different target IP or mask.
+
+- name: Reject invalid existing application ports
+  ansible.builtin.assert:
+    that:
+      - application_state.all_ports_valid | bool
+    fail_msg: >-
+      Refusing to modify {{ base_app_name }} because the firewall returned invalid
+      application ports: {{ application_state.invalid_ports }}.
 
 - name: Show application port plan
   ansible.builtin.debug:
@@ -123,19 +128,20 @@
       removed_ports: "{{ application_plan.removed_ports }}"
       effective_ports: "{{ application_plan.effective_ports }}"
       application_names: "{{ application_plan.desired_names }}"
-      rebuild_needed: "{{ application_plan.rebuild_needed }}"
-      rebuild_reasons: "{{ application_plan.rebuild_reasons }}"
+      change_needed: "{{ application_plan.change_needed }}"
+      change_reasons: "{{ application_plan.change_reasons }}"
+      operations: "{{ application_plan.operations }}"
 
-- name: Render batched application replacement
+- name: Render incremental application port changes
   ansible.builtin.template:
-    src: application/replace_batch.cli.j2
-    dest: "{{ local_tmp_dir }}/replace_applications_batch_{{ access_request.target_ip }}.cli"
+    src: application/incremental_ports.cli.j2
+    dest: "{{ local_tmp_dir }}/incremental_application_ports_{{ access_request.target_ip }}.cli"
     mode: "0600"
-  when: application_plan.rebuild_needed | bool
+  when: application_plan.change_needed | bool
 
-- name: Replace old applications with merged port plan in one SSH session
+- name: Apply incremental application port changes in one SSH session
   ansible.builtin.command:
-    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/replace_applications_batch_' ~ access_request.target_ip ~ '.cli'] }}"
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/incremental_application_ports_' ~ access_request.target_ip ~ '.cli'] }}"
   environment: "{{ firewall_cli_environment }}"
   register: application_config_result
   changed_when: true
@@ -151,26 +157,26 @@
             ''
           )
       )
-  when: application_plan.rebuild_needed | bool
+  when: application_plan.change_needed | bool
 
-- name: Show merged application configuration output
+- name: Show incremental application configuration output
   ansible.builtin.debug:
     var: application_config_result.stdout_lines
-  when: application_plan.rebuild_needed | bool
+  when: application_plan.change_needed | bool
 
-- name: Mark firewall changed after application replacement
+- name: Mark firewall changed after application port changes
   ansible.builtin.set_fact:
     firewall_mutated: true
-  when: application_plan.rebuild_needed | bool
+  when: application_plan.change_needed | bool
 
 - name: Render exact application validation query
   ansible.builtin.template:
     src: application/query_validation.cli.j2
     dest: "{{ local_tmp_dir }}/query_application_validation_{{ access_request.target_ip }}.cli"
     mode: "0600"
-  when: application_plan.rebuild_needed | bool
+  when: application_plan.change_needed | bool
 
-- name: Query application objects and group membership after replacement
+- name: Query application objects and group membership after incremental change
   ansible.builtin.command:
     argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_application_validation_' ~ access_request.target_ip ~ '.cli'] }}"
   environment: "{{ firewall_cli_environment }}"
@@ -181,7 +187,7 @@
       'Unrecognized command' in application_validation_result.stdout or
       'Too many parameters' in application_validation_result.stdout or
       'The specified object does not exist' in application_validation_result.stdout
-  when: application_plan.rebuild_needed | bool
+  when: application_plan.change_needed | bool
 
 - name: Save application validation output
   ansible.builtin.copy:
@@ -189,9 +195,9 @@
     mode: "0600"
     content: "{{ application_validation_result.stdout }}"
   changed_when: false
-  when: application_plan.rebuild_needed | bool
+  when: application_plan.change_needed | bool
 
-- name: Parse application state after replacement
+- name: Parse application state after incremental change
   ansible.builtin.command:
     argv:
       - "{{ local_python_interpreter | default('python3.12') }}"
@@ -213,27 +219,28 @@
   register: application_validation_parse_result
   changed_when: false
   failed_when: application_validation_parse_result.rc != 0
-  when: application_plan.rebuild_needed | bool
+  when: application_plan.change_needed | bool
 
-- name: Validate merged application state on firewall
+- name: Validate incremental application state on firewall
   ansible.builtin.assert:
     that:
       - application_validation_state.all_target_ips_match | bool
-      - not application_validation_state.plan.rebuild_needed | bool
+      - application_validation_state.all_ports_valid | bool
+      - not application_validation_state.plan.change_needed | bool
       - application_validation_state.plan.existing_ports == application_plan.effective_ports
     fail_msg: >-
-      Firewall application validation failed after additive replacement.
+      Firewall application validation failed after incremental port change.
       Expected plan: {{ application_plan }}.
       Actual state: {{ application_validation_state }}.
     success_msg: >-
       Firewall applications match the requested port operation result.
   vars:
     application_validation_state: "{{ application_validation_parse_result.stdout | from_json }}"
-  when: application_plan.rebuild_needed | bool
+  when: application_plan.change_needed | bool
 
 - name: Confirm requested ports already exist
   ansible.builtin.debug:
     msg: >-
-      No application rebuild was needed. The requested {{ application_port_mode | default('add') }}
+      No application port change was needed. The requested {{ application_port_mode | default('add') }}
       port operation is already reflected for {{ access_request.target_ip }}.
-  when: not application_plan.rebuild_needed | bool
+  when: not application_plan.change_needed | bool

@@ -22,7 +22,7 @@ class TradeSnapshotParserTests(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return str(path)
 
-    def test_build_snapshot_returns_one_item_per_ip_port(self) -> None:
+    def test_build_snapshot_returns_only_effective_ip_ports(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             public = self.write_file(
@@ -82,23 +82,12 @@ class TradeSnapshotParserTests(unittest.TestCase):
         allowed_ports = [
             item["port"]
             for item in items
-            if item["target_ip"] == "192.168.66.22"
+            if item["ip"] == "192.168.66.22"
         ]
         self.assertEqual(allowed_ports, [12001, 12002, 12003])
         first = items[0]
-        self.assertEqual(first["state"], "allowed")
-        self.assertEqual(
-            first["address_presence"],
-            {"public": True, "Internet": True, "private": True},
-        )
-        self.assertTrue(first["in_application_group"])
-        self.assertEqual(first["application_group"], "UD_TradeGroup_Internet")
-
-        ip_only = items[-1]
-        self.assertEqual(ip_only["target_ip"], "192.168.66.44")
-        self.assertIsNone(ip_only["port"])
-        self.assertEqual(ip_only["state"], "ip_only")
-        self.assertIsNone(ip_only["application"])
+        self.assertEqual(first, {"ip": "192.168.66.22", "port": 12001})
+        self.assertNotIn({"ip": "192.168.66.44", "port": None}, items)
 
     def test_build_ip_and_port_snapshots_are_separate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -142,12 +131,12 @@ class TradeSnapshotParserTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            [item["target_ip"] for item in ip_payload["items"]],
+            [item["ip"] for item in ip_payload["items"]],
             ["192.168.66.22", "192.168.66.44"],
         )
         self.assertNotIn("port", ip_payload["items"][0])
         self.assertEqual(
-            [item["target_ip"] for item in port_payload["items"]],
+            [item["ip"] for item in port_payload["items"]],
             ["192.168.66.22"],
         )
         self.assertEqual(port_payload["items"][0]["port"], 12001)
@@ -161,7 +150,7 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 "===== CLI FILE: /tmp/query_public.cli =====\n"
                 "address 1 192.168.66.22 mask 32\n"
                 "===== CLI FILE: /tmp/query_private.cli =====\n"
-                "address 2 192.168.66.44 mask 32\n",
+                "address 2 192.168.66.22 mask 32\n",
             )
             payload = snapshot_parser.build_ip_snapshot(
                 [
@@ -178,17 +167,10 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 ]
             )
 
-        by_ip = {item["target_ip"]: item for item in payload["items"]}
-        self.assertEqual(
-            by_ip["192.168.66.22"]["address_presence"],
-            {"public": True, "private": False},
-        )
-        self.assertEqual(
-            by_ip["192.168.66.44"]["address_presence"],
-            {"public": False, "private": True},
-        )
+        by_ip = {item["ip"]: item for item in payload["items"]}
+        self.assertEqual(by_ip, {"192.168.66.22": {"ip": "192.168.66.22"}})
 
-    def test_group_missing_is_reported_per_application(self) -> None:
+    def test_group_missing_is_not_exposed_as_effective_port(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             public = self.write_file(root, "public.out", "address 1 192.168.66.22 mask 32\n")
@@ -210,8 +192,7 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 "UD_TradeGroup_Internet",
             )
 
-        self.assertEqual(payload["items"][0]["state"], "group_missing")
-        self.assertFalse(payload["items"][0]["in_application_group"])
+        self.assertEqual(payload["items"], [])
 
     def test_invalid_application_declaration_resets_current_context(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -247,8 +228,221 @@ class TradeSnapshotParserTests(unittest.TestCase):
             )
 
         self.assertEqual(len(payload["items"]), 1)
-        self.assertEqual(payload["items"][0]["target_ip"], "192.168.66.22")
+        self.assertEqual(payload["items"][0]["ip"], "192.168.66.22")
         self.assertEqual(payload["items"][0]["port"], 12001)
+
+    def test_ports_snapshot_uses_rule_destination_not_application_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            address_text = (
+                "address 1 139.196.241.63 mask 255.255.255.255\n"
+                "address 2 10.237.30.32 mask 32\n"
+            )
+            public = self.write_file(root, "public.out", address_text)
+            internet = self.write_file(root, "internet.out", address_text)
+            private = self.write_file(root, "private.out", address_text)
+            full_config = (
+                "user-defined-application name UD_TS_139.196.241.63/10.237.30\n"
+                " rule name 1\n"
+                "  ip-address 139.196.241.63 32\n"
+                "  port 34002\n"
+                "  port 34009\n"
+                " rule name 2\n"
+                "  ip-address 10.237.30.32 32\n"
+                "  port 12002\n"
+                "  port 12009\n"
+                "application-group name UD_TradeGroup_Internet\n"
+                " add application UD_TS_139.196.241.63/10.237.30\n"
+            )
+
+            payload = snapshot_parser.build_port_snapshot(
+                [
+                    {"vsystem": "public", "path": public},
+                    {"vsystem": "Internet", "path": internet},
+                    {"vsystem": "private", "path": private},
+                ],
+                full_config,
+                "",
+                full_config,
+                "UD_TS_",
+                "private",
+                "UD_TradeGroup_Internet",
+            )
+
+        self.assertEqual(
+            payload["items"],
+            [
+                {"ip": "10.237.30.32", "port": 12002},
+                {"ip": "10.237.30.32", "port": 12009},
+                {"ip": "139.196.241.63", "port": 34002},
+                {"ip": "139.196.241.63", "port": 34009},
+            ],
+        )
+        self.assertNotIn({"ip": "139.196.241.63", "port": 12002}, payload["items"])
+
+    def test_display_destination_label_is_parsed_as_rule_ip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            address_text = "address 1 10.237.30.32 mask 32\n"
+            public = self.write_file(root, "public.out", address_text)
+            internet = self.write_file(root, "internet.out", address_text)
+            private = self.write_file(root, "private.out", address_text)
+            application_details = (
+                "Application UD_TS_legacy Information:\n"
+                "Rule Name : 1\n"
+                "Destination : 10.237.30.32/32\n"
+                "Port : 8010\n"
+            )
+            application_group = (
+                "application-group name UD_TradeGroup_Internet\n"
+                "add application UD_TS_legacy\n"
+            )
+
+            payload = snapshot_parser.build_port_snapshot(
+                [
+                    {"vsystem": "public", "path": public},
+                    {"vsystem": "Internet", "path": internet},
+                    {"vsystem": "private", "path": private},
+                ],
+                "",
+                application_details,
+                application_group,
+                "UD_TS_",
+                "private",
+                "UD_TradeGroup_Internet",
+            )
+
+        self.assertEqual(payload["items"], [{"ip": "10.237.30.32", "port": 8010}])
+
+    def test_non_prefixed_group_member_rules_are_split_by_rule_ip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            address_text = (
+                "address 1 211.95.106.242 mask 32\n"
+                "address 2 101.230.216.138 mask 32\n"
+            )
+            public = self.write_file(root, "public.out", address_text)
+            internet = self.write_file(root, "internet.out", address_text)
+            private = self.write_file(root, "private.out", address_text)
+            full_config = (
+                "user-defined-application name UD_211.95.106.242101.230.216.138\n"
+                " rule name 1\n"
+                "  ip-address 211.95.106.242 32\n"
+                "  port 12009\n"
+                "  port 12002\n"
+                " rule name 4\n"
+                "  ip-address 211.95.106.242 32\n"
+                "  ip-address 101.230.216.138 32\n"
+                "  port 45447\n"
+                "  port 45448\n"
+                " rule name 5\n"
+                "  ip-address 211.95.106.242 32\n"
+                "  ip-address 101.230.216.138 32\n"
+                "  port 32042\n"
+                "  port 32043\n"
+                "  port 32047\n"
+                "  port 32048\n"
+                "application-group name UD_TradeGroup_Internet\n"
+                " add application UD_211.95.106.242101.230.216.138\n"
+            )
+
+            payload = snapshot_parser.build_port_snapshot(
+                [
+                    {"vsystem": "public", "path": public},
+                    {"vsystem": "Internet", "path": internet},
+                    {"vsystem": "private", "path": private},
+                ],
+                full_config,
+                "",
+                full_config,
+                "UD_TS_",
+                "private",
+                "UD_TradeGroup_Internet",
+            )
+
+        self.assertEqual(
+            payload["items"],
+            [
+                {"ip": "101.230.216.138", "port": 32042},
+                {"ip": "101.230.216.138", "port": 32043},
+                {"ip": "101.230.216.138", "port": 32047},
+                {"ip": "101.230.216.138", "port": 32048},
+                {"ip": "101.230.216.138", "port": 45447},
+                {"ip": "101.230.216.138", "port": 45448},
+                {"ip": "211.95.106.242", "port": 12002},
+                {"ip": "211.95.106.242", "port": 12009},
+                {"ip": "211.95.106.242", "port": 32042},
+                {"ip": "211.95.106.242", "port": 32043},
+                {"ip": "211.95.106.242", "port": 32047},
+                {"ip": "211.95.106.242", "port": 32048},
+                {"ip": "211.95.106.242", "port": 45447},
+                {"ip": "211.95.106.242", "port": 45448},
+            ],
+        )
+        self.assertNotIn({"ip": "101.230.216.138", "port": 12002}, payload["items"])
+
+    def test_standard_application_name_does_not_supply_rule_ip_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            address_text = "address 1 192.168.66.22 mask 32\n"
+            public = self.write_file(root, "public.out", address_text)
+            internet = self.write_file(root, "internet.out", address_text)
+            private = self.write_file(root, "private.out", address_text)
+            full_config = (
+                "user-defined-application name UD_TS_192.168.66.22_2\n"
+                " rule name 1\n"
+                "  port 12003\n"
+                "application-group name UD_TradeGroup_Internet\n"
+                " add application UD_TS_192.168.66.22_2\n"
+            )
+
+            payload = snapshot_parser.build_port_snapshot(
+                [
+                    {"vsystem": "public", "path": public},
+                    {"vsystem": "Internet", "path": internet},
+                    {"vsystem": "private", "path": private},
+                ],
+                full_config,
+                "",
+                full_config,
+                "UD_TS_",
+                "private",
+                "UD_TradeGroup_Internet",
+            )
+
+        self.assertEqual(payload["items"], [])
+
+    def test_standard_application_name_still_uses_rule_ip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            address_text = "address 1 192.168.66.22 mask 32\n"
+            public = self.write_file(root, "public.out", address_text)
+            internet = self.write_file(root, "internet.out", address_text)
+            private = self.write_file(root, "private.out", address_text)
+            full_config = (
+                "user-defined-application name UD_TS_192.168.66.22_2\n"
+                " rule name 1\n"
+                "  ip-address 192.168.66.22 32\n"
+                "  port 12003\n"
+                "application-group name UD_TradeGroup_Internet\n"
+                " add application UD_TS_192.168.66.22_2\n"
+            )
+
+            payload = snapshot_parser.build_port_snapshot(
+                [
+                    {"vsystem": "public", "path": public},
+                    {"vsystem": "Internet", "path": internet},
+                    {"vsystem": "private", "path": private},
+                ],
+                full_config,
+                "",
+                full_config,
+                "UD_TS_",
+                "private",
+                "UD_TradeGroup_Internet",
+            )
+
+        self.assertEqual(payload["items"], [{"ip": "192.168.66.22", "port": 12003}])
 
 
 if __name__ == "__main__":

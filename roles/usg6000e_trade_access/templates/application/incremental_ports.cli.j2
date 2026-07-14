@@ -1,0 +1,70 @@
+system-view
+{% if application_vsystem | lower != 'public' %}
+switch vsys {{ application_vsystem }}
+system-view
+{% endif %}
+sa
+{% for operation in application_plan.operations %}
+{% if operation.type == 'create_application' %}
+user-defined-application name {{ operation.app_name }}
+category {{ user_defined_application.category }} sub-category {{ user_defined_application.subcategory }}
+data-model {{ user_defined_application.data_model }}
+label {{ user_defined_application.label }}
+quit
+{% elif operation.type == 'add_rule' %}
+user-defined-application name {{ operation.app_name }}
+rule name {{ operation.rule_name }}
+ip-address {{ access_request.target_ip }} {{ access_request.mask | default(32) }}
+{% for port in operation.ports %}
+port {{ port }}
+{% endfor %}
+quit
+quit
+{% elif operation.type == 'add_ports' %}
+user-defined-application name {{ operation.app_name }}
+rule name {{ operation.rule_name }}
+{% for port in operation.ports %}
+port {{ port }}
+{% endfor %}
+quit
+quit
+{% elif operation.type == 'replace_rule_ports' %}
+user-defined-application name {{ operation.app_name }}
+rule name {{ operation.rule_name }}
+{% for port in operation.old_ports %}
+undo port {{ port }}
+{% endfor %}
+{% for port in operation.ports %}
+port {{ port }}
+{% endfor %}
+quit
+quit
+{% elif operation.type == 'remove_ports' %}
+user-defined-application name {{ operation.app_name }}
+rule name {{ operation.rule_name }}
+{% for port in operation.ports %}
+undo port {{ port }}
+{% endfor %}
+quit
+quit
+{% elif operation.type == 'remove_rule' %}
+user-defined-application name {{ operation.app_name }}
+undo rule name {{ operation.rule_name }}
+quit
+{% elif operation.type == 'add_to_group' %}
+application-group name {{ user_defined_application.application_group_name }}
+add application {{ operation.app_name }}
+quit
+sa
+{% elif operation.type == 'remove_application' %}
+application-group name {{ user_defined_application.application_group_name }}
+undo add application {{ operation.app_name }}
+quit
+sa
+undo user-defined-application name {{ operation.app_name }}
+{% endif %}
+{% endfor %}
+quit
+{% if application_vsystem | lower != 'public' %}
+quit
+{% endif %}

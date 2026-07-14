@@ -202,19 +202,8 @@ class ApiTests(unittest.TestCase):
             "generated_at": "2026-07-03T10:30:00+08:00",
             "items": [
                 {
-                    "target_ip": "192.168.66.22",
-                    "mask": 32,
+                    "ip": "192.168.66.22",
                     "port": 12001,
-                    "state": "allowed",
-                    "address_presence": {
-                        "public": True,
-                        "Internet": True,
-                        "private": True,
-                    },
-                    "application_vsystem": "private",
-                    "application": "UD_TS_192.168.66.22",
-                    "application_group": "UD_TradeGroup_Internet",
-                    "in_application_group": True,
                 }
             ],
         }
@@ -230,7 +219,7 @@ class ApiTests(unittest.TestCase):
             main_module.runner_service.run_firewall_snapshot = original_runner
 
         validated = FirewallSnapshotResponse.model_validate(response)
-        self.assertEqual(validated.items[0].target_ip, "192.168.66.22")
+        self.assertEqual(validated.items[0].ip, "192.168.66.22")
         self.assertEqual(validated.items[0].port, 12001)
 
     def test_split_firewall_snapshot_endpoints_use_separate_modes(self) -> None:
@@ -246,14 +235,7 @@ class ApiTests(unittest.TestCase):
                     "generated_at": "2026-07-03T10:30:00+08:00",
                     "items": [
                         {
-                            "target_ip": "192.168.66.22",
-                            "mask": 32,
-                            "state": "allowed",
-                            "address_presence": {
-                                "public": True,
-                                "Internet": True,
-                                "private": True,
-                            },
+                            "ip": "192.168.66.22",
                         }
                     ],
                 }
@@ -262,19 +244,8 @@ class ApiTests(unittest.TestCase):
                     "generated_at": "2026-07-03T10:30:00+08:00",
                     "items": [
                         {
-                            "target_ip": "192.168.66.22",
-                            "mask": 32,
+                            "ip": "192.168.66.22",
                             "port": 12001,
-                            "state": "allowed",
-                            "address_presence": {
-                                "public": True,
-                                "Internet": True,
-                                "private": True,
-                            },
-                            "application_vsystem": "private",
-                            "application": "UD_TS_192.168.66.22",
-                            "application_group": "UD_TradeGroup_Internet",
-                            "in_application_group": True,
                         }
                     ],
                 }
@@ -294,7 +265,7 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(requested_modes, ["ips", "ports"])
         self.assertEqual(
-            FirewallIpSnapshotResponse.model_validate(ip_response).items[0].target_ip,
+            FirewallIpSnapshotResponse.model_validate(ip_response).items[0].ip,
             "192.168.66.22",
         )
         self.assertEqual(

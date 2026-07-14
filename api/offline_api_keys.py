@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 
 from api.keycloak import (
     InvalidAccessTokenError,
@@ -37,6 +38,29 @@ class OfflineApiKeyUnavailableError(RuntimeError):
     pass
 
 
+class OfflineTokenCipher:
+    PREFIX = "fernet-v1:"
+
+    def __init__(self, key_material: str) -> None:
+        key = base64.urlsafe_b64encode(
+            hashlib.sha256(key_material.encode("utf-8")).digest()
+        )
+        self._fernet = Fernet(key)
+
+    def encrypt(self, token: str) -> str:
+        encrypted = self._fernet.encrypt(token.encode("utf-8")).decode("ascii")
+        return "{0}{1}".format(self.PREFIX, encrypted)
+
+    def decrypt(self, value: str) -> str:
+        if not value.startswith(self.PREFIX):
+            raise OfflineApiKeyError("Stored offline token format is invalid.")
+        encrypted = value[len(self.PREFIX) :].encode("ascii")
+        try:
+            return self._fernet.decrypt(encrypted).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError) as exc:
+            raise OfflineApiKeyError("Stored offline token could not be decrypted.") from exc
+
+
 class OfflineApiKeyService:
     LAST_USED_WRITE_INTERVAL = timedelta(minutes=5)
 
@@ -51,6 +75,7 @@ class OfflineApiKeyService:
         scope: str,
         timeout_seconds: float,
         ca_cert: str | None,
+        token_encryption_key: str | None = None,
         authorization_ttl_seconds: int = 300,
         max_keys_per_user: int = 5,
     ) -> None:
@@ -65,12 +90,17 @@ class OfflineApiKeyService:
         self.ca_cert = ca_cert
         self.authorization_ttl_seconds = authorization_ttl_seconds
         self.max_keys_per_user = max_keys_per_user
+        self._token_cipher = (
+            OfflineTokenCipher(token_encryption_key.strip())
+            if token_encryption_key and token_encryption_key.strip()
+            else None
+        )
         self._claims_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._lock = threading.Lock()
 
     @property
     def configured(self) -> bool:
-        return bool(self.client_id and self.client_secret)
+        return bool(self.client_id and self.client_secret and self._token_cipher)
 
     def begin_authorization(
         self,
@@ -168,13 +198,17 @@ class OfflineApiKeyService:
 
         raw_key = API_KEY_PREFIX + offline_token
         token_hash = self._hash(raw_key)
+        encrypted_offline_token = self._encrypt_offline_token(offline_token)
+        created_at = datetime.now(timezone.utc).isoformat()
         record = {
             "key_id": uuid.uuid4().hex,
             "subject_id": subject_id,
             "label": str(transaction["label"]),
             "token_hash": token_hash,
             "key_hint": "sk-...{0}".format(token_hash[:8]),
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "encrypted_offline_token": encrypted_offline_token,
+            "offline_token_updated_at": created_at,
+            "created_at": created_at,
             "last_used_at": None,
             "revoked_at": None,
         }
@@ -186,8 +220,7 @@ class OfflineApiKeyService:
 
     def authenticate(self, raw_key: str) -> tuple[dict[str, Any], dict[str, Any]]:
         self._require_configured()
-        offline_token = self._parse_offline_token(raw_key)
-        # 数据库只保存 hash，原始 offline token 只存在调用方手里。
+        fallback_offline_token = self._parse_offline_token(raw_key)
         record = self.storage.get_offline_api_key_by_hash(self._hash(raw_key))
         if record is None:
             raise OfflineApiKeyError("Invalid API key.")
@@ -202,14 +235,13 @@ class OfflineApiKeyService:
             if cached is not None and now < cached[0]:
                 claims = cached[1]
             else:
-                # 缓存短期 claims，避免每个 API 请求都打 Keycloak token endpoint。
-                payload = self._token_request(
-                    {
-                        "grant_type": "refresh_token",
-                        "client_id": self.client_id,
-                        "client_secret": str(self.client_secret),
-                        "refresh_token": offline_token,
-                    }
+                offline_token = self._offline_token_for_record(
+                    record,
+                    fallback_offline_token,
+                )
+                payload, token_record = self._refresh_offline_token(
+                    record,
+                    offline_token,
                 )
                 access_token = payload.get("access_token")
                 if not isinstance(access_token, str) or not access_token:
@@ -217,6 +249,13 @@ class OfflineApiKeyService:
                 claims = self._verify_access_token(access_token)
                 if claims.get("sub") != subject_id:
                     raise OfflineApiKeyError("API key subject does not match Keycloak.")
+                rotated_offline_token = payload.get("refresh_token")
+                if isinstance(rotated_offline_token, str) and rotated_offline_token:
+                    self.storage.update_offline_api_key_token(
+                        str(token_record["key_id"]),
+                        self._encrypt_offline_token(rotated_offline_token),
+                        datetime.now(timezone.utc).isoformat(),
+                    )
                 raw_exp = claims.get("exp")
                 usable_until = float(raw_exp) - 30.0 if raw_exp else now
                 self._claims_cache[str(record["key_id"])] = (usable_until, claims)
@@ -259,7 +298,7 @@ class OfflineApiKeyService:
     def _require_configured(self) -> None:
         if not self.configured:
             raise OfflineApiKeyConfigurationError(
-                "Keycloak offline API key client is not configured."
+                "Keycloak offline API key client and token encryption key are not configured."
             )
 
     def _require_eligible_user(self, subject_id: str) -> dict[str, Any]:
@@ -303,6 +342,32 @@ class OfflineApiKeyService:
             str(detail or "Keycloak token exchange failed.")
         )
 
+    def _refresh_offline_token(
+        self,
+        record: dict[str, Any],
+        offline_token: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            return self._refresh_once(offline_token), record
+        except OfflineApiKeyError:
+            latest = self.storage.get_offline_api_key_by_hash(str(record["token_hash"]))
+            if latest is None or latest.get("revoked_at"):
+                raise
+            if not self._stored_token_changed(record, latest):
+                raise
+            latest_token = self._offline_token_for_record(latest, offline_token)
+            return self._refresh_once(latest_token), latest
+
+    def _refresh_once(self, offline_token: str) -> dict[str, Any]:
+        return self._token_request(
+            {
+                "grant_type": "refresh_token",
+                "client_id": self.client_id,
+                "client_secret": str(self.client_secret),
+                "refresh_token": offline_token,
+            }
+        )
+
     def _verify_access_token(self, token: str) -> dict[str, Any]:
         try:
             claims = self.token_verifier.verify(token)
@@ -344,10 +409,44 @@ class OfflineApiKeyService:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
 
+    def _encrypt_offline_token(self, token: str) -> str:
+        if self._token_cipher is None:
+            raise OfflineApiKeyConfigurationError(
+                "Offline API key token encryption key is not configured."
+            )
+        return self._token_cipher.encrypt(token)
+
+    def _offline_token_for_record(
+        self,
+        record: dict[str, Any],
+        fallback_offline_token: str,
+    ) -> str:
+        encrypted_offline_token = record.get("encrypted_offline_token")
+        if isinstance(encrypted_offline_token, str) and encrypted_offline_token:
+            if self._token_cipher is None:
+                raise OfflineApiKeyConfigurationError(
+                    "Offline API key token encryption key is not configured."
+                )
+            return self._token_cipher.decrypt(encrypted_offline_token)
+        return fallback_offline_token
+
+    @staticmethod
+    def _stored_token_changed(
+        old_record: dict[str, Any],
+        new_record: dict[str, Any],
+    ) -> bool:
+        return (
+            new_record.get("offline_token_updated_at")
+            != old_record.get("offline_token_updated_at")
+            or new_record.get("encrypted_offline_token")
+            != old_record.get("encrypted_offline_token")
+        )
+
     @staticmethod
     def _public_record(record: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in record.items()
-            if key not in {"token_hash"}
+        hidden_fields = {
+            "token_hash",
+            "encrypted_offline_token",
+            "offline_token_updated_at",
         }
+        return {key: value for key, value in record.items() if key not in hidden_fields}

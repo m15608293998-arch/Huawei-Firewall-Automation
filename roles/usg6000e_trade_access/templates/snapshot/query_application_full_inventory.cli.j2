@@ -3,7 +3,7 @@ system-view
 switch vsys {{ application_vsystem }}
 system-view
 {% endif %}
-display current-configuration | begin user-defined-application name {{ user_defined_application.name_prefix }}
+display current-configuration | begin user-defined-application name
 {% if application_vsystem | lower != 'public' %}
 quit
 quit

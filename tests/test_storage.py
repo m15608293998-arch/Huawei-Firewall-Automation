@@ -50,6 +50,39 @@ class StorageMigrationTests(unittest.TestCase):
             self.assertIn("principal_client_id", job_columns)
             self.assertIn("permission_code", job_columns)
 
+    def test_legacy_offline_api_key_schema_receives_rotating_token_columns(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "legacy-offline-keys.sqlite3"
+            with sqlite3.connect(database_path) as conn:
+                conn.execute(
+                    """
+                    create table offline_api_keys (
+                        key_id text primary key,
+                        subject_id text not null,
+                        label text not null,
+                        token_hash text not null unique,
+                        key_hint text not null,
+                        created_at text not null,
+                        last_used_at text,
+                        revoked_at text
+                    )
+                    """
+                )
+            storage = JobStorage(database_path)
+
+            with storage._connect() as conn:
+                columns = {
+                    row["name"]
+                    for row in conn.execute(
+                        "pragma table_info(offline_api_keys)"
+                    ).fetchall()
+                }
+
+            self.assertIn("encrypted_offline_token", columns)
+            self.assertIn("offline_token_updated_at", columns)
+
     def test_legacy_client_tables_are_not_created_for_new_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             storage = JobStorage(Path(temp_dir) / "new.sqlite3")

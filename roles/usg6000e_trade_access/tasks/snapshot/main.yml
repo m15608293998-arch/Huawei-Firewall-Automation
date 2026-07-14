@@ -54,7 +54,11 @@
   ansible.builtin.set_fact:
     snapshot_address_sources: []
     resolved_snapshot_mode: "{{ snapshot_mode | default('snapshot') }}"
-    snapshot_output_path: "{{ snapshot_output_path | default(local_tmp_dir ~ '/firewall_snapshot.json') }}"
+    snapshot_output_path: >-
+      {{
+        snapshot_output_path
+        | default(local_tmp_dir ~ '/firewall_' ~ (snapshot_mode | default('snapshot')) ~ '_snapshot.json')
+      }}
     firewall_cli_environment: >-
       {{
         {'USG6000E_DEVICE_PASSWORD': firewall_device.device_password}

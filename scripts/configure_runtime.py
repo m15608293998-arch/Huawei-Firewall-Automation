@@ -54,6 +54,11 @@ def main() -> int:
     offline_client_secret = getpass.getpass("Offline API Key Client Secret: ").strip()
     if not offline_client_secret:
         parser.error("Offline API Key Client Secret must not be empty")
+    offline_token_encryption_key = getpass.getpass(
+        "Offline API Key Token Encryption Key: "
+    ).strip()
+    if not offline_token_encryption_key:
+        parser.error("Offline API Key Token Encryption Key must not be empty")
 
     # 只生成 API 进程需要的环境变量，设备登录密钥仍由 Ansible 配置负责。
     values = {
@@ -68,6 +73,9 @@ def main() -> int:
         "TRADE_ACCESS_API_KEYCLOAK_OFFLINE_CLIENT_ID": args.offline_client_id,
         "TRADE_ACCESS_API_KEYCLOAK_OFFLINE_CLIENT_SECRET": offline_client_secret,
         "TRADE_ACCESS_API_KEYCLOAK_OFFLINE_SCOPE": args.offline_client_scope,
+        "TRADE_ACCESS_API_OFFLINE_API_KEY_TOKEN_ENCRYPTION_KEY": (
+            offline_token_encryption_key
+        ),
         "TRADE_ACCESS_API_KEYCLOAK_USER_ROLE": args.user_role,
         "TRADE_ACCESS_API_KEYCLOAK_ADMIN_ROLE": args.admin_role,
         "TRADE_ACCESS_API_KEYCLOAK_ADMIN_CLIENT_ID": args.admin_client_id,

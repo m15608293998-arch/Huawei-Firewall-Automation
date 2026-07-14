@@ -23,7 +23,7 @@ Keycloak 仍然是身份来源，重点配置如下：
 /api/v1/auth/offline/callback
 ```
 
-- 让 offline token 适合长期使用，并关闭 refresh token 轮换，避免用户保存的 `sk-<offline_token>` 在刷新后失效。
+- 允许 `offline_access`，并支持 Keycloak 开启 refresh token rotation / Revoke Refresh Token。
 
 Keycloak 只负责认证、签发 offline token、后续用 offline token 换短期 access token；具体的业务权限、可操作 IP、API Key 名称和删除状态由本项目后端管理。
 
@@ -54,7 +54,7 @@ Keycloak 返回短期 access_token 和长期 offline_token
   v
 后端生成 sk-<offline_token> 并只展示一次
 ```
-数据库不保存明文 SK，只保存它的哈希、名称、所属 Keycloak `sub`、创建时间、最后使用时间和吊销状态。
+数据库不保存明文 SK。它保存完整 SK 的 SHA-256 hash、名称、所属 Keycloak `sub`、创建时间、最后使用时间、吊销状态，以及加密后的当前有效 offline token。
 
 ## 使用 SK 的流程
 
@@ -70,13 +70,19 @@ Authorization: Bearer sk-<offline_token>
 收到 sk-
   |
   v
-取出后面的 offline_token
+对完整 SK 做 hash，查本地记录
   |
   v
-用 offline_token + trade-access-offline client_secret 请求 Keycloak token endpoint
+解密数据库中的当前有效 offline token
+  |
+  v
+用 offline token + trade-access-offline client_secret 请求 Keycloak token endpoint
   |
   v
 换取新的短期 access_token
+  |
+  v
+如果 Keycloak 返回新的 refresh_token，立即加密覆盖保存
   |
   v
 验签 access_token，并读取 sub
@@ -88,7 +94,7 @@ Authorization: Bearer sk-<offline_token>
 通过权限校验后执行防火墙业务接口
 ```
 
-因此，SK 本身不是脱离 Keycloak 的自造身份。它本质上是 Keycloak offline token 的封装，后端每次仍然要通过 Keycloak 换取并验证短期 access token。
+因此，SK 本身不是脱离 Keycloak 的自造身份。创建时 `sk-` 后面是初始 offline token；后续在开启 refresh token rotation 时，Keycloak 会轮换 offline token，后端使用数据库中加密保存的当前 token 继续换取并验证短期 access token。
 
 ## 为什么它能长期有效
 
@@ -98,8 +104,9 @@ Authorization: Bearer sk-<offline_token>
 
 - offline token 生命周期可以配置得很长。
 - offline token 专门用于离线场景刷新 access token。
-- 后端使用它换取短期 access token 后再执行业务鉴权。
-- 只要 offline token 未过期、未被 Keycloak 或本系统吊销，`sk-<offline_token>` 就可以持续使用。
+- 后端使用当前有效 offline token 换取短期 access token 后再执行业务鉴权。
+- 如果 Keycloak 开启 Revoke Refresh Token，后端会保存每次刷新返回的新 refresh token。
+- 只要 Keycloak offline session 未过期、未被 Keycloak 或本系统吊销，用户手里的 `sk-...` 就可以持续使用。
 
 ## 为什么每个用户的 SK 只属于自己
 
@@ -119,5 +126,4 @@ sub
 
 三者必须一致。
 
-后续每次用 SK 调用接口时，后端仍会用 offline token 换 access token，并再次校验换回来的 `sub` 是否和本地记录一致。
-
+后续每次用 SK 调用接口时，后端仍会用当前有效 offline token 换 access token，并再次校验换回来的 `sub` 是否和本地记录一致。

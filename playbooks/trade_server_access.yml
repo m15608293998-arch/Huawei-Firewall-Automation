@@ -5,7 +5,6 @@
   connection: local
 
   tasks:
-    - name: Run selected trade access role task set
+    - name: Run trade access role
       ansible.builtin.include_role:
         name: usg6000e_trade_access
-        tasks_from: "{{ trade_access_tasks_from | default('main') }}"

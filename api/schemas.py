@@ -185,40 +185,18 @@ class JobEventsResponse(BaseModel):
     events: list[JobEvent]
 
 
-class FirewallSnapshotItem(BaseModel):
-    target_ip: str
-    mask: int
-    port: int | None = None
-    state: str
-    address_presence: dict[str, bool]
-    application_vsystem: str
-    application: str | None = None
-    application_group: str
-    in_application_group: bool
-
-
 class FirewallIpSnapshotItem(BaseModel):
-    target_ip: str
-    mask: int
-    state: str
-    address_presence: dict[str, bool]
+    ip: str
 
 
 class FirewallPortSnapshotItem(BaseModel):
-    target_ip: str
-    mask: int
-    port: int | None = None
-    state: str
-    address_presence: dict[str, bool]
-    application_vsystem: str
-    application: str | None = None
-    application_group: str
-    in_application_group: bool
+    ip: str
+    port: int
 
 
 class FirewallSnapshotResponse(BaseModel):
     generated_at: str
-    items: list[FirewallSnapshotItem]
+    items: list[FirewallPortSnapshotItem]
 
 
 class FirewallIpSnapshotResponse(BaseModel):

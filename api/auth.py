@@ -78,6 +78,7 @@ offline_api_key_service = OfflineApiKeyService(
     scope=settings.keycloak_offline_scope,
     timeout_seconds=settings.keycloak_http_timeout_seconds,
     ca_cert=settings.keycloak_ca_cert,
+    token_encryption_key=settings.offline_api_key_token_encryption_key,
     authorization_ttl_seconds=settings.offline_api_key_authorization_ttl_seconds,
     max_keys_per_user=settings.offline_api_key_max_per_user,
 )

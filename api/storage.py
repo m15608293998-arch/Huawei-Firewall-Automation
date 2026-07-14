@@ -129,12 +129,16 @@ class JobStorage:
                     label text not null,
                     token_hash text not null unique,
                     key_hint text not null,
+                    encrypted_offline_token text,
+                    offline_token_updated_at text,
                     created_at text not null,
                     last_used_at text,
                     revoked_at text
                 )
                 """
             )
+            self._ensure_column(conn, "offline_api_keys", "encrypted_offline_token", "text")
+            self._ensure_column(conn, "offline_api_keys", "offline_token_updated_at", "text")
             conn.execute(
                 "create index if not exists offline_api_keys_subject_idx "
                 "on offline_api_keys (subject_id, created_at)"
@@ -557,8 +561,9 @@ class JobStorage:
                     """
                     insert into offline_api_keys (
                         key_id, subject_id, label, token_hash, key_hint,
+                        encrypted_offline_token, offline_token_updated_at,
                         created_at, last_used_at, revoked_at
-                    ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record["key_id"],
@@ -566,6 +571,8 @@ class JobStorage:
                         record["label"],
                         record["token_hash"],
                         record["key_hint"],
+                        record.get("encrypted_offline_token"),
+                        record.get("offline_token_updated_at"),
                         record["created_at"],
                         record.get("last_used_at"),
                         record.get("revoked_at"),
@@ -592,6 +599,25 @@ class JobStorage:
                 (token_hash,),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def update_offline_api_key_token(
+        self,
+        key_id: str,
+        encrypted_offline_token: str,
+        updated_at: str,
+    ) -> None:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    update offline_api_keys
+                    set encrypted_offline_token = ?,
+                        offline_token_updated_at = ?
+                    where key_id = ? and revoked_at is null
+                    """,
+                    (encrypted_offline_token, updated_at, key_id),
+                )
+                conn.commit()
 
     def list_offline_api_keys(self, subject_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:

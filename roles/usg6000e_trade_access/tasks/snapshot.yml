@@ -1,3 +1,0 @@
----
-- name: Run trade access firewall snapshot workflow
-  ansible.builtin.include_tasks: snapshot/main.yml

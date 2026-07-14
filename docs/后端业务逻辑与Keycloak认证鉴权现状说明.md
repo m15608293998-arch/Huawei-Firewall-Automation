@@ -106,9 +106,9 @@ sk-<keycloak_offline_token>
 
 所有用户共用一个 `trade-access-offline` Confidential Client。Client Secret只保存在API服务端。
 创建时通过Authorization Code Flow、PKCE和`offline_access`获取绑定用户`sub`的Offline Token。
-业务调用时，后端使用Offline Token向Keycloak换取短期Access Token，验证后按`sub`读取最新权限。
+业务调用时，后端使用加密保存的当前Offline Token向Keycloak换取短期Access Token，验证后按`sub`读取最新权限。
 
-数据库只保存完整SK的SHA-256哈希和管理元数据，不保存明文。用户可命名、查看使用状态和删除Key。
+数据库保存完整SK的SHA-256哈希、管理元数据，以及加密后的当前有效Offline Token，不保存明文SK。用户可命名、查看使用状态和删除Key。
 删除后本地认证立即拒绝。完整SK只在创建成功后显示一次。
 
 ### 3.3 已下线的旧应用用户 SK
@@ -525,7 +525,7 @@ CLI 已接受提交命令。
 - 生产环境必须使用 HTTPS。JWT Payload 可读，SK 也可被窃取后重放。
 - 业务 API 接受短期 Keycloak Access Token 和 `sk-<offline_token>`。
 - Access Token 是短期凭据，复制到 Postman 后只能使用到其 `exp` 时间；外部工具应使用长期 `sk-`。
-- 后端使用 `sk-` 中的 Offline Token 自动换取短期Access Token，并缓存到过期前30秒。
+- 后端使用数据库中加密保存的当前 Offline Token 自动换取短期Access Token；Keycloak 返回新 refresh token 时立即加密覆盖保存。
 - 管理员 Access Token 和 Refresh Token 当前保存在浏览器 `sessionStorage`，关闭标签页后不会作为
   长期持久凭据保留。
 - 禁用 Keycloak User 不会被每次 SK 请求实时查询；当前 SK 校验依赖本地 `managed_users.enabled`。

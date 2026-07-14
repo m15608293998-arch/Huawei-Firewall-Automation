@@ -71,6 +71,16 @@ class ApplicationNameParserTests(unittest.TestCase):
         )
 
         self.assertEqual(result["all_ports"], [12001, 12002, 12033])
+        self.assertEqual(
+            result["applications"][0]["rules"],
+            [
+                {
+                    "name": "1",
+                    "ports": [12001, 12002],
+                    "ip_addresses": [{"ip": "192.168.5.225", "mask": 32}],
+                },
+            ],
+        )
         self.assertTrue(result["all_target_ips_match"])
         self.assertEqual(
             result["group_names"],
@@ -82,6 +92,19 @@ class ApplicationNameParserTests(unittest.TestCase):
             "object_names": ["UD_TS_192.168.5.225"],
             "group_names": ["UD_TS_192.168.5.225"],
             "all_ports": list(range(1, 33)),
+            "applications": [
+                {
+                    "name": "UD_TS_192.168.5.225",
+                    "ports": list(range(1, 33)),
+                    "rules": [
+                        {
+                            "name": str(index),
+                            "ports": list(range((index - 1) * 4 + 1, index * 4 + 1)),
+                        }
+                        for index in range(1, 9)
+                    ],
+                },
+            ],
             "all_target_ips_match": True,
         }
 
@@ -92,16 +115,93 @@ class ApplicationNameParserTests(unittest.TestCase):
         )
 
         self.assertEqual(plan["new_ports"], [33, 34])
-        self.assertEqual(len(plan["units"][0]["ports"]), 32)
-        self.assertEqual(plan["units"][1]["app_name"], "UD_TS_192.168.5.225_2")
-        self.assertEqual(plan["units"][1]["ports"], [33, 34])
-        self.assertTrue(plan["rebuild_needed"])
+        self.assertEqual(
+            plan["operations"],
+            [
+                {
+                    "type": "create_application",
+                    "app_name": "UD_TS_192.168.5.225_2",
+                },
+                {
+                    "type": "add_rule",
+                    "app_name": "UD_TS_192.168.5.225_2",
+                    "rule_name": "1",
+                    "ports": [33],
+                },
+                {
+                    "type": "add_ports",
+                    "app_name": "UD_TS_192.168.5.225_2",
+                    "rule_name": "1",
+                    "ports": [34],
+                },
+                {
+                    "type": "add_to_group",
+                    "app_name": "UD_TS_192.168.5.225_2",
+                },
+            ],
+        )
+        self.assertTrue(plan["change_needed"])
+
+    def test_additive_plan_fills_existing_rule_slots_before_new_rules(self) -> None:
+        parsed = {
+            "object_names": ["UD_TS_192.168.5.225"],
+            "group_names": ["UD_TS_192.168.5.225"],
+            "all_ports": [12001, 12002, 12010, 12011, 12012, 12013],
+            "applications": [
+                {
+                    "name": "UD_TS_192.168.5.225",
+                    "ports": [12001, 12002, 12010, 12011, 12012, 12013],
+                    "rules": [
+                        {"name": "1", "ports": [12001, 12002]},
+                        {"name": "3", "ports": [12010, 12011, 12012, 12013]},
+                    ],
+                },
+            ],
+            "all_target_ips_match": True,
+        }
+
+        plan = PARSER.build_application_plan(
+            parsed,
+            "UD_TS_192.168.5.225",
+            [13001, 13002, 13003],
+        )
+
+        self.assertEqual(
+            plan["operations"],
+            [
+                {
+                    "type": "add_ports",
+                    "app_name": "UD_TS_192.168.5.225",
+                    "rule_name": "1",
+                    "ports": [13001],
+                },
+                {
+                    "type": "add_ports",
+                    "app_name": "UD_TS_192.168.5.225",
+                    "rule_name": "1",
+                    "ports": [13002],
+                },
+                {
+                    "type": "add_rule",
+                    "app_name": "UD_TS_192.168.5.225",
+                    "rule_name": "2",
+                    "ports": [13003],
+                },
+            ],
+        )
 
     def test_additive_plan_is_idempotent_when_ports_already_exist(self) -> None:
         parsed = {
             "object_names": ["UD_TS_192.168.5.225"],
             "group_names": ["UD_TS_192.168.5.225"],
             "all_ports": [12001, 12002, 12003],
+            "applications": [
+                {
+                    "name": "UD_TS_192.168.5.225",
+                    "ports": [12001, 12002, 12003],
+                    "rules": [{"name": "1", "ports": [12001, 12002, 12003]}],
+                },
+            ],
             "all_target_ips_match": True,
         }
 
@@ -113,13 +213,111 @@ class ApplicationNameParserTests(unittest.TestCase):
 
         self.assertEqual(plan["effective_ports"], [12001, 12002, 12003])
         self.assertEqual(plan["new_ports"], [])
-        self.assertFalse(plan["rebuild_needed"])
+        self.assertFalse(plan["change_needed"])
+
+    def test_empty_ungrouped_application_does_not_block_future_port_changes(self) -> None:
+        output = """
+         user-defined-application name UD_TS_192.168.66.19
+          rule name 1
+           ip-address 192.168.66.19 32
+           port 10001
+           port 10002
+           port 10003
+           port 10004
+          add application UD_TS_192.168.66.19
+         user-defined-application name UD_TS_192.168.66.19_2
+        """
+
+        result = PARSER.extract_application_config(
+            output,
+            "UD_TS_192.168.66.19",
+            target_ip="192.168.66.19",
+            mask=32,
+        )
+
+        self.assertTrue(result["all_target_ips_match"])
+        self.assertEqual(result["invalid_target_applications"], [])
+
+        plan = PARSER.build_application_plan(
+            result,
+            "UD_TS_192.168.66.19",
+            [10005],
+        )
+
+        self.assertEqual(
+            plan["operations"],
+            [
+                {
+                    "type": "add_rule",
+                    "app_name": "UD_TS_192.168.66.19",
+                    "rule_name": "2",
+                    "ports": [10005],
+                },
+            ],
+        )
+
+    def test_additive_plan_reuses_empty_numbered_application_when_base_is_full(self) -> None:
+        parsed = {
+            "object_names": ["UD_TS_192.168.66.19", "UD_TS_192.168.66.19_2"],
+            "group_names": ["UD_TS_192.168.66.19"],
+            "all_ports": list(range(1, 33)),
+            "applications": [
+                {
+                    "name": "UD_TS_192.168.66.19",
+                    "ports": list(range(1, 33)),
+                    "rules": [
+                        {
+                            "name": str(index),
+                            "ports": list(range((index - 1) * 4 + 1, index * 4 + 1)),
+                        }
+                        for index in range(1, 9)
+                    ],
+                },
+                {"name": "UD_TS_192.168.66.19_2", "ports": [], "rules": []},
+            ],
+            "all_target_ips_match": True,
+        }
+
+        plan = PARSER.build_application_plan(
+            parsed,
+            "UD_TS_192.168.66.19",
+            [33],
+        )
+
+        self.assertEqual(
+            plan["operations"],
+            [
+                {
+                    "type": "add_rule",
+                    "app_name": "UD_TS_192.168.66.19_2",
+                    "rule_name": "1",
+                    "ports": [33],
+                },
+                {
+                    "type": "add_to_group",
+                    "app_name": "UD_TS_192.168.66.19_2",
+                },
+            ],
+        )
 
     def test_remove_plan_deletes_requested_ports_and_keeps_remaining_ports(self) -> None:
         parsed = {
             "object_names": ["UD_TS_192.168.5.225"],
             "group_names": ["UD_TS_192.168.5.225"],
             "all_ports": [12001, 12002, 12003],
+            "applications": [
+                {
+                    "name": "UD_TS_192.168.5.225",
+                    "ports": [12001, 12002, 12003],
+                    "rules": [
+                        {
+                            "name": "1",
+                            "ports": [12001, 12002, 12003],
+                            "ip_addresses": [{"ip": "192.168.5.225", "mask": 32}],
+                        },
+                    ],
+                },
+            ],
             "all_target_ips_match": True,
         }
 
@@ -133,8 +331,119 @@ class ApplicationNameParserTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "remove")
         self.assertEqual(plan["removed_ports"], [12002])
         self.assertEqual(plan["effective_ports"], [12001, 12003])
-        self.assertEqual(plan["units"][0]["ports"], [12001, 12003])
-        self.assertTrue(plan["rebuild_needed"])
+        self.assertEqual(
+            plan["operations"],
+            [
+                {
+                    "type": "replace_rule_ports",
+                    "app_name": "UD_TS_192.168.5.225",
+                    "rule_name": "1",
+                    "old_ports": [12001, 12002, 12003],
+                    "ports": [12001, 12003],
+                },
+            ],
+        )
+        self.assertTrue(plan["change_needed"])
+
+    def test_remove_plan_uses_simple_undo_for_tail_port_deletes(self) -> None:
+        parsed = {
+            "object_names": ["UD_TS_192.168.5.225"],
+            "group_names": ["UD_TS_192.168.5.225"],
+            "all_ports": [12001, 12002, 12003],
+            "applications": [
+                {
+                    "name": "UD_TS_192.168.5.225",
+                    "ports": [12001, 12002, 12003],
+                    "rules": [
+                        {
+                            "name": "1",
+                            "ports": [12001, 12002, 12003],
+                            "ip_addresses": [{"ip": "192.168.5.225", "mask": 32}],
+                        },
+                    ],
+                },
+            ],
+            "all_target_ips_match": True,
+        }
+
+        plan = PARSER.build_application_plan(
+            parsed,
+            "UD_TS_192.168.5.225",
+            [12003],
+            mode="remove",
+        )
+
+        self.assertEqual(
+            plan["operations"],
+            [
+                {
+                    "type": "remove_ports",
+                    "app_name": "UD_TS_192.168.5.225",
+                    "rule_name": "1",
+                    "ports": [12003],
+                },
+            ],
+        )
+
+    def test_parses_display_application_destination_output(self) -> None:
+        output = """
+        Application UD_TS_10.237.30.32 Information:
+          Application Name    : UD_TS_10.237.30.32
+          Total Rule Number   : 1
+            Rule Name         : 1
+            Destination       : 10.237.30.32/32
+            Port              : 8010
+         add application UD_TS_10.237.30.32
+        """
+
+        result = PARSER.extract_application_config(
+            output,
+            "UD_TS_10.237.30.32",
+            target_ip="10.237.30.32",
+            mask=32,
+        )
+
+        self.assertEqual(result["all_ports"], [8010])
+        self.assertEqual(
+            result["applications"][0]["rules"],
+            [
+                {
+                    "name": "1",
+                    "ports": [8010],
+                    "ip_addresses": [{"ip": "10.237.30.32", "mask": 32}],
+                },
+            ],
+        )
+        self.assertTrue(result["all_target_ips_match"])
+
+    def test_marks_invalid_display_ports(self) -> None:
+        output = """
+        Application UD_TS_192.168.66.19 Information:
+          Application Name    : UD_TS_192.168.66.19
+          Total Rule Number   : 1
+            Rule Name         : 1
+            IP Address        : 192.168.66.19/32
+            Port              : 0 12001
+        """
+
+        result = PARSER.extract_application_config(
+            output,
+            "UD_TS_192.168.66.19",
+            target_ip="192.168.66.19",
+            mask=32,
+        )
+
+        self.assertFalse(result["all_ports_valid"])
+        self.assertEqual(
+            result["invalid_ports"],
+            [
+                {
+                    "application": "UD_TS_192.168.66.19",
+                    "rule": "1",
+                    "port": 0,
+                },
+            ],
+        )
 
     def test_parses_display_application_output(self) -> None:
         output = """
@@ -159,6 +468,21 @@ class ApplicationNameParserTests(unittest.TestCase):
         )
 
         self.assertEqual(result["all_ports"], [12001, 12002, 12003, 12004, 12005, 12006])
+        self.assertEqual(
+            result["applications"][0]["rules"],
+            [
+                {
+                    "name": "1",
+                    "ports": [12001, 12002, 12003, 12004],
+                    "ip_addresses": [{"ip": "192.168.5.224", "mask": 32}],
+                },
+                {
+                    "name": "2",
+                    "ports": [12005, 12006],
+                    "ip_addresses": [{"ip": "192.168.5.224", "mask": 32}],
+                },
+            ],
+        )
         self.assertTrue(result["all_target_ips_match"])
         self.assertEqual(result["group_names"], ["UD_TS_192.168.5.224"])
 
