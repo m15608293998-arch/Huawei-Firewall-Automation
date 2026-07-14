@@ -5,6 +5,8 @@
 - FastAPI：提供 `/admin-ui`、`/test-ui` 和业务 API。
 - Worker：从本地 SQLite 队列读取任务，调用 Ansible Runner 执行防火墙变更。
 
+业务变更接口会先返回 `202 Accepted` 和 `job_id`，再由 Worker 串行执行。防火墙快照接口会同步调用 Ansible Runner，直接返回设备当前的有效 IP 或 IP:Port 结果。
+
 ## 1. 准备环境
 
 服务器需要：
@@ -12,6 +14,7 @@
 - Python 3.12
 - Git
 - OpenSSH Client
+- OpenSSL
 - 可访问 Keycloak
 - 可 SSH 到 Huawei USG6000E
 
@@ -19,11 +22,11 @@
 
 ```bash
 # CentOS / RHEL
-sudo yum install -y git openssh-clients
+sudo yum install -y git openssh-clients openssl
 
 # Ubuntu / Debian
 sudo apt update
-sudo apt install -y git openssh-client
+sudo apt install -y git openssh-client openssl
 ```
 
 拉取代码：
@@ -94,7 +97,7 @@ Web origins: http://<API_HOST>:8000
 
 ### `trade-access-offline`
 
-普通用户创建长期 `sk-` API Key 用。
+普通用户创建长期 `sk-<offline_token>` API Key 用。
 
 ```text
 Client authentication: ON
@@ -142,6 +145,19 @@ firewall_device:
   auth_type: "password"
   device_password: "<FIREWALL_PASSWORD>"
 ```
+
+或者使用 SSH 私钥登录：
+
+```yaml
+firewall_device:
+  device_host: "<FIREWALL_MGMT_IP>"
+  device_user: "<FIREWALL_USER>"
+  auth_type: "publickey"
+  identity_file: "/absolute/path/to/firewall_private_key"
+```
+
+私钥必须对运行 API 的账号可读，建议权限设为 `0600`。密码和私钥配置二选一。
+
 继续确认这些业务配置：
 
 ```yaml
@@ -214,7 +230,7 @@ TRADE_ACCESS_API_KEYCLOAK_USER_ROLE=trade-access-user
 TRADE_ACCESS_API_KEYCLOAK_ADMIN_ROLE=trade-access-admin
 ```
 
-`TRADE_ACCESS_API_OFFLINE_API_KEY_TOKEN_ENCRYPTION_KEY` 用于加密保存当前有效 offline token，生成后必须长期保持不变。可以用下面命令生成：
+`TRADE_ACCESS_API_OFFLINE_API_KEY_TOKEN_ENCRYPTION_KEY` 用于加密保存当前有效 offline token。Keycloak 轮换 refresh token 后，后端会加密保存新 token，因此这个密钥生成后必须长期保持不变。可以用下面命令生成：
 
 ```bash
 openssl rand -base64 32
@@ -239,6 +255,7 @@ python scripts/configure_runtime.py \
 ```text
 Provisioning Client Secret
 Offline API Key Client Secret
+Offline API Key Token Encryption Key
 ```
 
 ## 5. 初始化第一个管理员
@@ -302,7 +319,112 @@ curl http://127.0.0.1:8000/healthz
 {"status":"ok"}
 ```
 
-## 7. 后台运行
+## 7. 调用 API
+
+浏览器用户可以通过 `/test-ui` 登录。Postman、`curl` 等外部调用统一使用 Bearer 认证，凭据可以是：
+
+- Keycloak 返回的 Access Token。
+- 页面创建的长期 API Key，格式必须是 `sk-<offline_token>`。
+
+先调用当前身份接口，确认角色、权限和本地登记的 `allowed_ips`：
+
+```bash
+curl \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  http://127.0.0.1:8000/api/v1/trade-access/me
+```
+
+所有防火墙变更目前只接受单个 IPv4 地址，`mask` 必须是 `32`。例如，同时放行 IP 和端口：
+
+```bash
+curl -X POST \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "target_ip": "203.0.113.10",
+    "mask": 32,
+    "ports": [12001, 12002],
+    "description": "trade-server-203.0.113.10",
+    "client_request_id": "change-20260714-001"
+  }' \
+  http://127.0.0.1:8000/api/v1/trade-access/allow
+```
+
+变更接口：
+
+| 接口 | 含义 | 请求是否包含 `ports` |
+| --- | --- | --- |
+| `POST /api/v1/trade-access/allow` | 放行 IP，并增加指定端口 | 是 |
+| `POST /api/v1/trade-access/allow/ip` | 只将 IP 加入所有业务地址集 | 否 |
+| `POST /api/v1/trade-access/allow/ports` | IP 已存在时增加指定端口 | 是 |
+| `POST /api/v1/trade-access/deny/ports` | 删除指定端口 | 是 |
+| `POST /api/v1/trade-access/deny/ip` | 确认该 IP 已无应用端口后，再移出所有业务地址集 | 否 |
+| `POST /api/v1/trade-access/deny` | 删除该 IP 的全部应用端口，再移出所有业务地址集 | 否 |
+
+端口必须在 `1` 到 `65535` 之间，单次最多提交 256 个。变更接口返回 `job_id` 后，查询任务和 Ansible 事件：
+
+```bash
+curl \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  http://127.0.0.1:8000/api/v1/trade-access/jobs/<JOB_ID>
+
+curl \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  http://127.0.0.1:8000/api/v1/trade-access/jobs/events/<JOB_ID>
+```
+
+普通用户只能读取自己的任务；管理员可在 `/admin-ui` 查看全部任务。
+
+## 8. 查询防火墙快照
+
+快照来自防火墙实时 CLI 查询，不读取 SQLite 任务库：
+
+```bash
+# 同时存在于 address_vsystems 所有业务地址集中的有效 /32 IP
+curl \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  http://127.0.0.1:8000/api/v1/trade-access/firewall/snapshot/ips
+
+# 有效 IP 在应用规则中实际绑定的 TCP 端口
+curl \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  http://127.0.0.1:8000/api/v1/trade-access/firewall/snapshot/ports
+```
+
+IP 快照返回：
+
+```json
+{
+  "generated_at": "2026-07-14T10:00:00+00:00",
+  "items": [
+    {"ip": "203.0.113.10"}
+  ]
+}
+```
+
+端口快照返回：
+
+```json
+{
+  "generated_at": "2026-07-14T10:00:00+00:00",
+  "items": [
+    {"ip": "203.0.113.10", "port": 12001}
+  ]
+}
+```
+
+`GET /api/v1/trade-access/firewall/snapshot` 是兼容接口，当前与 `/snapshot/ports` 返回相同类型的 IP:Port 结果。
+
+## 9. 运行测试
+
+项目测试使用 Python 标准库 `unittest`：
+
+```bash
+source .venv/bin/activate
+python -m unittest discover -s tests
+```
+
+## 10. 后台运行
 
 简单后台运行：
 
@@ -312,6 +434,7 @@ nohup .venv/bin/python scripts/run_services.py \
   --host 0.0.0.0 \
   --port 8000 \
   > .runtime/trade-access.log 2>&1 &
+echo $! > .runtime/trade-access.pid
 ```
 
 查看日志：
@@ -323,5 +446,6 @@ tail -f .runtime/trade-access.log
 停止：
 
 ```bash
-pkill -f "scripts/run_services.py"
+kill "$(cat .runtime/trade-access.pid)"
+rm -f .runtime/trade-access.pid
 ```
