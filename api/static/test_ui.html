@@ -249,11 +249,6 @@
             <input id="description" maxlength="160" placeholder="测试放行">
           </div>
 
-          <div class="field">
-            <label for="requestId">Client Request ID</label>
-            <input id="requestId" maxlength="128" spellcheck="false">
-          </div>
-
           <div class="actions">
             <button id="submitAction" class="command primary" type="button">提交放行 IP</button>
             <button id="clearForm" class="command secondary" type="button">清空</button>
@@ -1003,9 +998,7 @@
         mask: 32,
       };
       const description = document.querySelector("#description").value.trim();
-      const requestId = document.querySelector("#requestId").value.trim();
       if (description) payload.description = description;
-      if (requestId) payload.client_request_id = requestId;
       if (currentActionConfig().needsPorts) {
         payload.ports = parsePorts(document.querySelector("#ports").value);
       }
@@ -1315,7 +1308,7 @@
     });
     elements.submitAction.addEventListener("click", submitAction);
     document.querySelector("#clearForm").addEventListener("click", () => {
-      ["targetIp", "ports", "description", "requestId"].forEach((id) => { document.querySelector(`#${id}`).value = ""; });
+      ["targetIp", "ports", "description"].forEach((id) => { document.querySelector(`#${id}`).value = ""; });
       document.querySelector("#mask").value = "32";
     });
     document.querySelector("#getJob").addEventListener("click", () => getJob().catch(showLocalError));

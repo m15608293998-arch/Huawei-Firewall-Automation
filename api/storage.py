@@ -16,7 +16,6 @@ JOB_COLUMNS = [
     "mask",
     "ports",
     "description",
-    "client_request_id",
     "principal_subject",
     "principal_id",
     "principal_client_id",
@@ -55,7 +54,6 @@ class JobStorage:
                     mask integer not null,
                     ports text not null default '[]',
                     description text,
-                    client_request_id text,
                     principal_subject text,
                     principal_id text,
                     principal_client_id text,
@@ -74,6 +72,8 @@ class JobStorage:
                 )
                 """
             )
+            conn.execute("drop index if exists jobs_principal_request_idx")
+            self._drop_column_if_exists(conn, "jobs", "client_request_id")
             self._ensure_column(conn, "jobs", "ports", "text not null default '[]'")
             self._ensure_column(conn, "jobs", "principal_id", "text")
             self._ensure_column(conn, "jobs", "principal_client_id", "text")
@@ -193,22 +193,25 @@ class JobStorage:
                 )
             )
 
-    def create_job(self, job: dict[str, Any]) -> None:
-        columns = JOB_COLUMNS
-        placeholders = ", ".join(["?"] * len(columns))
-        column_sql = ", ".join(columns)
-        # ports 是结构化字段，落 SQLite 时统一序列化为 JSON。
-        values = [
-            json.dumps(job.get(column) or []) if column == "ports" else job.get(column)
-            for column in columns
-        ]
+    def _drop_column_if_exists(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+    ) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("pragma table_info({0})".format(table_name)).fetchall()
+        }
+        if column_name in columns:
+            conn.execute(
+                "alter table {0} drop column {1}".format(table_name, column_name)
+            )
 
+    def create_job(self, job: dict[str, Any]) -> None:
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
-                    "insert into jobs ({0}) values ({1})".format(column_sql, placeholders),
-                    values,
-                )
+                self._insert_job(conn, job)
                 conn.commit()
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -311,6 +314,29 @@ class JobStorage:
                     values,
                 )
                 conn.commit()
+
+    def fail_running_jobs(self, finished_at: str, error_message: str) -> int:
+        """Mark jobs left running by a terminated worker as failed."""
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    update jobs
+                    set status = 'failed',
+                        runner_status = 'interrupted',
+                        runner_rc = 1,
+                        error_message = ?,
+                        finished_at = ?
+                    where status = 'running'
+                    """,
+                    (error_message, finished_at),
+                )
+                conn.commit()
+        return cursor.rowcount
+
+    def check_health(self) -> None:
+        with self._connect() as conn:
+            conn.execute("select 1 from jobs limit 1").fetchone()
 
     def get_subject_permissions(self, subject_id: str) -> list[str]:
         with self._connect() as conn:
@@ -730,6 +756,20 @@ class JobStorage:
         conn.row_factory = sqlite3.Row
         conn.execute("pragma busy_timeout = 5000")
         return conn
+
+    @staticmethod
+    def _insert_job(conn: sqlite3.Connection, job: dict[str, Any]) -> None:
+        placeholders = ", ".join(["?"] * len(JOB_COLUMNS))
+        column_sql = ", ".join(JOB_COLUMNS)
+        # ports 是结构化字段，落 SQLite 时统一序列化为 JSON。
+        values = [
+            json.dumps(job.get(column) or []) if column == "ports" else job.get(column)
+            for column in JOB_COLUMNS
+        ]
+        conn.execute(
+            "insert into jobs ({0}) values ({1})".format(column_sql, placeholders),
+            values,
+        )
 
     @staticmethod
     def _deserialize_job(row: sqlite3.Row) -> dict[str, Any]:

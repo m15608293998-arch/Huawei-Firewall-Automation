@@ -32,7 +32,6 @@ def create_job(
         "mask": request.mask,
         "ports": request.ports or [],
         "description": request.description,
-        "client_request_id": request.client_request_id,
         "principal_subject": principal.subject,
         "principal_id": principal.subject_id,
         "principal_client_id": principal.client_id,

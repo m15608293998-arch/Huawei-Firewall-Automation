@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     keycloak_admin_client_secret: str | None = None
     offline_api_key_authorization_ttl_seconds: int = 300
     offline_api_key_max_per_user: int = 5
+    runner_timeout_seconds: int = Field(default=900, ge=1)
+    snapshot_runner_timeout_seconds: int = Field(default=300, ge=1)
 
     @property
     def keycloak_issuer(self) -> str:

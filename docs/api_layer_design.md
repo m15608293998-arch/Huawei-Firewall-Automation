@@ -112,8 +112,7 @@ The permission table is keyed by Keycloak `client_id`. It stores no secret.
   "target_ip": "192.168.66.22",
   "mask": 32,
   "ports": [12001, 12002],
-  "description": "temporary trade server access",
-  "client_request_id": "REQ-20260608-001"
+  "description": "temporary trade server access"
 }
 ```
 

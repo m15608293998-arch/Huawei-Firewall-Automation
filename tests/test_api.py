@@ -2,8 +2,10 @@ import inspect
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import HTTPException
+from pydantic import TypeAdapter, ValidationError
 
 import api.jobs as jobs_module
 from api.auth import Principal
@@ -29,6 +31,7 @@ from api.main import (
     healthz,
     list_all_trade_access_jobs,
     list_trade_access_jobs,
+    readyz,
     test_ui,
 )
 from api.schemas import (
@@ -106,6 +109,29 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(job["target_ip"], "192.168.66.22")
         self.assertEqual(job["ports"], [22, 443, 12001])
+
+    def test_each_submission_receives_a_server_generated_job_id(self) -> None:
+        request = TradeAccessAllowRequest(
+            target_ip="192.168.66.22",
+            ports=[12001],
+        )
+
+        first = create_trade_access_allow_job(request=request, principal=self.user)
+        second = create_trade_access_allow_job(request=request, principal=self.user)
+
+        self.assertNotEqual(second["job_id"], first["job_id"])
+        self.assertNotIn("client_request_id", first)
+        self.assertEqual(len(self.storage.list_jobs()), 2)
+
+    def test_client_request_id_is_rejected_as_an_unknown_field(self) -> None:
+        with self.assertRaises(ValidationError):
+            TradeAccessAllowRequest.model_validate(
+                {
+                    "target_ip": "192.168.66.22",
+                    "ports": [12001],
+                    "client_request_id": "removed-field",
+                }
+            )
 
     def test_offline_api_key_id_is_recorded_in_job_audit(self) -> None:
         sk_user = self.user.model_copy(
@@ -300,6 +326,30 @@ class ApiTests(unittest.TestCase):
 
     def test_health_endpoint(self) -> None:
         self.assertEqual(healthz(), {"status": "ok"})
+
+    def test_readiness_endpoint_checks_job_database(self) -> None:
+        self.assertEqual(readyz(), {"status": "ready"})
+        original_check = self.storage.check_health
+        self.storage.check_health = lambda: (_ for _ in ()).throw(
+            RuntimeError("database unavailable")
+        )
+        try:
+            with self.assertRaises(HTTPException) as caught:
+                readyz()
+        finally:
+            self.storage.check_health = original_check
+
+        self.assertEqual(caught.exception.status_code, 503)
+
+    def test_job_list_rejects_page_large_enough_to_overflow_sqlite(self) -> None:
+        page_query = inspect.signature(list_trade_access_jobs).parameters[
+            "page"
+        ].default
+        adapter = TypeAdapter(Annotated[int, page_query])
+
+        self.assertEqual(adapter.validate_python(1_000_000), 1_000_000)
+        with self.assertRaises(ValidationError):
+            adapter.validate_python(1_000_001)
 
     def test_oidc_browser_config_uses_public_portal_client(self) -> None:
         response = get_oidc_browser_config("test")

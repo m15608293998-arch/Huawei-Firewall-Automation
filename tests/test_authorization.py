@@ -420,6 +420,25 @@ class AuthorizationTests(unittest.TestCase):
                 }
             )
 
+        for invalid_port in (True, "443"):
+            with self.subTest(invalid_port=invalid_port):
+                with self.assertRaises(ValidationError):
+                    TradeAccessAllowRequest.model_validate(
+                        {
+                            "target_ip": "192.168.66.22",
+                            "ports": [invalid_port],
+                        }
+                    )
+
+        with self.assertRaises(ValidationError):
+            TradeAccessAllowRequest.model_validate(
+                {
+                    "target_ip": "192.168.66.22",
+                    "mask": "32",
+                    "ports": [12001],
+                }
+            )
+
     def test_admin_must_submit_a_single_ip(self) -> None:
         with self.assertRaises(HTTPException) as caught:
             authorize_trade_access_request(

@@ -1,7 +1,11 @@
 import argparse
+from contextlib import contextmanager
+import fcntl
 import logging
 import signal
+import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 from api.config import settings
@@ -13,6 +17,26 @@ from api.time_utils import utc_now_iso
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+class WorkerAlreadyRunningError(RuntimeError):
+    pass
+
+
+@contextmanager
+def exclusive_worker_lock(lock_path: Path):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise WorkerAlreadyRunningError(
+                "Another trade access worker is already running."
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class JobWorker:
@@ -122,15 +146,33 @@ def main() -> None:
     # worker 和 API 共用同一 SQLite 库，任务状态通过数据库交接。
     storage = JobStorage(settings.database_path)
     worker = JobWorker(storage, runner_service, args.poll_interval)
-    print(
-        "Trade access worker started: database={0}, poll_interval={1}s".format(
-            settings.database_path,
-            args.poll_interval,
-        ),
-        flush=True,
-    )
-    worker.run_forever(stop_event)
-    print("Trade access worker stopped.", flush=True)
+    lock_path = settings.runner_private_data_dir / "trade_access_worker.lock"
+    try:
+        with exclusive_worker_lock(lock_path):
+            interrupted = storage.fail_running_jobs(
+                utc_now_iso(),
+                (
+                    "Worker restarted before the previous execution completed. "
+                    "Verify the firewall state before submitting a new request."
+                ),
+            )
+            if interrupted:
+                logger.warning(
+                    "Marked %s interrupted running job(s) as failed.",
+                    interrupted,
+                )
+            print(
+                "Trade access worker started: database={0}, poll_interval={1}s".format(
+                    settings.database_path,
+                    args.poll_interval,
+                ),
+                flush=True,
+            )
+            worker.run_forever(stop_event)
+            print("Trade access worker stopped.", flush=True)
+    except WorkerAlreadyRunningError as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

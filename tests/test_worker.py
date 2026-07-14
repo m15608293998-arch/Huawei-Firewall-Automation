@@ -4,7 +4,11 @@ from pathlib import Path
 
 from api.runner_service import RunnerResult
 from api.storage import JobStorage
-from api.worker import JobWorker
+from api.worker import (
+    JobWorker,
+    WorkerAlreadyRunningError,
+    exclusive_worker_lock,
+)
 
 
 class FakeRunner:
@@ -38,7 +42,6 @@ class WorkerTests(unittest.TestCase):
                 "mask": 32,
                 "ports": [12001],
                 "description": None,
-                "client_request_id": None,
                 "principal_subject": "employee-a",
                 "principal_id": "subject-a",
                 "principal_key_id": "key-a",
@@ -112,6 +115,14 @@ class WorkerTests(unittest.TestCase):
 
         self.assertFalse(worker.run_once())
         self.assertEqual(runner.jobs, [])
+
+    def test_only_one_worker_process_can_hold_the_worker_lock(self) -> None:
+        lock_path = Path(self.temp_dir.name) / "worker.lock"
+
+        with exclusive_worker_lock(lock_path):
+            with self.assertRaises(WorkerAlreadyRunningError):
+                with exclusive_worker_lock(lock_path):
+                    self.fail("second worker lock should not be acquired")
 
 
 if __name__ == "__main__":

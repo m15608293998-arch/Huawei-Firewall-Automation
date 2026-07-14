@@ -351,8 +351,7 @@ curl -sS -X POST \
     "target_ip": "192.168.5.224",
     "mask": 32,
     "ports": [12001, 12002, 12003],
-    "description": "temporary trade access",
-    "client_request_id": "REQ-ALLOW-001"
+    "description": "temporary trade access"
   }' \
   http://192.168.6.38:8000/api/v1/trade-access/allow
 ```
@@ -366,8 +365,7 @@ curl -sS -X POST \
   -d '{
     "target_ip": "192.168.5.224",
     "mask": 32,
-    "description": "remove trade access",
-    "client_request_id": "REQ-DENY-001"
+    "description": "remove trade access"
   }' \
   http://192.168.6.38:8000/api/v1/trade-access/deny
 ```

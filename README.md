@@ -207,6 +207,8 @@ TRADE_ACCESS_API_AUTH_ENABLED=true
 TRADE_ACCESS_API_DATABASE_PATH=.runtime/api/jobs.sqlite3
 TRADE_ACCESS_API_RUNNER_PRIVATE_DATA_DIR=.runtime/runner
 TRADE_ACCESS_API_JOB_TMP_ROOT=.runtime/jobs
+TRADE_ACCESS_API_RUNNER_TIMEOUT_SECONDS=900
+TRADE_ACCESS_API_SNAPSHOT_RUNNER_TIMEOUT_SECONDS=300
 
 TRADE_ACCESS_API_KEYCLOAK_SERVER_URL=http://<KEYCLOAK_HOST>:8080
 TRADE_ACCESS_API_KEYCLOAK_REALM=trade-access
@@ -310,13 +312,18 @@ http://<API_HOST>:8000/test-ui
 健康检查：
 
 ```bash
+# API 进程存活
 curl http://127.0.0.1:8000/healthz
+
+# API 和任务数据库已就绪
+curl http://127.0.0.1:8000/readyz
 ```
 
 返回：
 
 ```json
 {"status":"ok"}
+{"status":"ready"}
 ```
 
 ## 7. 调用 API
@@ -344,8 +351,7 @@ curl -X POST \
     "target_ip": "203.0.113.10",
     "mask": 32,
     "ports": [12001, 12002],
-    "description": "trade-server-203.0.113.10",
-    "client_request_id": "change-20260714-001"
+    "description": "trade-server-203.0.113.10"
   }' \
   http://127.0.0.1:8000/api/v1/trade-access/allow
 ```

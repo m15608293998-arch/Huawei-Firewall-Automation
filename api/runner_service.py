@@ -90,6 +90,7 @@ class AnsibleRunnerService:
                     },
                     rotate_artifacts=20,
                     quiet=True,
+                    timeout=settings.runner_timeout_seconds,
                 )
         except Exception as exc:
             return RunnerResult(
@@ -157,6 +158,7 @@ class AnsibleRunnerService:
                     },
                     rotate_artifacts=20,
                     quiet=True,
+                    timeout=settings.snapshot_runner_timeout_seconds,
                 )
         except Exception as exc:
             return SnapshotRunnerResult(

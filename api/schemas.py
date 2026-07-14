@@ -2,7 +2,14 @@ import ipaddress
 import re
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from api.time_utils import to_china_time_iso
 
@@ -28,9 +35,8 @@ class TradeAccessRequestBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target_ip: str
-    mask: int = Field(default=32, ge=0, le=32)
+    mask: StrictInt = Field(default=32, ge=0, le=32)
     description: str | None = Field(default=None, max_length=160)
-    client_request_id: str | None = Field(default=None, max_length=128)
 
     @field_validator("target_ip")
     @classmethod
@@ -50,17 +56,6 @@ class TradeAccessRequestBase(BaseModel):
             raise ValueError("description must not contain newline or control characters")
         return value.strip()
 
-    @field_validator("client_request_id")
-    @classmethod
-    def validate_client_request_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        if not re.match(r"^[A-Za-z0-9_.:-]+$", value):
-            raise ValueError(
-                "client_request_id may only contain letters, numbers, dot, underscore, colon, or hyphen"
-            )
-        return value
-
     @model_validator(mode="after")
     def validate_target_network(self):
         try:
@@ -76,7 +71,7 @@ class TradeAccessRequestBase(BaseModel):
 
 
 class TradeAccessPortsRequest(TradeAccessRequestBase):
-    ports: list[int] = Field(min_length=1, max_length=256)
+    ports: list[StrictInt] = Field(min_length=1, max_length=256)
 
     @field_validator("ports")
     @classmethod
@@ -136,7 +131,6 @@ class JobCreateResponse(BaseModel):
     action: AccessAction
     target_ip: str
     ports: list[int] | None = None
-    client_request_id: str | None = None
 
 
 class JobDetailResponse(BaseModel):
@@ -147,7 +141,6 @@ class JobDetailResponse(BaseModel):
     mask: int
     ports: list[int] = Field(default_factory=list)
     description: str | None = None
-    client_request_id: str | None = None
     principal_subject: str | None = None
     principal_id: str | None = None
     principal_client_id: str | None = None

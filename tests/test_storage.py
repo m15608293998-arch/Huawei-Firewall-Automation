@@ -49,6 +49,7 @@ class StorageMigrationTests(unittest.TestCase):
             self.assertIn("principal_id", job_columns)
             self.assertIn("principal_client_id", job_columns)
             self.assertIn("permission_code", job_columns)
+            self.assertNotIn("client_request_id", job_columns)
 
     def test_legacy_offline_api_key_schema_receives_rotating_token_columns(
         self,
@@ -128,34 +129,39 @@ class StorageQueueTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def job_record(
+        self,
+        job_id: str,
+        created_at: str,
+        principal_id: str = "subject-a",
+    ) -> dict[str, object]:
+        return {
+            "job_id": job_id,
+            "status": "pending",
+            "action": "allow",
+            "target_ip": "192.168.5.224",
+            "mask": 32,
+            "ports": [12001],
+            "description": None,
+            "principal_subject": "employee-a",
+            "principal_id": principal_id,
+            "principal_client_id": "client-a",
+            "principal_key_id": "key-a",
+            "principal_type": "employee",
+            "auth_type": "secret_key",
+            "permission_code": "firewall.allow",
+            "runner_status": None,
+            "runner_rc": None,
+            "error_message": None,
+            "created_at": created_at,
+            "started_at": None,
+            "finished_at": None,
+            "artifact_dir": "/tmp/artifacts/{0}".format(job_id),
+            "local_tmp_dir": "/tmp/jobs/{0}".format(job_id),
+        }
+
     def create_job(self, job_id: str, created_at: str) -> None:
-        self.storage.create_job(
-            {
-                "job_id": job_id,
-                "status": "pending",
-                "action": "allow",
-                "target_ip": "192.168.5.224",
-                "mask": 32,
-                "ports": [12001],
-                "description": None,
-                "client_request_id": None,
-                "principal_subject": "employee-a",
-                "principal_id": "subject-a",
-                "principal_client_id": "client-a",
-                "principal_key_id": "key-a",
-                "principal_type": "employee",
-                "auth_type": "secret_key",
-                "permission_code": "firewall.allow",
-                "runner_status": None,
-                "runner_rc": None,
-                "error_message": None,
-                "created_at": created_at,
-                "started_at": None,
-                "finished_at": None,
-                "artifact_dir": "/tmp/artifacts/{0}".format(job_id),
-                "local_tmp_dir": "/tmp/jobs/{0}".format(job_id),
-            }
-        )
+        self.storage.create_job(self.job_record(job_id, created_at))
 
     def test_claim_uses_fifo_order_and_marks_job_running(self) -> None:
         self.create_job("job-1", "2026-06-05T00:00:00+00:00")
@@ -212,6 +218,23 @@ class StorageQueueTests(unittest.TestCase):
         claimed_jobs = [job for job in claims if job is not None]
         self.assertEqual(len(claimed_jobs), 1)
         self.assertEqual(claimed_jobs[0]["job_id"], "job-1")
+
+    def test_interrupted_running_jobs_are_failed_without_requeue(self) -> None:
+        self.create_job("job-1", "2026-06-05T00:00:00+00:00")
+        self.create_job("job-2", "2026-06-05T00:00:01+00:00")
+        self.storage.claim_next_pending_job("2026-06-05T00:01:00+00:00")
+
+        recovered = self.storage.fail_running_jobs(
+            "2026-06-05T00:02:00+00:00",
+            "worker interrupted",
+        )
+
+        self.assertEqual(recovered, 1)
+        interrupted = self.storage.get_job("job-1")
+        self.assertEqual(interrupted["status"], "failed")
+        self.assertEqual(interrupted["runner_status"], "interrupted")
+        self.assertEqual(interrupted["error_message"], "worker interrupted")
+        self.assertEqual(self.storage.get_job("job-2")["status"], "pending")
 
     def test_managed_user_permissions_are_keyed_by_subject(self) -> None:
         self.storage.save_managed_user_access(

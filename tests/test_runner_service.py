@@ -69,8 +69,18 @@ class RunnerServiceTests(unittest.TestCase):
             captured_calls[0]["extravars"]["application_ports"],
             [12001, 12002],
         )
+        self.assertEqual(
+            captured_calls[0]["extravars"]["access_request"]["request_id"],
+            "allow-job",
+        )
         self.assertNotIn("application_ports", captured_calls[1]["extravars"])
         self.assertEqual(captured_calls[2]["extravars"]["application_ports"], [12001])
+        self.assertTrue(
+            all(
+                call["timeout"] == settings.runner_timeout_seconds
+                for call in captured_calls
+            )
+        )
 
     def test_snapshot_mode_is_passed_to_ansible(self) -> None:
         captured_calls = []
@@ -105,6 +115,10 @@ class RunnerServiceTests(unittest.TestCase):
         self.assertNotIn("trade_access_tasks_from", captured_calls[0]["extravars"])
         self.assertEqual(captured_calls[0]["extravars"]["snapshot_mode"], "ips")
         self.assertIn("firewall_ips_snapshot.json", captured_calls[0]["extravars"]["snapshot_output_path"])
+        self.assertEqual(
+            captured_calls[0]["timeout"],
+            settings.snapshot_runner_timeout_seconds,
+        )
 
 
 if __name__ == "__main__":

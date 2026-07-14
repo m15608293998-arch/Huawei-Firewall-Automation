@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+import api.jobs as jobs_module
 from api.config import settings
 from api.auth import (
     Principal,
@@ -112,6 +113,18 @@ def admin_ui():
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz():
+    try:
+        jobs_module.storage.check_health()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Job database is unavailable.",
+        ) from exc
+    return {"status": "ready"}
 
 
 @app.get(
@@ -493,7 +506,7 @@ def get_firewall_port_snapshot(
 )
 def list_trade_access_jobs(
     limit: int = Query(default=100, ge=1, le=500),
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=1_000_000),
     job_status: JobStatus | None = Query(default=None, alias="status"),
     principal: Principal = Depends(require_firewall_job_read),
 ):
@@ -539,7 +552,7 @@ def get_trade_access_job_events(
 )
 def list_all_trade_access_jobs(
     limit: int = Query(default=100, ge=1, le=500),
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=1_000_000),
     job_status: JobStatus | None = Query(default=None, alias="status"),
     principal: Principal = Depends(require_firewall_job_audit),
 ):
