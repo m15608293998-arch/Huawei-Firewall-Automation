@@ -13,15 +13,15 @@ firewall_device:
  
 address_vsystems:
   - name: "public"
-    address_set_name: "VerifyBJ195"
+    address_set_name: "TraderServers-DirectAccess-IPs"
     switch_required: false
 
   - name: "Internet"
-    address_set_name: "Verify195-TradeServers"
+    address_set_name: "TraderServers-DirectAccess-IPs"
     switch_required: true
 
   - name: "private"
-    address_set_name: "Verify195-TradeServers"
+    address_set_name: "TraderServers-DirectAccess-IPs"
     switch_required: true
 
 # User-Defined Application 只在 private 里配置
@@ -29,21 +29,23 @@ application_vsystem: "private"
 
 # 自定义应用配置
 user_defined_application:
-  name_prefix: "UD_TS_"
+  name_prefix: "UDA_TS_"
   category: "General"
   subcategory: "General_TCP"
   data_model: "client-server"
   label: "Business-Applications"
-  application_group_name: "UD_TradeGroup_Internet"
+  application_group_name: "UDG_TradeServers"
 
 # 需要放行的业务端口
-# 你只需要维护这个端口列表，role 会自动每 4 个端口拆成一条 rule
+# 每条 rule 最多 4 个端口，每个 Application 最多 8 条 rule（32 个端口）
+# 超出后自动使用 UDA_TS_<IP>_2、UDA_TS_<IP>_3 等后续对象
 application_ports:
   - 12001
   - 12002
   - 12003
   - 12004
 rule_port_limit: 4
+application_rule_limit: 8
 
 # 测试阶段先 false，确认没问题后再改 true
 enable_application_config: true

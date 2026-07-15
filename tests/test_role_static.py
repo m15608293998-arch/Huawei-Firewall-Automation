@@ -1,11 +1,39 @@
 from pathlib import Path
 import unittest
 
+import yaml
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class RoleStaticTests(unittest.TestCase):
+    def test_production_resource_names_and_application_capacity(self) -> None:
+        config = yaml.safe_load((PROJECT_ROOT / "group_vars/all.yml").read_text())
+
+        self.assertEqual(
+            [context["name"] for context in config["address_vsystems"]],
+            ["public", "Internet", "private"],
+        )
+        self.assertEqual(
+            {
+                context["address_set_name"]
+                for context in config["address_vsystems"]
+            },
+            {"TraderServers-DirectAccess-IPs"},
+        )
+        self.assertEqual(config["application_vsystem"], "private")
+        self.assertEqual(
+            config["user_defined_application"]["name_prefix"],
+            "UDA_TS_",
+        )
+        self.assertEqual(
+            config["user_defined_application"]["application_group_name"],
+            "UDG_TradeServers",
+        )
+        self.assertEqual(config["rule_port_limit"], 4)
+        self.assertEqual(config["application_rule_limit"], 8)
+
     def test_application_upper_limit_error_is_not_whitelisted(self) -> None:
         application_yml = (
             PROJECT_ROOT

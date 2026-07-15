@@ -457,7 +457,7 @@ def main() -> int:
     parser.add_argument("--application-group-file")
     parser.add_argument("--application-prefix", required=True)
     parser.add_argument("--application-vsystem", default="private")
-    parser.add_argument("--application-group", default="UD_TradeGroup_Internet")
+    parser.add_argument("--application-group", default="UDG_TradeServers")
     parser.add_argument("--output")
     args = parser.parse_args()
 

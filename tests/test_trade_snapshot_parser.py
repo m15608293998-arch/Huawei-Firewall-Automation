@@ -44,23 +44,23 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 "address 6 192.168.66.44 mask 32 description ssh-only\n",
             )
             application_inventory = (
-                "user-defined-application name UD_TS_192.168.66.22\n"
-                "user-defined-application name UD_TS_192.168.66.22_2\n"
+                "user-defined-application name UDA_TS_192.168.66.22\n"
+                "user-defined-application name UDA_TS_192.168.66.22_2\n"
             )
             application_details = (
-                "Application UD_TS_192.168.66.22 Information:\n"
+                "Application UDA_TS_192.168.66.22 Information:\n"
                 "IP Address : 192.168.66.22/32\n"
                 "Port : 12001 12002\n"
-                "Application UD_TS_192.168.66.22_2 Information:\n"
+                "Application UDA_TS_192.168.66.22_2 Information:\n"
                 "IP Address : 192.168.66.22/32\n"
                 "Port : 12003\n"
             )
             application_group = (
-                "application-group name UD_TradeGroup_Internet\n"
-                "add application UD_TS_192.168.66.22\n"
-                "add application UD_TS_192.168.66.22_2\n"
+                "application-group name UDG_TradeServers\n"
+                "add application UDA_TS_192.168.66.22\n"
+                "add application UDA_TS_192.168.66.22_2\n"
                 "application-group name Another_Group\n"
-                "add application UD_TS_192.168.66.99\n"
+                "add application UDA_TS_192.168.66.99\n"
             )
 
             payload = snapshot_parser.build_snapshot(
@@ -72,9 +72,9 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 application_inventory,
                 application_details,
                 application_group,
-                "UD_TS_",
+                "UDA_TS_",
                 "private",
-                "UD_TradeGroup_Internet",
+                "UDG_TradeServers",
             )
 
         self.assertIn("+08:00", payload["generated_at"])
@@ -119,15 +119,15 @@ class TradeSnapshotParserTests(unittest.TestCase):
             ip_payload = snapshot_parser.build_ip_snapshot(address_sources)
             port_payload = snapshot_parser.build_port_snapshot(
                 address_sources,
-                "user-defined-application name UD_TS_192.168.66.22\n",
-                "Application UD_TS_192.168.66.22 Information:\n"
+                "user-defined-application name UDA_TS_192.168.66.22\n",
+                "Application UDA_TS_192.168.66.22 Information:\n"
                 "IP Address : 192.168.66.22/32\n"
                 "Port : 12001\n",
-                "application-group name UD_TradeGroup_Internet\n"
-                "add application UD_TS_192.168.66.22\n",
-                "UD_TS_",
+                "application-group name UDG_TradeServers\n"
+                "add application UDA_TS_192.168.66.22\n",
+                "UDA_TS_",
                 "private",
-                "UD_TradeGroup_Internet",
+                "UDG_TradeServers",
             )
 
         self.assertEqual(
@@ -182,14 +182,14 @@ class TradeSnapshotParserTests(unittest.TestCase):
                     {"vsystem": "Internet", "path": internet},
                     {"vsystem": "private", "path": private},
                 ],
-                "user-defined-application name UD_TS_192.168.66.22\n",
-                "Application UD_TS_192.168.66.22 Information:\n"
+                "user-defined-application name UDA_TS_192.168.66.22\n",
+                "Application UDA_TS_192.168.66.22 Information:\n"
                 "IP Address : 192.168.66.22/32\n"
                 "Port : 12001\n",
                 "",
-                "UD_TS_",
+                "UDA_TS_",
                 "private",
-                "UD_TradeGroup_Internet",
+                "UDG_TradeServers",
             )
 
         self.assertEqual(payload["items"], [])
@@ -201,16 +201,16 @@ class TradeSnapshotParserTests(unittest.TestCase):
             internet = self.write_file(root, "internet.out", "address 2 192.168.66.22 mask 32\n")
             private = self.write_file(root, "private.out", "address 3 192.168.66.22 mask 32\n")
             full_config = (
-                "user-defined-application name UD_TS_192.168.66.22\n"
+                "user-defined-application name UDA_TS_192.168.66.22\n"
                 " rule name 1\n"
                 "  ip-address 192.168.66.22 32\n"
                 "  port 12001\n"
-                "user-defined-application name \"UD_TS_ 192.168.66.23\"\n"
+                "user-defined-application name \"UDA_TS_ 192.168.66.23\"\n"
                 " rule name 1\n"
                 "  ip-address 192.168.66.23 32\n"
                 "  port 12002\n"
-                "application-group name UD_TradeGroup_Internet\n"
-                " add application UD_TS_192.168.66.22\n"
+                "application-group name UDG_TradeServers\n"
+                " add application UDA_TS_192.168.66.22\n"
             )
 
             payload = snapshot_parser.build_port_snapshot(
@@ -222,9 +222,9 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 full_config,
                 "",
                 full_config,
-                "UD_TS_",
+                "UDA_TS_",
                 "private",
-                "UD_TradeGroup_Internet",
+                "UDG_TradeServers",
             )
 
         self.assertEqual(len(payload["items"]), 1)
@@ -242,7 +242,7 @@ class TradeSnapshotParserTests(unittest.TestCase):
             internet = self.write_file(root, "internet.out", address_text)
             private = self.write_file(root, "private.out", address_text)
             full_config = (
-                "user-defined-application name UD_TS_139.196.241.63/10.237.30\n"
+                "user-defined-application name UDA_TS_139.196.241.63/10.237.30\n"
                 " rule name 1\n"
                 "  ip-address 139.196.241.63 32\n"
                 "  port 34002\n"
@@ -251,8 +251,8 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 "  ip-address 10.237.30.32 32\n"
                 "  port 12002\n"
                 "  port 12009\n"
-                "application-group name UD_TradeGroup_Internet\n"
-                " add application UD_TS_139.196.241.63/10.237.30\n"
+                "application-group name UDG_TradeServers\n"
+                " add application UDA_TS_139.196.241.63/10.237.30\n"
             )
 
             payload = snapshot_parser.build_port_snapshot(
@@ -264,9 +264,9 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 full_config,
                 "",
                 full_config,
-                "UD_TS_",
+                "UDA_TS_",
                 "private",
-                "UD_TradeGroup_Internet",
+                "UDG_TradeServers",
             )
 
         self.assertEqual(
@@ -288,14 +288,14 @@ class TradeSnapshotParserTests(unittest.TestCase):
             internet = self.write_file(root, "internet.out", address_text)
             private = self.write_file(root, "private.out", address_text)
             application_details = (
-                "Application UD_TS_legacy Information:\n"
+                "Application UDA_TS_legacy Information:\n"
                 "Rule Name : 1\n"
                 "Destination : 10.237.30.32/32\n"
                 "Port : 8010\n"
             )
             application_group = (
-                "application-group name UD_TradeGroup_Internet\n"
-                "add application UD_TS_legacy\n"
+                "application-group name UDG_TradeServers\n"
+                "add application UDA_TS_legacy\n"
             )
 
             payload = snapshot_parser.build_port_snapshot(
@@ -307,9 +307,9 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 "",
                 application_details,
                 application_group,
-                "UD_TS_",
+                "UDA_TS_",
                 "private",
-                "UD_TradeGroup_Internet",
+                "UDG_TradeServers",
             )
 
         self.assertEqual(payload["items"], [{"ip": "10.237.30.32", "port": 8010}])
@@ -342,7 +342,7 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 "  port 32043\n"
                 "  port 32047\n"
                 "  port 32048\n"
-                "application-group name UD_TradeGroup_Internet\n"
+                "application-group name UDG_TradeServers\n"
                 " add application UD_211.95.106.242101.230.216.138\n"
             )
 
@@ -355,9 +355,9 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 full_config,
                 "",
                 full_config,
-                "UD_TS_",
+                "UDA_TS_",
                 "private",
-                "UD_TradeGroup_Internet",
+                "UDG_TradeServers",
             )
 
         self.assertEqual(
@@ -389,11 +389,11 @@ class TradeSnapshotParserTests(unittest.TestCase):
             internet = self.write_file(root, "internet.out", address_text)
             private = self.write_file(root, "private.out", address_text)
             full_config = (
-                "user-defined-application name UD_TS_192.168.66.22_2\n"
+                "user-defined-application name UDA_TS_192.168.66.22_2\n"
                 " rule name 1\n"
                 "  port 12003\n"
-                "application-group name UD_TradeGroup_Internet\n"
-                " add application UD_TS_192.168.66.22_2\n"
+                "application-group name UDG_TradeServers\n"
+                " add application UDA_TS_192.168.66.22_2\n"
             )
 
             payload = snapshot_parser.build_port_snapshot(
@@ -405,9 +405,9 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 full_config,
                 "",
                 full_config,
-                "UD_TS_",
+                "UDA_TS_",
                 "private",
-                "UD_TradeGroup_Internet",
+                "UDG_TradeServers",
             )
 
         self.assertEqual(payload["items"], [])
@@ -420,12 +420,12 @@ class TradeSnapshotParserTests(unittest.TestCase):
             internet = self.write_file(root, "internet.out", address_text)
             private = self.write_file(root, "private.out", address_text)
             full_config = (
-                "user-defined-application name UD_TS_192.168.66.22_2\n"
+                "user-defined-application name UDA_TS_192.168.66.22_2\n"
                 " rule name 1\n"
                 "  ip-address 192.168.66.22 32\n"
                 "  port 12003\n"
-                "application-group name UD_TradeGroup_Internet\n"
-                " add application UD_TS_192.168.66.22_2\n"
+                "application-group name UDG_TradeServers\n"
+                " add application UDA_TS_192.168.66.22_2\n"
             )
 
             payload = snapshot_parser.build_port_snapshot(
@@ -437,9 +437,9 @@ class TradeSnapshotParserTests(unittest.TestCase):
                 full_config,
                 "",
                 full_config,
-                "UD_TS_",
+                "UDA_TS_",
                 "private",
-                "UD_TradeGroup_Internet",
+                "UDG_TradeServers",
             )
 
         self.assertEqual(payload["items"], [{"ip": "192.168.66.22", "port": 12003}])

@@ -468,20 +468,22 @@ Allow 采用追加合并语义：
 
 工作流会：
 
-1. 查询并补齐目标 IP 在配置的多个 Address Set 中的成员关系。
-2. 查询该 IP 已有的 `UD_TS_<IP>` Application 和端口。
+1. 查询并补齐目标 IP 在 public、Internet、private 三个空间的
+   `TraderServers-DirectAccess-IPs` Address Set 成员关系。
+2. 查询该 IP 已有的 `UDA_TS_<IP>` Application 和端口。
 3. 忽略重复端口，合并已有端口和新端口。
 4. 每条 Rule 最多放 4 个端口。
 5. 每个 Application 最多 8 条 Rule，即最多 32 个端口。
 6. 超过 32 个端口时自动创建：
 
 ```text
-UD_TS_192.168.5.224
-UD_TS_192.168.5.224_2
-UD_TS_192.168.5.224_3
+UDA_TS_192.168.5.224
+UDA_TS_192.168.5.224_2
+UDA_TS_192.168.5.224_3
 ```
 
-7. 在一次 SSH 会话中按合并计划重建相关 Application 和 Group 成员关系。
+7. 在一次 SSH 会话中执行增量变更，并将 Application 加入
+   `UDG_TradeServers` Application Group。
 8. 再次查询并验证端口、IP 和 Application Group。
 
 重复提交已存在端口不会报错，也不会删除之前已经存在但本次没有提交的端口。
@@ -490,10 +492,10 @@ UD_TS_192.168.5.224_3
 
 Deny 的语义是撤销该 IP 的全部放行，不支持只删除部分端口。工作流会：
 
-1. 精确匹配 `UD_TS_<IP>` 及其数字后缀 Application。
-2. 删除 Application Group 中的对应成员。
+1. 精确匹配 `UDA_TS_<IP>` 及其数字后缀 Application。
+2. 从 `UDG_TradeServers` Application Group 删除对应成员。
 3. 删除该 IP 的全部 Application，包括 `_2`、`_3` 等对象。
-4. 从配置的全部 Address Set 中删除该 IP。
+4. 从三个空间的 `TraderServers-DirectAccess-IPs` Address Set 中删除该 IP。
 5. 再次查询验证删除结果。
 
 匹配使用完整名称规则，不会因子串相同而误删其他 IP 的 Application。

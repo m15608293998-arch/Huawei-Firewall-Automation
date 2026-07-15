@@ -163,32 +163,38 @@ firewall_device:
 ```yaml
 address_vsystems:
   - name: "public"
-    address_set_name: "<PUBLIC_ADDRESS_SET>"
+    address_set_name: "TraderServers-DirectAccess-IPs"
     switch_required: false
 
   - name: "Internet"
-    address_set_name: "<INTERNET_ADDRESS_SET>"
+    address_set_name: "TraderServers-DirectAccess-IPs"
     switch_required: true
 
   - name: "private"
-    address_set_name: "<PRIVATE_ADDRESS_SET>"
+    address_set_name: "TraderServers-DirectAccess-IPs"
     switch_required: true
 
 application_vsystem: "private"
 
 user_defined_application:
-  name_prefix: "UD_TS_"
+  name_prefix: "UDA_TS_"
   category: "General"
   subcategory: "General_TCP"
   data_model: "client-server"
   label: "Business-Applications"
-  application_group_name: "<APPLICATION_GROUP_NAME>"
+  application_group_name: "UDG_TradeServers"
 
 rule_port_limit: 4
+application_rule_limit: 8
 enable_application_config: true
 commit_security_engine: true
 save_config: true
 ```
+
+三个空间使用同名 Address Set `TraderServers-DirectAccess-IPs`。Application
+按 `UDA_TS_<IP>` 命名，每条 Rule 最多 4 个端口、每个 Application 最多
+8 条 Rule；超过 32 个端口后依次创建 `_2`、`_3` 等对象，并统一加入
+`UDG_TradeServers`。
 
 ## 4. 配置 API 环境变量
 
