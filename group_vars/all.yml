@@ -29,7 +29,7 @@ application_vsystem: "private"
 
 # 自定义应用配置
 user_defined_application:
-  name_prefix: "UDA_TS_"
+  name_prefix: "UD_TServe_"
   category: "General"
   subcategory: "General_TCP"
   data_model: "client-server"
@@ -38,7 +38,7 @@ user_defined_application:
 
 # 需要放行的业务端口
 # 每条 rule 最多 4 个端口，每个 Application 最多 8 条 rule（32 个端口）
-# 超出后自动使用 UDA_TS_<IP>_2、UDA_TS_<IP>_3 等后续对象
+# 超出后自动使用 UD_TServe_<IP>_2、UD_TServe_<IP>_3 等后续对象
 application_ports:
   - 12001
   - 12002

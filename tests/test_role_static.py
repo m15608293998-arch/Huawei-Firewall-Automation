@@ -25,7 +25,7 @@ class RoleStaticTests(unittest.TestCase):
         self.assertEqual(config["application_vsystem"], "private")
         self.assertEqual(
             config["user_defined_application"]["name_prefix"],
-            "UDA_TS_",
+            "UD_TServe_",
         )
         self.assertEqual(
             config["user_defined_application"]["application_group_name"],
@@ -97,6 +97,8 @@ class RoleStaticTests(unittest.TestCase):
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/access/main.yml"
         ).read_text()
 
+        self.assertIn("Validate Huawei application naming configuration", main_yml)
+        self.assertIn("is match('^UD_')", main_yml)
         self.assertIn("firewall_device.auth_type", main_yml)
         self.assertIn("--password-env-var", main_yml)
         self.assertIn("switch vsys {{ application_vsystem }}", main_yml)

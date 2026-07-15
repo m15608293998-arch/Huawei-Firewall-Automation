@@ -470,16 +470,16 @@ Allow 采用追加合并语义：
 
 1. 查询并补齐目标 IP 在 public、Internet、private 三个空间的
    `TraderServers-DirectAccess-IPs` Address Set 成员关系。
-2. 查询该 IP 已有的 `UDA_TS_<IP>` Application 和端口。
+2. 查询该 IP 已有的 `UD_TServe_<IP>` Application 和端口。
 3. 忽略重复端口，合并已有端口和新端口。
 4. 每条 Rule 最多放 4 个端口。
 5. 每个 Application 最多 8 条 Rule，即最多 32 个端口。
 6. 超过 32 个端口时自动创建：
 
 ```text
-UDA_TS_192.168.5.224
-UDA_TS_192.168.5.224_2
-UDA_TS_192.168.5.224_3
+UD_TServe_192.168.5.224
+UD_TServe_192.168.5.224_2
+UD_TServe_192.168.5.224_3
 ```
 
 7. 在一次 SSH 会话中执行增量变更，并将 Application 加入
@@ -492,7 +492,7 @@ UDA_TS_192.168.5.224_3
 
 Deny 的语义是撤销该 IP 的全部放行，不支持只删除部分端口。工作流会：
 
-1. 精确匹配 `UDA_TS_<IP>` 及其数字后缀 Application。
+1. 精确匹配 `UD_TServe_<IP>` 及其数字后缀 Application。
 2. 从 `UDG_TradeServers` Application Group 删除对应成员。
 3. 删除该 IP 的全部 Application，包括 `_2`、`_3` 等对象。
 4. 从三个空间的 `TraderServers-DirectAccess-IPs` Address Set 中删除该 IP。

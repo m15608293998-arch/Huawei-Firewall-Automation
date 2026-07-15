@@ -116,6 +116,24 @@ class EngineCommitTests(unittest.TestCase):
                 "Info: Engine configuration commit failed."
             )
 
+    def test_cli_command_error_fails_before_later_commands(self) -> None:
+        command = "user-defined-application name UDA_TS_192.168.66.11"
+        output = 'Error: The name of a user-defined application must begin with "UD_".'
+
+        with self.assertRaisesRegex(RuntimeError, "Firewall rejected command") as error:
+            RUNNER.ensure_cli_command_accepted("application.cli", command, output)
+
+        self.assertIn(command, str(error.exception))
+        self.assertIn("application.cli", str(error.exception))
+        self.assertIn("must begin", str(error.exception))
+
+    def test_known_idempotent_application_group_error_is_allowed(self) -> None:
+        RUNNER.ensure_cli_command_accepted(
+            "application.cli",
+            "add application UD_TServe_192.168.66.11",
+            "Error: The application is already exist in the application group.",
+        )
+
     def test_engine_commit_already_complete_returns_immediately(self) -> None:
         output = RUNNER.wait_for_engine_commit_completion(
             SequencedChild([]),

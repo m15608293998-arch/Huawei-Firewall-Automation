@@ -12,6 +12,24 @@
       access_request must include action allow/allow_ip/allow_ports/deny/deny_ports/deny_ip,
       target_ip, requester and request_id.
 
+- name: Validate Huawei application naming configuration
+  ansible.builtin.assert:
+    that:
+      - user_defined_application is defined
+      - user_defined_application.name_prefix is defined
+      - (user_defined_application.name_prefix | string) is match('^UD_')
+      - >-
+        (
+          (user_defined_application.name_prefix | string)
+          ~ (access_request.target_ip | string)
+        ) | length <= 32
+      - user_defined_application.application_group_name is defined
+      - (user_defined_application.application_group_name | string | length) >= 1
+      - (user_defined_application.application_group_name | string | length) <= 32
+    fail_msg: >-
+      Huawei user-defined application names must begin with "UD_" and be at most
+      32 characters. Application group names must contain 1 to 32 characters.
+
 - name: Resolve firewall SSH auth type
   ansible.builtin.set_fact:
     firewall_ssh_auth_type: "{{ firewall_device.auth_type | default('publickey') | lower }}"

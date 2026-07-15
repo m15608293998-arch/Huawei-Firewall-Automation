@@ -39,6 +39,15 @@ ENGINE_COMMIT_POLL_INTERVAL = 2
 ENGINE_COMMIT_MAX_WAIT = 180
 CLI_SEND_DELAY = 0.1
 CLI_COMMAND_SETTLE_DELAY = 0.05
+ALLOWED_CLI_ERROR_LINES = {
+    "Error: The application is already exist in the application group.",
+}
+CLI_ERROR_MARKERS = (
+    "Unrecognized command found",
+    "Too many parameters",
+    "Wrong parameter found",
+    "Ambiguous command found",
+)
 
 
 def read_commands(cli_file):
@@ -206,6 +215,19 @@ def ensure_engine_commit_accepted(command_output):
         )
 
 
+def ensure_cli_command_accepted(source_file, cmd, command_output):
+    for raw_line in command_output.splitlines():
+        line = raw_line.strip()
+        if not line or line in ALLOWED_CLI_ERROR_LINES:
+            continue
+        if line.startswith("Error:") or any(
+            marker in line for marker in CLI_ERROR_MARKERS
+        ):
+            raise RuntimeError(
+                f"Firewall rejected command {cmd!r} from {source_file}: {line}"
+            )
+
+
 def wait_for_engine_commit_completion(
     child,
     initial_output,
@@ -367,6 +389,9 @@ def main():
                     command_output,
                     wait_timeout,
                 )
+            else:
+                # Stop before later commands are sent in the wrong Huawei CLI view.
+                ensure_cli_command_accepted(current_source, cmd, command_output)
 
             output.append("\n")
             output.append(command_output)
