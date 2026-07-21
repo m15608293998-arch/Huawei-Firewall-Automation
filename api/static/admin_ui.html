@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MicroTrade Access 管理平台</title>
+  <style>
+    :root { color-scheme:light; --bg:#f6f7f9; --surface:#fff; --surface-soft:#f8f9fb; --line:#e5e7eb; --line-strong:#d4d8df; --text:#17191c; --muted:#6b7280; --primary:#2563eb; --primary-hover:#1d4ed8; --danger:#dc2626; --success:#16835d; --shadow:0 8px 30px rgba(17,24,39,.06); }
+    * { box-sizing: border-box; }
+    body { margin:0; min-width:320px; background:var(--bg); color:var(--text); font-family:"IBM Plex Sans","Noto Sans SC","Microsoft YaHei",sans-serif; font-size:14px; line-height:1.5; }
+    button,input,select,textarea { font:inherit; }
+    button { letter-spacing:0; }
+    header { position:sticky; top:0; z-index:20; background:rgba(255,255,255,.96); color:var(--text); border-bottom:1px solid var(--line); backdrop-filter:blur(12px); }
+    .header-inner,main { width:min(1120px,calc(100% - 40px)); margin:0 auto; }
+    .header-inner { min-height:68px; display:flex; align-items:center; justify-content:space-between; gap:20px; }
+    h1 { margin:0; font-size:18px; font-weight:700; letter-spacing:0; }
+    h2 { margin:0; font-size:18px; font-weight:700; letter-spacing:0; }
+    .identity,.service-status { display:flex; align-items:center; gap:10px; }
+    .identity { color:var(--muted); }
+    .service-status { gap:7px; white-space:nowrap; }
+    main { padding:22px 0 64px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:#9ca3af; }
+    .dot.ok { background:#22a06b; }
+    .dot.fail { background:var(--danger); }
+    .layout { display:grid; grid-template-columns:minmax(390px,.95fr) minmax(500px,1.25fr); gap:22px; align-items:start; }
+    .wide { grid-column:1/-1; }
+    .panel { overflow:hidden; background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:0 1px 2px rgba(17,24,39,.02); }
+    .panel-header { min-height:64px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 22px; border-bottom:1px solid var(--line); }
+    .panel-heading { display:flex; flex-direction:column; gap:4px; }
+    .panel-description { margin:0; color:var(--muted); font-size:13px; }
+    .panel-body { padding:22px; }
+    label { display:block; margin-bottom:7px; color:#363b44; font-size:13px; font-weight:650; }
+    .field + .field { margin-top:16px; }
+    input,select,textarea { width:100%; min-height:42px; border:1px solid var(--line-strong); border-radius:9px; background:#fff; color:var(--text); padding:9px 12px; outline:none; transition:border-color 140ms ease,box-shadow 140ms ease; }
+    textarea { min-height:84px; resize:vertical; }
+    input:focus,select:focus,textarea:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(37,99,235,.12); }
+    input:disabled { background:#f1f3f5; color:#737a85; }
+    input::placeholder,textarea::placeholder { color:#9aa0aa; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .permissions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .check { min-height:40px; display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-soft); }
+    .check input { width:16px; min-height:16px; margin:0; }
+    .check label { margin:0; font:12px "SFMono-Regular",Consolas,monospace; }
+    .actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:20px; }
+    .form-footer { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-top:22px; padding-top:20px; border-top:1px solid var(--line); }
+    .form-footer-copy { min-width:0; }
+    .form-footer-note { color:var(--muted); font-size:12px; }
+    .save-feedback { min-height:20px; margin-top:4px; color:var(--muted); font-size:12px; font-weight:650; }
+    .save-feedback.saving::before { content:""; display:inline-block; width:11px; height:11px; margin-right:7px; border:2px solid #bfdbfe; border-top-color:var(--primary); border-radius:50%; vertical-align:-2px; animation:spin .7s linear infinite; }
+    .save-feedback.ok { color:var(--success); }
+    .save-feedback.error { color:var(--danger); }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    button.command { min-height:40px; border:1px solid transparent; border-radius:9px; padding:0 16px; cursor:pointer; font-weight:650; transition:background 140ms ease,border-color 140ms ease,opacity 140ms ease; }
+    button.primary { background:var(--primary); color:#fff; }
+    button.primary:hover:not(:disabled) { background:var(--primary-hover); }
+    button.secondary { border-color:var(--line-strong); background:#fff; color:#353b45; }
+    button.secondary:hover:not(:disabled) { background:var(--surface-soft); }
+    button:disabled { opacity:.48; cursor:not-allowed; }
+    .message { margin-bottom:16px; padding:11px 13px; border-radius:9px; background:var(--surface-soft); color:#505762; }
+    .message.ok { background:#e8f7f0; color:var(--success); }
+    .message.error { background:#fff1f2; color:#b42318; }
+    .search-row { display:grid; grid-template-columns:1fr auto; gap:8px; }
+    .search-results { margin-top:12px; max-height:220px; overflow:auto; border:1px solid var(--line); border-radius:9px; }
+    .search-item { width:100%; padding:10px 12px; border:0; border-bottom:1px solid var(--line); background:#fff; text-align:left; cursor:pointer; }
+    .search-item:hover,tbody tr:hover { background:#fafbfc; }
+    .search-item:last-child { border-bottom:0; }
+    .search-item small { display:block; color:var(--muted); }
+    .table-wrap { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:15px 18px; border-bottom:1px solid #eceef1; text-align:left; vertical-align:middle; }
+    th { background:var(--surface-soft); color:#69707c; font-size:12px; font-weight:650; }
+    tbody tr { cursor:pointer; }
+    .snapshot-actions { display:flex; flex-wrap:wrap; gap:10px; }
+    .snapshot table { min-width:520px; }
+    .snapshot tbody tr { cursor:default; }
+    .snapshot-meta { color:var(--muted); font-size:12px; }
+    .table-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 18px 18px; border-top:1px solid var(--line); }
+    td.mono { font:12px "SFMono-Regular",Consolas,monospace; }
+    .empty { padding:44px 24px; color:var(--muted); text-align:center; }
+    .hidden { display:none !important; }
+    @media (max-width:900px) { .layout { grid-template-columns:1fr; } }
+    @media (max-width:620px) { .header-inner,main { width:min(100% - 24px,1120px); } .header-inner { align-items:flex-start; flex-direction:column; justify-content:center; padding:14px 0; } .identity { width:100%; flex-wrap:wrap; } .row,.permissions,.search-row { grid-template-columns:1fr; } .form-footer { align-items:stretch; flex-direction:column; } button.command { width:100%; } th,td { padding:13px 14px; } }
+  </style>
+</head>
+<body>
+  <header><div class="header-inner"><h1>MicroTrade Access 用户管理平台</h1><div class="identity"><span class="service-status"><span id="serviceDot" class="dot"></span><span id="serviceText">正在检查服务</span></span><span id="identityText" class="hidden"></span><button id="login" class="command primary" type="button">管理员登录</button><button id="logout" class="command secondary hidden" type="button">退出并切换账号</button></div></div></header>
+  <main>
+    <section class="layout">
+      <section class="panel">
+        <div class="panel-header"><h2>Keycloak User 授权</h2></div>
+        <div class="panel-body">
+          <div id="userMessage" class="message">登录后从 Keycloak 搜索用户</div>
+          <div class="field"><label for="userSearch">Keycloak 用户</label><div class="search-row"><input id="userSearch" placeholder="用户名、姓名或邮箱"><button id="searchUsers" class="command secondary" type="button">搜索</button></div><div id="searchResults" class="search-results hidden"></div></div>
+          <div class="field"><label for="userSubject">Subject ID</label><input id="userSubject" disabled></div>
+          <div class="row field"><div><label for="username">用户名</label><input id="username" disabled></div><div><label for="userDisplayName">显示名称</label><input id="userDisplayName"></div></div>
+          <div class="row field"><div><label for="userProfile">角色</label><select id="userProfile"><option value="user">普通用户</option><option value="admin">管理员</option></select></div><div><label for="userEnabled">本地访问状态</label><select id="userEnabled"><option value="true">启用</option><option value="false">停用</option></select></div></div>
+          <div class="field"><label>接口权限</label><div id="userPermissions" class="permissions"></div></div>
+          <div class="form-footer"><div class="form-footer-copy"><div class="form-footer-note">授权会在用户下次使用 Keycloak Token 时立即生效</div><div id="saveFeedback" class="save-feedback" role="status" aria-live="polite"></div></div><button id="saveUser" class="command primary" type="button">保存用户授权</button></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header"><h2>已授权用户</h2><button id="refreshUsers" class="command secondary" type="button" title="重新从服务器读取已授权用户列表">刷新列表</button></div>
+        <div class="table-wrap"><table><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>更新时间</th></tr></thead><tbody id="userRows"></tbody></table><div id="emptyUsers" class="empty">暂无已授权用户</div></div>
+      </section>
+      <section class="panel wide snapshot">
+        <div class="panel-header">
+          <div class="panel-heading"><h2>防火墙快照</h2><p class="panel-description">查询当前防火墙已生效的业务 IP 和端口清单</p></div>
+          <div class="snapshot-actions"><button id="queryIpSnapshot" class="command secondary" type="button">查询 IP 清单</button><button id="queryPortSnapshot" class="command secondary" type="button">查询端口清单</button></div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>IP</th><th>端口</th></tr></thead><tbody id="snapshotRows"></tbody></table><div id="emptySnapshot" class="empty">管理员登录后可查询防火墙快照</div></div>
+        <div class="table-footer"><span id="snapshotMeta" class="snapshot-meta">尚未查询</span></div>
+      </section>
+    </section>
+  </main>
+  <script src="/static/oidc.js"></script>
+  <script>
+    const permissionDefinitions = [["firewall.ip.allow","user"],["firewall.ports.allow","user"],["firewall.ports.deny","user"],["firewall.ip.deny","user"],["firewall.snapshot.read","user"],["firewall.job.read","user"],["firewall.job.audit","admin"],["identity.user.manage","admin"]];
+    const state = { users: [], authenticated: false, selectedUser: null, snapshotLoading: false };
+    const $ = (selector) => document.querySelector(selector);
+    const beijingDateTimeFormatter = new Intl.DateTimeFormat("zh-CN", { timeZone:"Asia/Shanghai", year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit", hourCycle:"h23" });
+    function formatBeijingTime(value) { if(!value) return "-"; const date=new Date(value); if(Number.isNaN(date.getTime())) return value; const parts=Object.fromEntries(beijingDateTimeFormatter.formatToParts(date).map((part)=>[part.type,part.value])); return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`; }
+    function buildPermissionControls() { permissionDefinitions.forEach(([name,level]) => { const wrapper=document.createElement("div"); wrapper.className="check"; const input=document.createElement("input"); input.type="checkbox"; input.id=`user-${name}`; input.dataset.permission=name; input.dataset.level=level; const label=document.createElement("label"); label.htmlFor=input.id; label.textContent=name; wrapper.append(input,label); $("#userPermissions").append(wrapper); }); }
+    function permissions() { return [...document.querySelectorAll("[data-permission]:checked")].map((input)=>input.dataset.permission); }
+    function normalizePermissions(values) { const expanded=new Set(); values.forEach((permission)=>{ if(permission==="firewall.allow"){ expanded.add("firewall.ip.allow"); expanded.add("firewall.ports.allow"); } else if(permission==="firewall.deny"){ expanded.add("firewall.ports.deny"); expanded.add("firewall.ip.deny"); } else expanded.add(permission); }); return expanded; }
+    function setPermissions(values) { const normalized=normalizePermissions(values); document.querySelectorAll("[data-permission]").forEach((input)=>{ input.checked=normalized.has(input.dataset.permission); }); }
+    function message(value,type="") { $("#userMessage").textContent=value; $("#userMessage").className=`message ${type}`; }
+    function saveFeedback(value,type="") { $("#saveFeedback").textContent=value; $("#saveFeedback").className=`save-feedback ${type}`; }
+    async function checkHealth() { try { const response=await fetch("/healthz",{cache:"no-store"}); if(!response.ok) throw new Error(`HTTP ${response.status}`); const result=await response.json(); if(result.status!=="ok") throw new Error("Service unhealthy"); $("#serviceDot").className="dot ok"; $("#serviceText").textContent="服务正常"; } catch { $("#serviceDot").className="dot fail"; $("#serviceText").textContent="服务异常"; } }
+    function applyProfile(force=false) { const profile=$("#userProfile").value; document.querySelectorAll("[data-permission]").forEach((input)=>{ const forbidden=profile==="user"&&input.dataset.level==="admin"; input.disabled=forbidden; if(forbidden) input.checked=false; else if(force) input.checked=true; }); }
+    async function api(path,options={}) { const headers=new Headers(options.headers||{}); if(options.body) headers.set("Content-Type","application/json"); const response=await tradeAccessOidc.authenticatedFetch(path,{...options,headers}); const text=await response.text(); let data; try{data=text?JSON.parse(text):null;}catch{data=text;} if(!response.ok){const detail=data&&data.detail?data.detail:`HTTP ${response.status}`; throw new Error(typeof detail==="string"?detail:JSON.stringify(detail));} return data; }
+    function editUser(user) { const managed=state.users.find((item)=>item.subject_id===user.subject_id)||null; state.selectedUser=managed||user; $("#userSubject").value=user.subject_id; $("#username").value=user.username; $("#userDisplayName").value=user.display_name||""; $("#userProfile").value=user.profile||"user"; $("#userEnabled").value=String(user.enabled!==false); setPermissions(user.permissions||["firewall.ip.allow","firewall.ports.allow","firewall.ports.deny","firewall.ip.deny","firewall.snapshot.read","firewall.job.read"]); applyProfile(false); message(`正在配置 ${user.username}`); saveFeedback(""); }
+    function userAuthorizationPayload() { return {username:$("#username").value,display_name:$("#userDisplayName").value.trim()||null,profile:$("#userProfile").value,enabled:$("#userEnabled").value==="true",permissions:permissions(),allowed_ips:[]}; }
+    function renderUsers() { $("#userRows").replaceChildren(); $("#emptyUsers").classList.toggle("hidden",state.users.length>0); state.users.forEach((user)=>{ const row=document.createElement("tr"); [user.username,user.profile,user.enabled?"启用":"停用",formatBeijingTime(user.updated_at)].forEach((value,index)=>{const cell=document.createElement("td"); cell.textContent=value; if(index===0) cell.className="mono"; row.append(cell);}); row.addEventListener("click",()=>editUser(user)); $("#userRows").append(row); }); }
+    async function loadUsers() { state.users=await api("/api/v1/admin/users"); renderUsers(); }
+    async function searchUsers() { const query=$("#userSearch").value.trim(); if(!query) throw new Error("请输入搜索条件"); const users=await api(`/api/v1/admin/users/search?q=${encodeURIComponent(query)}`); const box=$("#searchResults"); box.replaceChildren(); box.classList.toggle("hidden",users.length===0); users.forEach((user)=>{const button=document.createElement("button"); button.className="search-item"; button.type="button"; button.textContent=user.username; const detail=document.createElement("small"); detail.textContent=[user.display_name,user.email,user.subject_id].filter(Boolean).join(" · "); button.append(detail); button.addEventListener("click",()=>{const managed=state.users.find((item)=>item.subject_id===user.subject_id); editUser(managed||{...user,profile:"user",permissions:["firewall.ip.allow","firewall.ports.allow","firewall.ports.deny","firewall.ip.deny","firewall.snapshot.read","firewall.job.read"],allowed_ips:[]}); box.classList.add("hidden");}); box.append(button);}); }
+    async function saveUser() { const subjectId=$("#userSubject").value; if(!subjectId) throw new Error("请先选择 Keycloak 用户"); const result=await api(`/api/v1/admin/users/${encodeURIComponent(subjectId)}`,{method:"PUT",body:JSON.stringify(userAuthorizationPayload())}); await loadUsers(); editUser(state.users.find((item)=>item.subject_id===result.subject_id)||result); message(`已保存 ${result.username} 的授权，下次请求立即生效`,"ok"); }
+    async function runSaveUser(button) { const originalText=button.textContent; try { button.disabled=true; button.textContent="保存中..."; saveFeedback("正在保存用户授权...","saving"); await saveUser(); button.textContent="已保存"; saveFeedback("保存成功，授权已立即生效","ok"); await new Promise((resolve)=>window.setTimeout(resolve,1200)); } catch(error) { message(error.message,"error"); saveFeedback(`保存失败：${error.message}`,"error"); } finally { button.disabled=false; button.textContent=originalText; } }
+    function setSnapshotButtonsDisabled(disabled) { $("#queryIpSnapshot").disabled=disabled; $("#queryPortSnapshot").disabled=disabled; }
+    function renderSnapshot(snapshot,mode) { const items=snapshot.items||[]; $("#snapshotRows").replaceChildren(); $("#emptySnapshot").classList.toggle("hidden",items.length>0); $("#emptySnapshot").textContent=items.length>0?"":"暂无快照数据"; $("#snapshotMeta").textContent=`${mode==="ips"?"IP":"端口"} 对账清单 · ${formatBeijingTime(snapshot.generated_at)} · ${items.length} 条`; items.forEach((item)=>{ const row=document.createElement("tr"); const values=[{value:item.ip,mono:true},{value:mode==="ips"?"-":item.port}]; values.forEach(({value,mono})=>{ const cell=document.createElement("td"); cell.textContent=value; if(mono) cell.className="mono"; row.append(cell); }); $("#snapshotRows").append(row); }); }
+    async function querySnapshot(mode,button) { if(state.snapshotLoading) return; const originalText=button.textContent; try { state.snapshotLoading=true; setSnapshotButtonsDisabled(true); button.textContent="查询中..."; $("#emptySnapshot").classList.remove("hidden"); $("#emptySnapshot").textContent="正在查询防火墙快照，请稍候"; const snapshot=await api(`/api/v1/trade-access/firewall/snapshot/${mode}`); renderSnapshot(snapshot,mode); message(`${mode==="ips"?"IP":"端口"} 清单查询完成，共 ${snapshot.items.length} 条`,"ok"); } catch(error) { $("#emptySnapshot").classList.remove("hidden"); $("#emptySnapshot").textContent=error.message; message(error.message,"error"); } finally { state.snapshotLoading=false; button.textContent=originalText; setSnapshotButtonsDisabled(!state.authenticated); } }
+    async function connect() { const me=await api("/api/v1/trade-access/me"); if(!me.is_admin||!me.permissions.includes("identity.user.manage")) throw new Error("当前用户没有用户管理权限"); state.authenticated=true; $("#identityText").textContent=me.subject; $("#identityText").classList.remove("hidden"); $("#login").classList.add("hidden"); $("#logout").classList.remove("hidden"); setSnapshotButtonsDisabled(false); $("#emptySnapshot").textContent="点击上方按钮查询防火墙快照"; const status=await api("/api/v1/admin/users/status"); if(!status.keycloak_provisioning_configured) throw new Error("服务端未配置 Provisioning Client"); await loadUsers(); }
+    async function run(action,target) { try{target.disabled=true; await action();}catch(error){message(error.message,"error");}finally{target.disabled=false;} }
+    buildPermissionControls(); applyProfile(true);
+    $("#login").addEventListener("click",()=>tradeAccessOidc.loginFresh()); $("#logout").addEventListener("click",()=>tradeAccessOidc.switchAccount()); $("#userProfile").addEventListener("change",()=>applyProfile(true)); $("#searchUsers").addEventListener("click",(event)=>run(searchUsers,event.currentTarget)); $("#saveUser").addEventListener("click",(event)=>runSaveUser(event.currentTarget)); $("#refreshUsers").addEventListener("click",(event)=>run(loadUsers,event.currentTarget)); $("#queryIpSnapshot").addEventListener("click",(event)=>querySnapshot("ips",event.currentTarget)); $("#queryPortSnapshot").addEventListener("click",(event)=>querySnapshot("ports",event.currentTarget)); setSnapshotButtonsDisabled(true);
+    checkHealth(); window.setInterval(checkHealth,30000);
+    tradeAccessOidc.initialize().then(()=>{if(tradeAccessOidc.isAuthenticated()) return connect(); return null;}).catch((error)=>{message(error.message,"error"); if(tradeAccessOidc.isAuthenticated()){ $("#identityText").textContent="已登录非管理员账号"; $("#identityText").classList.remove("hidden"); $("#login").classList.add("hidden"); $("#logout").classList.remove("hidden"); }});
+  </script>
+</body>
+</html>

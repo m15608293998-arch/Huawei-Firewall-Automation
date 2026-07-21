@@ -1,0 +1,181 @@
+---
+- name: Render query address-set member command before remove for {{ address_context.name }}
+  ansible.builtin.template:
+    src: address/query_member.cli.j2
+    dest: "{{ local_tmp_dir }}/query_address_set_member_before_remove_{{ address_context.name }}.cli"
+    mode: "0600"
+
+- name: Query address-set member before remove in {{ address_context.name }}
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_address_set_member_before_remove_' ~ address_context.name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: address_query_before_remove
+  changed_when: false
+  failed_when:
+    - address_query_before_remove.rc != 0 or
+      'Error:' in address_query_before_remove.stdout or
+      'Unrecognized command' in address_query_before_remove.stdout or
+      'Too many parameters' in address_query_before_remove.stdout
+
+- name: Show raw address-set query output before remove in {{ address_context.name }}
+  ansible.builtin.debug:
+    var: address_query_before_remove.stdout_lines
+
+- name: Save raw address-set query output before remove in {{ address_context.name }}
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/query_address_set_member_before_remove_{{ address_context.name }}.out"
+    mode: "0600"
+    content: "{{ address_query_before_remove.stdout }}"
+  changed_when: false
+
+- name: Extract address-set member id before remove in {{ address_context.name }}
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_address_id.py"
+      - "--file"
+      - "{{ local_tmp_dir }}/query_address_set_member_before_remove_{{ address_context.name }}.out"
+      - "--ip"
+      - "{{ access_request.target_ip }}"
+      - "--mask"
+      - "{{ access_request.mask | default(32) | string }}"
+  register: address_id_extract_before
+  changed_when: false
+  failed_when:
+    - address_id_extract_before.rc != 0
+
+- name: Set extracted address-set member data before remove in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    address_extract_before: "{{ address_id_extract_before.stdout | from_json }}"
+    address_member_ids_before_remove: "{{ (address_id_extract_before.stdout | from_json).ids }}"
+    address_member_lines_before_remove: "{{ (address_id_extract_before.stdout | from_json).lines }}"
+
+- name: Validate address-set member id count before remove in {{ address_context.name }}
+  ansible.builtin.assert:
+    that:
+      - address_member_ids_before_remove | length <= 1
+    fail_msg: >-
+      Found multiple address member IDs for {{ access_request.target_ip }}
+      in {{ address_context.address_set_name }} under {{ address_context.name }}:
+      {{ address_member_ids_before_remove }}. Refuse to remove automatically.
+    success_msg: >-
+      Address member ID count is safe for {{ access_request.target_ip }}
+      in {{ address_context.name }}.
+
+- name: Set address-set remove state in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    address_member_id_before_remove: "{{ address_member_ids_before_remove[0] if (address_member_ids_before_remove | length) > 0 else '' }}"
+    address_exists_before_remove: "{{ (address_member_ids_before_remove | length) > 0 }}"
+
+- name: Show extracted address member ID before remove in {{ address_context.name }}
+  ansible.builtin.debug:
+    msg:
+      action: deny
+      vsystem: "{{ address_context.name }}"
+      address_set_name: "{{ address_context.address_set_name }}"
+      target_ip: "{{ access_request.target_ip }}"
+      matched_lines: "{{ address_member_lines_before_remove }}"
+      extracted_ids: "{{ address_member_ids_before_remove }}"
+      member_id_to_remove: "{{ address_member_id_before_remove }}"
+      exists_before_remove: "{{ address_exists_before_remove }}"
+
+- name: Render remove address-set member command for {{ address_context.name }}
+  ansible.builtin.template:
+    src: address/remove_member.cli.j2
+    dest: "{{ local_tmp_dir }}/remove_address_set_member_{{ address_context.name }}.cli"
+    mode: "0600"
+  when: address_exists_before_remove | bool
+
+- name: Remove target IP from address-set in {{ address_context.name }}
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/remove_address_set_member_' ~ address_context.name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: address_remove_result
+  changed_when: true
+  failed_when:
+    - address_remove_result.rc != 0 or
+      'Unrecognized command' in address_remove_result.stdout or
+      'Too many parameters' in address_remove_result.stdout or
+      (
+        'Error:' in address_remove_result.stdout and
+        'not exist' not in address_remove_result.stdout and
+        'does not exist' not in address_remove_result.stdout
+      )
+  when: address_exists_before_remove | bool
+
+- name: Show remove address-set output in {{ address_context.name }}
+  ansible.builtin.debug:
+    var: address_remove_result.stdout_lines
+  when: address_exists_before_remove | bool
+
+- name: Mark firewall changed after address-set remove in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    firewall_mutated: true
+  when: address_exists_before_remove | bool
+
+- name: Reuse absent address-set state in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    address_member_ids_after_remove: "{{ address_member_ids_before_remove }}"
+    address_member_lines_after_remove: "{{ address_member_lines_before_remove }}"
+
+- name: Query address-set member after remove in {{ address_context.name }}
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_address_set_member_before_remove_' ~ address_context.name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: address_query_after_remove
+  changed_when: false
+  failed_when:
+    - address_query_after_remove.rc != 0 or
+      'Error:' in address_query_after_remove.stdout or
+      'Unrecognized command' in address_query_after_remove.stdout or
+      'Too many parameters' in address_query_after_remove.stdout
+  when: address_exists_before_remove | bool
+
+- name: Show raw address-set query output after remove in {{ address_context.name }}
+  ansible.builtin.debug:
+    var: address_query_after_remove.stdout_lines
+  when: address_exists_before_remove | bool
+
+- name: Save raw address-set query output after remove in {{ address_context.name }}
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/query_address_set_member_after_remove_{{ address_context.name }}.out"
+    mode: "0600"
+    content: "{{ address_query_after_remove.stdout }}"
+  changed_when: false
+  when: address_exists_before_remove | bool
+
+- name: Extract address-set member id after remove in {{ address_context.name }}
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_address_id.py"
+      - "--file"
+      - "{{ local_tmp_dir }}/query_address_set_member_after_remove_{{ address_context.name }}.out"
+      - "--ip"
+      - "{{ access_request.target_ip }}"
+      - "--mask"
+      - "{{ access_request.mask | default(32) | string }}"
+  register: address_id_extract_after
+  changed_when: false
+  failed_when:
+    - address_id_extract_after.rc != 0
+  when: address_exists_before_remove | bool
+
+- name: Set extracted address-set member data after remove in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    address_extract_after: "{{ address_id_extract_after.stdout | from_json }}"
+    address_member_ids_after_remove: "{{ (address_id_extract_after.stdout | from_json).ids }}"
+    address_member_lines_after_remove: "{{ (address_id_extract_after.stdout | from_json).lines }}"
+  when: address_exists_before_remove | bool
+
+- name: Validate target IP removed from address-set in {{ address_context.name }}
+  ansible.builtin.assert:
+    that:
+      - address_member_ids_after_remove | length == 0
+    fail_msg: >-
+      {{ access_request.target_ip }} still exists in
+      {{ address_context.address_set_name }} under {{ address_context.name }}
+      after remove. Remaining lines: {{ address_member_lines_after_remove }}.
+    success_msg: >-
+      {{ access_request.target_ip }} has been removed from
+      {{ address_context.address_set_name }} under {{ address_context.name }}.

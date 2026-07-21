@@ -1,0 +1,9 @@
+system-view
+{% if application_vsystem | lower != 'public' %}
+switch vsys {{ application_vsystem }}
+system-view
+{% endif %}
+sa
+application-group name {{ user_defined_application.application_group_name }}
+display this | include {{ app_name }}
+quit

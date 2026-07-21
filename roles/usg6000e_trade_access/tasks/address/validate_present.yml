@@ -1,0 +1,58 @@
+---
+- name: Render query address-set member command before port operation for {{ address_context.name }}
+  ansible.builtin.template:
+    src: address/query_member.cli.j2
+    dest: "{{ local_tmp_dir }}/query_address_set_member_before_port_{{ address_context.name }}.cli"
+    mode: "0600"
+
+- name: Query address-set member before port operation in {{ address_context.name }}
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_address_set_member_before_port_' ~ address_context.name ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: address_query_before_port
+  changed_when: false
+  failed_when:
+    - address_query_before_port.rc != 0 or
+      'Error:' in address_query_before_port.stdout or
+      'Unrecognized command' in address_query_before_port.stdout or
+      'Too many parameters' in address_query_before_port.stdout
+
+- name: Save raw address-set query output before port operation in {{ address_context.name }}
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/query_address_set_member_before_port_{{ address_context.name }}.out"
+    mode: "0600"
+    content: "{{ address_query_before_port.stdout }}"
+  changed_when: false
+
+- name: Extract address-set member id before port operation in {{ address_context.name }}
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_address_id.py"
+      - "--file"
+      - "{{ local_tmp_dir }}/query_address_set_member_before_port_{{ address_context.name }}.out"
+      - "--ip"
+      - "{{ access_request.target_ip }}"
+      - "--mask"
+      - "{{ access_request.mask | default(32) | string }}"
+  register: address_id_extract_before_port
+  changed_when: false
+  failed_when:
+    - address_id_extract_before_port.rc != 0
+
+- name: Set address-set state before port operation in {{ address_context.name }}
+  ansible.builtin.set_fact:
+    address_member_ids_before_port: "{{ (address_id_extract_before_port.stdout | from_json).ids }}"
+    address_member_lines_before_port: "{{ (address_id_extract_before_port.stdout | from_json).lines }}"
+
+- name: Validate target IP exists before port operation in {{ address_context.name }}
+  ansible.builtin.assert:
+    that:
+      - address_member_ids_before_port | length > 0
+    fail_msg: >-
+      {{ access_request.target_ip }} must be added to
+      {{ address_context.address_set_name }} under {{ address_context.name }}
+      before ports can be changed.
+    success_msg: >-
+      {{ access_request.target_ip }} exists in
+      {{ address_context.address_set_name }} under {{ address_context.name }}.

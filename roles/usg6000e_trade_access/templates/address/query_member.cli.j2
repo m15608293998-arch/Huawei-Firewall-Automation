@@ -1,0 +1,8 @@
+system-view
+{% if address_context.switch_required | bool %}
+switch vsys {{ address_context.name }}
+system-view
+{% endif %}
+ip address-set {{ address_context.address_set_name }} type object
+display this | include {{ access_request.target_ip }}
+quit

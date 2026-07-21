@@ -1,0 +1,6 @@
+---
+- name: Remove requested ports from user-defined application in private virtual system
+  ansible.builtin.include_tasks: application/configure_ports.yml
+  vars:
+    application_port_mode: remove
+  when: enable_application_config | default(true) | bool

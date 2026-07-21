@@ -1,0 +1,10 @@
+---
+- name: Run trade access automation on Huawei USG6000E
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Run trade access role
+      ansible.builtin.include_role:
+        name: usg6000e_trade_access
