@@ -81,6 +81,8 @@
     base_app_name: "{{ user_defined_application.name_prefix }}{{ access_request.target_ip }}"
     application_ports_int: "{{ (application_ports if access_request.action in ['allow', 'allow_ports', 'deny_ports'] else []) | map('int') | unique | sort | list }}"
     firewall_mutated: false
+    address_mutated: false
+    application_mutated: false
     firewall_cli_environment: >-
       {{
         {'USG6000E_DEVICE_PASSWORD': firewall_device.device_password}
@@ -147,7 +149,7 @@
     dest: "{{ local_tmp_dir }}/final_commit_save.cli"
     mode: "0600"
     content: |
-      {% if commit_security_engine | default(true) | bool %}
+      {% if (application_mutated | default(false) | bool) and (commit_security_engine | default(true) | bool) %}
       system-view
       {% if application_vsystem | lower != 'public' %}
       switch vsys {{ application_vsystem }}
@@ -164,8 +166,9 @@
       save
       {% endif %}
   when:
-    - firewall_mutated | default(false) | bool
-    - commit_security_engine | default(true) | bool or save_config | default(false) | bool
+    - >-
+      (application_mutated | default(false) | bool and commit_security_engine | default(true) | bool)
+      or (firewall_mutated | default(false) | bool and save_config | default(false) | bool)
 
 - name: Commit and save firewall configuration in one SSH session
   ansible.builtin.command:
@@ -180,15 +183,17 @@
       'Invalid file name' in final_commit_save_result.stdout or
       'Invalid extension' in final_commit_save_result.stdout
   when:
-    - firewall_mutated | default(false) | bool
-    - commit_security_engine | default(true) | bool or save_config | default(false) | bool
+    - >-
+      (application_mutated | default(false) | bool and commit_security_engine | default(true) | bool)
+      or (firewall_mutated | default(false) | bool and save_config | default(false) | bool)
 
 - name: Show final commit and save result
   ansible.builtin.debug:
     var: final_commit_save_result.stdout_lines
   when:
-    - firewall_mutated | default(false) | bool
-    - commit_security_engine | default(true) | bool or save_config | default(false) | bool
+    - >-
+      (application_mutated | default(false) | bool and commit_security_engine | default(true) | bool)
+      or (firewall_mutated | default(false) | bool and save_config | default(false) | bool)
 
 - name: Report unchanged firewall state
   ansible.builtin.debug:

@@ -92,6 +92,7 @@
 - name: Mark firewall changed after address-set add in {{ address_context.name }}
   ansible.builtin.set_fact:
     firewall_mutated: true
+    address_mutated: true
   when: not address_exists_before | bool
 
 - name: Reuse existing address-set state in {{ address_context.name }}

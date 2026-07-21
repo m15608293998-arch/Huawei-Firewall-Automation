@@ -20,6 +20,7 @@ def create_job(
     permission_code: str | None = None,
 ) -> dict[str, Any]:
     job_id = str(uuid.uuid4())
+    firewall_targets = list(settings.firewall_target_codes)
     # 每个任务使用独立临时目录和 artifact 目录，方便失败后按 job_id 排查。
     local_tmp_dir = str(settings.job_tmp_root / job_id)
     artifact_dir = str(settings.runner_private_data_dir / "artifacts" / job_id)
@@ -48,8 +49,11 @@ def create_job(
         "finished_at": None,
         "artifact_dir": artifact_dir,
         "local_tmp_dir": local_tmp_dir,
+        "firewall_targets": firewall_targets,
+        "desired_state": None,
+        "state_version": None,
     }
-    storage.create_job(job)
+    storage.create_job(job, firewall_targets)
     return job
 
 
@@ -60,18 +64,35 @@ def get_job_or_404(job_id: str) -> dict[str, Any]:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found.",
         )
+    job["target_results"] = storage.list_job_targets(job_id)
     return job
 
 
 def get_job_events(job_id: str, principal: Principal) -> list[dict[str, object]]:
     job = get_job_or_404(job_id)
     authorize_job_read(principal, job)
-    return runner_service.read_events(job.get("artifact_dir"))
+    events: list[dict[str, object]] = []
+    for target in job.get("target_results") or []:
+        for event in runner_service.read_events(target.get("artifact_dir")):
+            event["firewall_code"] = target["firewall_code"]
+            events.append(event)
+    return sorted(
+        events,
+        key=lambda event: (str(event.get("created") or ""), int(event.get("counter") or 0)),
+    )
 
 
 def get_admin_job_events(job_id: str) -> list[dict[str, object]]:
     job = get_job_or_404(job_id)
-    return runner_service.read_events(job.get("artifact_dir"))
+    events: list[dict[str, object]] = []
+    for target in job.get("target_results") or []:
+        for event in runner_service.read_events(target.get("artifact_dir")):
+            event["firewall_code"] = target["firewall_code"]
+            events.append(event)
+    return sorted(
+        events,
+        key=lambda event: (str(event.get("created") or ""), int(event.get("counter") or 0)),
+    )
 
 
 def list_jobs(
@@ -83,9 +104,12 @@ def list_jobs(
 ) -> list[dict[str, Any]]:
     # 管理端传 include_all；普通端始终按 principal_id 收敛。
     principal_id = None if include_all else principal.subject_id
-    return storage.list_jobs(
+    jobs = storage.list_jobs(
         limit=limit,
         offset=(page - 1) * limit,
         job_status=job_status,
         principal_id=principal_id,
     )
+    for job in jobs:
+        job["target_results"] = storage.list_job_targets(str(job["job_id"]))
+    return jobs

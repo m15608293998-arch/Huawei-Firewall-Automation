@@ -1,6 +1,6 @@
 # 后端业务逻辑与 Keycloak 认证鉴权现状说明
 
-> 当前实现基准：2026-06-15，Trade Access API `0.9.0`。
+> 当前实现基准：2026-07-21。
 >
 > 本文只描述当前代码实际运行的逻辑，不描述已经废弃的“每个员工一个 Keycloak Client”、
 > `client_id + client_secret` 组合 `X-API-Key` 方案。
@@ -19,10 +19,10 @@
 1. 认证调用者身份。
 2. 检查接口权限和可操作 IP。
 3. 创建持久化异步任务。
-4. 由单 Worker 串行执行 Ansible Runner。
-5. 通过 SSH 修改防火墙 Address Set 和 User-Defined Application。
-6. 等待安全引擎编译完成，再保存配置并标记任务成功。
-7. 保存任务状态、调用身份和 Ansible 事件用于查询和审计。
+4. 父任务按 FIFO 串行处理，父任务中的防火墙子任务并行执行。
+5. 通过 SSH 修改三台防火墙各自配置的 Address Set 和 Application。
+6. 逐台实时查询本次 IP 的完整状态，全部符合期望后才标记父任务成功。
+7. 保存期望状态、逐台结果、调用身份和 Ansible 事件用于恢复、查询和审计。
 
 ## 2. 当前总体架构
 
@@ -49,10 +49,9 @@
 
 通过授权的业务请求
   -> SQLite pending Job
-  -> 独立 Worker 串行领取
-  -> Ansible Runner
-  -> SSH
-  -> Huawei USG6000E
+  -> 独立 Worker 按 FIFO 领取父任务
+  -> PG-FW / PG-FW-1 / IDC-FW 子任务并行
+  -> 各自 Ansible Runner -> SSH -> Huawei USG6000E
 ```
 
 系统主要分层如下：
@@ -62,8 +61,8 @@
 | 用户界面 | `/test-ui`、`/admin-ui` | 登录、输入业务参数、管理授权和查询任务 |
 | 身份认证 | Keycloak Access Token + Offline API Key | 浏览器短期登录与普通用户长期调用 |
 | 业务鉴权 | FastAPI + SQLite | 接口权限、IPv4 `/32` 校验、任务所有权和本地启用状态 |
-| 任务队列 | SQLite `jobs` 表 | 持久化、FIFO 领取、状态和审计记录 |
-| 执行层 | Worker + Ansible Runner | 串行执行 Playbook，更新任务结果 |
+| 任务队列 | SQLite 父任务、子任务和期望状态表 | FIFO、恢复、状态版本和审计记录 |
+| 执行层 | Worker + Ansible Runner | 父任务串行、设备子任务并行、逐台校验 |
 | 设备层 | Ansible Role + SSH CLI | 修改防火墙并确认安全引擎提交完成 |
 
 ## 3. 三类凭据及其关系
@@ -455,8 +454,8 @@ python3.12 scripts/run_services.py
 - Uvicorn/FastAPI API 进程。
 - SQLite 持久化队列 Worker 进程。
 
-API 进程重启不会删除已持久化任务，但当前代码尚未自动恢复服务异常中断前已经处于 `running`
-状态的任务。
+API 进程重启不会删除已持久化任务。worker 会重新认领异常中断前尚未完成的父任务，
+复用已写入的期望状态版本；已经达标的设备只校验，未达标设备继续执行。
 
 ## 10. 防火墙业务执行逻辑
 
@@ -470,8 +469,9 @@ Allow 采用追加合并语义：
 
 工作流会：
 
-1. 查询并补齐目标 IP 在 public、Internet、private 三个空间的
-   `TraderServers-DirectAccess-IPs` Address Set 成员关系。
+1. 按当前防火墙配置档查询并补齐目标 IP 的 Address Set 成员关系：`PG-FW`
+   使用 `public/private/Internet`，`PG-FW-1` 使用 `public`，`IDC-FW` 使用
+   `private/Internet`。
 2. 查询该 IP 已有的 `UD_TServe_<IP>` Application 和端口。
 3. 忽略重复端口，合并已有端口和新端口。
 4. 每条 Rule 最多放 4 个端口。
@@ -492,19 +492,21 @@ UD_TServe_192.168.5.224_3
 
 ### 10.2 Deny
 
-Deny 的语义是撤销该 IP 的全部放行，不支持只删除部分端口。工作流会：
+组合接口 `POST /deny` 的语义是撤销该 IP 的全部放行；只删除部分端口使用
+`POST /deny/ports`。完整撤销工作流会：
 
 1. 精确匹配 `UD_TServe_<IP>` 及其数字后缀 Application。
 2. 从 `UDG_TradeServers` Application Group 删除对应成员。
 3. 删除该 IP 的全部 Application，包括 `_2`、`_3` 等对象。
-4. 从三个空间的 `TraderServers-DirectAccess-IPs` Address Set 中删除该 IP。
+4. 从每台防火墙配置档声明的全部 Address Set 中删除该 IP。
 5. 再次查询验证删除结果。
 
 匹配使用完整名称规则，不会因子串相同而误删其他 IP 的 Application。
 
 ### 10.3 Commit 和 Save
 
-只有检测到实际配置变化时才执行：
+只有检测到 Application 实际变化时才执行安全引擎提交；任何配置变化按配置执行
+保存：
 
 ```text
 engine configuration commit
@@ -519,8 +521,8 @@ save
 4. 编译确认后继续执行 `save`。
 5. 最长等待 180 秒；超时、错误或未知状态会使任务失败。
 
-因此当前 `successful` 表示 Ansible 工作流完成、安全引擎提交已确认并且保存命令成功，而不只是
-CLI 已接受提交命令。
+因此当前 `successful` 还要求所有防火墙在执行后实时查询到本次 IP 的完整状态与
+`desired_state` 一致，而不只是 CLI 已接受命令。
 
 ## 11. 当前安全边界和已知限制
 
@@ -552,9 +554,10 @@ FastAPI + SQLite
   -> 创建任务并隔离任务所有权
 
 Worker + Ansible
-  -> 串行执行防火墙变更
-  -> 验证设备最终状态
-  -> 确认安全引擎编译完成后才标记 successful
+  -> 父任务 FIFO，设备子任务并行
+  -> 持久化并恢复业务期望状态
+  -> 逐台验证本次 IP 的完整最终状态
+  -> 所有目标一致后才标记 successful
 ```
 
 管理员负责给用户分配业务权限；普通用户负责登录并提交 IP 与端口；Keycloak 负责登录身份和基础

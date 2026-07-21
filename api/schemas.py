@@ -19,8 +19,13 @@ class AccessAction(str, Enum):
 class JobStatus(str, Enum):
     pending = "pending"
     running = "running"
+    prechecking = "prechecking"
+    applying = "applying"
+    verifying = "verifying"
+    reconciling = "reconciling"
     successful = "successful"
     failed = "failed"
+    manual_intervention_required = "manual_intervention_required"
     canceled = "canceled"
 
 
@@ -137,6 +142,28 @@ class JobCreateResponse(BaseModel):
     target_ip: str
     ports: list[int] | None = None
     client_request_id: str | None = None
+    firewall_targets: list[str] = Field(default_factory=list)
+
+
+class FirewallTargetResponse(BaseModel):
+    firewall_code: str
+    status: str
+    attempt_count: int = 0
+    runner_status: str | None = None
+    runner_rc: int | None = None
+    error_message: str | None = None
+    before_state: dict[str, object] | None = None
+    desired_state: dict[str, object] | None = None
+    observed_state: dict[str, object] | None = None
+    artifact_dir: str | None = None
+    local_tmp_dir: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+    @field_validator("started_at", "finished_at", mode="before")
+    @classmethod
+    def serialize_target_time(cls, value: str | None) -> str | None:
+        return to_china_time_iso(value)
 
 
 class JobDetailResponse(BaseModel):
@@ -163,6 +190,10 @@ class JobDetailResponse(BaseModel):
     finished_at: str | None = None
     artifact_dir: str | None = None
     local_tmp_dir: str | None = None
+    firewall_targets: list[str] = Field(default_factory=list)
+    desired_state: dict[str, object] | None = None
+    state_version: int | None = None
+    target_results: list[FirewallTargetResponse] = Field(default_factory=list)
 
     @field_validator("created_at", "started_at", "finished_at", mode="before")
     @classmethod
@@ -174,6 +205,7 @@ class JobDetailResponse(BaseModel):
 
 
 class JobEvent(BaseModel):
+    firewall_code: str | None = None
     counter: int | None = None
     event: str | None = None
     task: str | None = None
@@ -197,16 +229,25 @@ class FirewallPortSnapshotItem(BaseModel):
 class FirewallSnapshotResponse(BaseModel):
     generated_at: str
     items: list[FirewallPortSnapshotItem]
+    consistency_status: str = "consistent"
+    firewall_codes: list[str] = Field(default_factory=list)
+    firewalls: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
 class FirewallIpSnapshotResponse(BaseModel):
     generated_at: str
     items: list[FirewallIpSnapshotItem]
+    consistency_status: str = "consistent"
+    firewall_codes: list[str] = Field(default_factory=list)
+    firewalls: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
 class FirewallPortSnapshotResponse(BaseModel):
     generated_at: str
     items: list[FirewallPortSnapshotItem]
+    consistency_status: str = "consistent"
+    firewall_codes: list[str] = Field(default_factory=list)
+    firewalls: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
 class CurrentAccessResponse(BaseModel):

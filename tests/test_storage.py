@@ -45,10 +45,21 @@ class StorageMigrationTests(unittest.TestCase):
                 job_columns = {
                     row["name"] for row in conn.execute("pragma table_info(jobs)")
                 }
+                tables = {
+                    row["name"]
+                    for row in conn.execute(
+                        "select name from sqlite_master where type = 'table'"
+                    )
+                }
 
             self.assertIn("principal_id", job_columns)
             self.assertIn("principal_client_id", job_columns)
             self.assertIn("permission_code", job_columns)
+            self.assertIn("firewall_targets", job_columns)
+            self.assertIn("desired_state", job_columns)
+            self.assertIn("state_version", job_columns)
+            self.assertIn("job_firewall_targets", tables)
+            self.assertIn("desired_access_states", tables)
 
     def test_legacy_offline_api_key_schema_receives_rotating_token_columns(
         self,
@@ -212,6 +223,84 @@ class StorageQueueTests(unittest.TestCase):
         claimed_jobs = [job for job in claims if job is not None]
         self.assertEqual(len(claimed_jobs), 1)
         self.assertEqual(claimed_jobs[0]["job_id"], "job-1")
+
+    def test_parent_children_and_desired_state_round_trip(self) -> None:
+        targets = ["PG-FW", "PG-FW-1", "IDC-FW"]
+        self.storage.create_job(
+            {
+                "job_id": "multi-job",
+                "status": "pending",
+                "action": "allow",
+                "target_ip": "192.168.5.224",
+                "mask": 32,
+                "ports": [12001],
+                "created_at": "2026-07-21T00:00:00+00:00",
+                "local_tmp_dir": "/tmp/jobs/multi-job",
+                "firewall_targets": targets,
+            },
+            targets,
+        )
+
+        self.storage.update_job_target(
+            "multi-job",
+            "PG-FW",
+            {
+                "status": "verified",
+                "attempt_count": 1,
+                "before_state": {"ip_present": False, "ports": []},
+                "desired_state": {"ip_present": True, "ports": [12001], "version": 1},
+                "observed_state": {"ip_present": True, "ports": [12001]},
+            },
+        )
+        first = self.storage.save_desired_access_state(
+            target_ip="192.168.5.224",
+            ip_present=True,
+            ports=[12002, 12001, 12001],
+            source_job_id="multi-job",
+            updated_at="2026-07-21T00:01:00+00:00",
+        )
+        second = self.storage.save_desired_access_state(
+            target_ip="192.168.5.224",
+            ip_present=True,
+            ports=[12001],
+            source_job_id="multi-job-2",
+            updated_at="2026-07-21T00:02:00+00:00",
+        )
+
+        job = self.storage.get_job("multi-job")
+        children = self.storage.list_job_targets("multi-job")
+        desired = self.storage.get_desired_access_state("192.168.5.224")
+        self.assertEqual(job["firewall_targets"], targets)
+        self.assertEqual(
+            [child["firewall_code"] for child in children],
+            ["IDC-FW", "PG-FW", "PG-FW-1"],
+        )
+        self.assertEqual(
+            self.storage.get_job_target("multi-job", "PG-FW")["observed_state"],
+            {"ip_present": True, "ports": [12001]},
+        )
+        self.assertEqual(first["ports"], [12001, 12002])
+        self.assertEqual(first["version"], 1)
+        self.assertEqual(second["version"], 2)
+        self.assertEqual(desired["ports"], [12001])
+        self.assertEqual(desired["version"], 2)
+
+    def test_legacy_job_can_backfill_firewall_child_rows(self) -> None:
+        self.create_job("legacy-job", "2026-06-05T00:00:00+00:00")
+
+        self.storage.ensure_job_targets(
+            "legacy-job",
+            ("PG-FW", "PG-FW-1", "IDC-FW"),
+            "/tmp/jobs/legacy-job",
+        )
+
+        job = self.storage.get_job("legacy-job")
+        children = self.storage.list_job_targets("legacy-job")
+        self.assertEqual(job["firewall_targets"], ["PG-FW", "PG-FW-1", "IDC-FW"])
+        self.assertEqual(
+            [child["firewall_code"] for child in children],
+            ["IDC-FW", "PG-FW", "PG-FW-1"],
+        )
 
     def test_managed_user_permissions_are_keyed_by_subject(self) -> None:
         self.storage.save_managed_user_access(

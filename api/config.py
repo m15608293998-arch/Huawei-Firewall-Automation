@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from pydantic import Field
@@ -30,6 +31,11 @@ class Settings(BaseSettings):
     database_path: Path = Field(
         default_factory=lambda: project_root() / ".runtime" / "api" / "jobs.sqlite3"
     )
+    # Logical profile codes executed by every mutation parent job.  Test uses a
+    # single profile; production enables all three profiles via one env value.
+    firewall_targets: str = "TEST-FW"
+    firewall_parallel_workers: int = Field(default=3, ge=1, le=16)
+    firewall_child_max_attempts: int = Field(default=2, ge=1, le=10)
     auth_enabled: bool = True
     development_subject: str = "api-placeholder"
     keycloak_server_url: str = "http://127.0.0.1:8080"
@@ -82,5 +88,23 @@ class Settings(BaseSettings):
             self.keycloak_server_url.rstrip("/"),
             self.keycloak_realm,
         )
+
+    @property
+    def firewall_target_codes(self) -> tuple[str, ...]:
+        codes: list[str] = []
+        for raw_code in self.firewall_targets.split(","):
+            code = raw_code.strip()
+            if not code:
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", code):
+                raise ValueError(
+                    "TRADE_ACCESS_API_FIREWALL_TARGETS contains an invalid profile code: "
+                    "{0}".format(code)
+                )
+            if code not in codes:
+                codes.append(code)
+        if not codes:
+            raise ValueError("At least one firewall target profile must be configured.")
+        return tuple(codes)
 
 settings = Settings()

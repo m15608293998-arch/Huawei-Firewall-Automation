@@ -109,6 +109,7 @@
 - name: Mark firewall changed after application removal
   ansible.builtin.set_fact:
     firewall_mutated: true
+    application_mutated: true
 
 - name: Query user-defined application after remove
   ansible.builtin.command:

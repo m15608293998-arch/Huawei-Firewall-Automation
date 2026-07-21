@@ -33,6 +33,36 @@ class RoleStaticTests(unittest.TestCase):
         )
         self.assertEqual(config["rule_port_limit"], 4)
         self.assertEqual(config["application_rule_limit"], 8)
+        self.assertEqual(config["default_firewall_code"], "TEST-FW")
+        self.assertEqual(
+            config["firewall_profiles"]["TEST-FW"]["address_vsystems"],
+            config["address_vsystems"],
+        )
+
+    def test_production_firewall_profiles_match_required_vsystem_topology(self) -> None:
+        config = yaml.safe_load(
+            (
+                PROJECT_ROOT
+                / "docs/examples/firewall_profiles.production.yml"
+            ).read_text()
+        )
+        profiles = config["firewall_profiles"]
+
+        self.assertEqual(
+            [item["name"] for item in profiles["PG-FW"]["address_vsystems"]],
+            ["public", "private", "Internet"],
+        )
+        self.assertEqual(profiles["PG-FW"]["application_vsystem"], "private")
+        self.assertEqual(
+            [item["name"] for item in profiles["PG-FW-1"]["address_vsystems"]],
+            ["public"],
+        )
+        self.assertEqual(profiles["PG-FW-1"]["application_vsystem"], "public")
+        self.assertEqual(
+            [item["name"] for item in profiles["IDC-FW"]["address_vsystems"]],
+            ["private", "Internet"],
+        )
+        self.assertEqual(profiles["IDC-FW"]["application_vsystem"], "private")
 
     def test_application_upper_limit_error_is_not_whitelisted(self) -> None:
         application_yml = (
@@ -104,9 +134,11 @@ class RoleStaticTests(unittest.TestCase):
         self.assertIn("switch vsys {{ application_vsystem }}", main_yml)
         self.assertIn("engine configuration commit", main_yml)
         self.assertIn("firewall_mutated: false", main_yml)
-        self.assertGreaterEqual(
-            main_yml.count("firewall_mutated | default(false) | bool"),
-            3,
+        self.assertIn("address_mutated: false", main_yml)
+        self.assertIn("application_mutated: false", main_yml)
+        self.assertIn(
+            "application_mutated | default(false) | bool and commit_security_engine",
+            main_yml,
         )
 
     def test_address_post_validation_only_runs_after_mutation(self) -> None:
@@ -124,19 +156,20 @@ class RoleStaticTests(unittest.TestCase):
         self.assertIn("Reuse absent address-set state", remove_address_yml)
         self.assertIn("when: address_exists_before_remove | bool", remove_address_yml)
 
-    def test_remote_mutations_set_firewall_mutated(self) -> None:
-        task_files = [
-            "address/add_member.yml",
-            "address/remove_member.yml",
-            "application/configure_ports.yml",
-            "application/remove_object.yml",
-        ]
+    def test_remote_mutations_set_scoped_mutation_flags(self) -> None:
+        task_files = {
+            "address/add_member.yml": "address_mutated: true",
+            "address/remove_member.yml": "address_mutated: true",
+            "application/configure_ports.yml": "application_mutated: true",
+            "application/remove_object.yml": "application_mutated: true",
+        }
 
-        for task_file in task_files:
+        for task_file, scoped_flag in task_files.items():
             task_text = (
                 PROJECT_ROOT / "roles/usg6000e_trade_access/tasks" / task_file
             ).read_text()
             self.assertIn("firewall_mutated: true", task_text)
+            self.assertIn(scoped_flag, task_text)
 
     def test_full_deny_removes_ports_before_removing_ip(self) -> None:
         deny_yml = (

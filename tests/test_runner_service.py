@@ -7,10 +7,24 @@ from pathlib import Path
 from unittest.mock import patch
 
 from api.config import settings
-from api.runner_service import AnsibleRunnerService
+from api.runner_service import AnsibleRunnerService, SnapshotRunnerResult
 
 
 class RunnerServiceTests(unittest.TestCase):
+    def test_firewall_target_codes_are_normalized_and_validated(self) -> None:
+        original_targets = settings.firewall_targets
+        try:
+            settings.firewall_targets = " PG-FW,PG-FW-1,IDC-FW,PG-FW "
+            self.assertEqual(
+                settings.firewall_target_codes,
+                ("PG-FW", "PG-FW-1", "IDC-FW"),
+            )
+            settings.firewall_targets = "PG-FW,bad target"
+            with self.assertRaises(ValueError):
+                settings.firewall_target_codes
+        finally:
+            settings.firewall_targets = original_targets
+
     def test_port_actions_are_passed_to_ansible_and_full_deny_does_not_need_ports(self) -> None:
         captured_calls = []
 
@@ -104,7 +118,146 @@ class RunnerServiceTests(unittest.TestCase):
         self.assertEqual(captured_calls[0]["playbook"], str(settings.project_root / settings.playbook_path))
         self.assertNotIn("trade_access_tasks_from", captured_calls[0]["extravars"])
         self.assertEqual(captured_calls[0]["extravars"]["snapshot_mode"], "ips")
+        self.assertEqual(captured_calls[0]["extravars"]["firewall_code"], "TEST-FW")
         self.assertIn("firewall_ips_snapshot.json", captured_calls[0]["extravars"]["snapshot_output_path"])
+
+    def test_explicit_firewall_code_gets_isolated_runner_directory(self) -> None:
+        captured_calls = []
+
+        def fake_run(**kwargs):
+            captured_calls.append(kwargs)
+            return types.SimpleNamespace(status="successful", rc=0)
+
+        fake_runner = types.SimpleNamespace(run=fake_run)
+        original_private_data_dir = settings.runner_private_data_dir
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings.runner_private_data_dir = Path(temp_dir) / "runner"
+            try:
+                with patch.dict(sys.modules, {"ansible_runner": fake_runner}):
+                    result = AnsibleRunnerService().run_trade_access(
+                        {
+                            "job_id": "multi-job",
+                            "action": "allow_ip",
+                            "target_ip": "192.168.5.224",
+                            "mask": 32,
+                            "ports": [],
+                            "principal_subject": "employee-a",
+                            "description": None,
+                            "local_tmp_dir": str(Path(temp_dir) / "multi-job"),
+                        },
+                        "PG-FW-1",
+                    )
+            finally:
+                settings.runner_private_data_dir = original_private_data_dir
+
+        self.assertEqual(result.rc, 0)
+        self.assertEqual(captured_calls[0]["extravars"]["firewall_code"], "PG-FW-1")
+        self.assertEqual(
+            Path(captured_calls[0]["private_data_dir"]).name,
+            "PG-FW-1",
+        )
+        self.assertEqual(
+            Path(captured_calls[0]["extravars"]["local_tmp_dir"]).name,
+            "PG-FW-1",
+        )
+
+    def test_reconciled_snapshot_returns_clean_items_when_all_targets_match(self) -> None:
+        service = AnsibleRunnerService()
+
+        def fake_snapshot(snapshot_mode, firewall_code=None):
+            self.assertEqual(snapshot_mode, "ips")
+            return SnapshotRunnerResult(
+                status="successful",
+                rc=0,
+                artifact_dir="/tmp/{0}".format(firewall_code),
+                payload={
+                    "generated_at": "2026-07-21T10:00:00+08:00",
+                    "items": [{"ip": "192.168.66.22"}],
+                },
+            )
+
+        service.run_firewall_snapshot = fake_snapshot
+        result = service.run_reconciled_snapshot(
+            "ips",
+            ("PG-FW", "PG-FW-1", "IDC-FW"),
+        )
+
+        self.assertEqual(result.rc, 0)
+        self.assertEqual(result.payload["consistency_status"], "consistent")
+        self.assertEqual(
+            result.payload["firewall_codes"],
+            ["PG-FW", "PG-FW-1", "IDC-FW"],
+        )
+        self.assertEqual(result.payload["items"], [{"ip": "192.168.66.22"}])
+
+    def test_reconciled_snapshot_returns_per_target_diff_on_drift(self) -> None:
+        service = AnsibleRunnerService()
+        payloads = {
+            "PG-FW": [{"ip": "192.168.66.22", "port": 12001}],
+            "PG-FW-1": [{"ip": "192.168.66.22", "port": 12001}],
+            "IDC-FW": [],
+        }
+
+        def fake_snapshot(snapshot_mode, firewall_code=None):
+            return SnapshotRunnerResult(
+                status="successful",
+                rc=0,
+                artifact_dir="/tmp/{0}".format(firewall_code),
+                payload={
+                    "generated_at": "2026-07-21T10:00:00+08:00",
+                    "items": payloads[str(firewall_code)],
+                },
+            )
+
+        service.run_firewall_snapshot = fake_snapshot
+        result = service.run_reconciled_snapshot(
+            "ports",
+            ("PG-FW", "PG-FW-1", "IDC-FW"),
+        )
+
+        self.assertEqual(result.rc, 2)
+        self.assertEqual(result.status, "drifted")
+        self.assertEqual(result.payload["consistency_status"], "drifted")
+        self.assertEqual(
+            result.payload["differences"]["IDC-FW"]["missing"],
+            [{"ip": "192.168.66.22", "port": 12001}],
+        )
+
+    def test_reconciled_snapshot_never_returns_partial_data_as_success(self) -> None:
+        service = AnsibleRunnerService()
+
+        def fake_snapshot(snapshot_mode, firewall_code=None):
+            if firewall_code == "IDC-FW":
+                return SnapshotRunnerResult(
+                    status="failed",
+                    rc=1,
+                    artifact_dir="/tmp/IDC-FW",
+                    error_message="connection timed out",
+                )
+            return SnapshotRunnerResult(
+                status="successful",
+                rc=0,
+                artifact_dir="/tmp/{0}".format(firewall_code),
+                payload={
+                    "generated_at": "2026-07-21T10:00:00+08:00",
+                    "items": [{"ip": "192.168.66.22"}],
+                },
+            )
+
+        service.run_firewall_snapshot = fake_snapshot
+        result = service.run_reconciled_snapshot(
+            "ips",
+            ("PG-FW", "PG-FW-1", "IDC-FW"),
+        )
+
+        self.assertEqual(result.rc, 1)
+        self.assertEqual(result.payload["consistency_status"], "incomplete")
+        self.assertNotIn("items", result.payload)
+        self.assertEqual(
+            result.payload["firewalls"]["IDC-FW"]["error_message"],
+            "connection timed out",
+        )
 
 
 if __name__ == "__main__":

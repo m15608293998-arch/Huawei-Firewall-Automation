@@ -32,7 +32,28 @@ JOB_COLUMNS = [
     "finished_at",
     "artifact_dir",
     "local_tmp_dir",
+    "firewall_targets",
+    "desired_state",
+    "state_version",
 ]
+
+TARGET_COLUMNS = [
+    "job_id",
+    "firewall_code",
+    "status",
+    "attempt_count",
+    "runner_status",
+    "runner_rc",
+    "error_message",
+    "before_state",
+    "desired_state",
+    "observed_state",
+    "artifact_dir",
+    "local_tmp_dir",
+    "started_at",
+    "finished_at",
+]
+
 
 class JobStorage:
     def __init__(self, database_path: Path):
@@ -70,7 +91,10 @@ class JobStorage:
                     started_at text,
                     finished_at text,
                     artifact_dir text,
-                    local_tmp_dir text
+                    local_tmp_dir text,
+                    firewall_targets text not null default '[]',
+                    desired_state text,
+                    state_version integer
                 )
                 """
             )
@@ -80,6 +104,9 @@ class JobStorage:
             self._ensure_column(conn, "jobs", "principal_key_id", "text")
             self._ensure_column(conn, "jobs", "principal_type", "text")
             self._ensure_column(conn, "jobs", "permission_code", "text")
+            self._ensure_column(conn, "jobs", "firewall_targets", "text not null default '[]'")
+            self._ensure_column(conn, "jobs", "desired_state", "text")
+            self._ensure_column(conn, "jobs", "state_version", "integer")
             conn.execute(
                 "create index if not exists jobs_status_created_idx "
                 "on jobs (status, created_at)"
@@ -87,6 +114,44 @@ class JobStorage:
             conn.execute(
                 "create index if not exists jobs_principal_created_idx "
                 "on jobs (principal_id, created_at)"
+            )
+            conn.execute(
+                """
+                create table if not exists job_firewall_targets (
+                    job_id text not null,
+                    firewall_code text not null,
+                    status text not null,
+                    attempt_count integer not null default 0,
+                    runner_status text,
+                    runner_rc integer,
+                    error_message text,
+                    before_state text,
+                    desired_state text,
+                    observed_state text,
+                    artifact_dir text,
+                    local_tmp_dir text,
+                    started_at text,
+                    finished_at text,
+                    primary key (job_id, firewall_code),
+                    foreign key (job_id) references jobs(job_id) on delete cascade
+                )
+                """
+            )
+            conn.execute(
+                "create index if not exists job_firewall_targets_status_idx "
+                "on job_firewall_targets (status, job_id)"
+            )
+            conn.execute(
+                """
+                create table if not exists desired_access_states (
+                    target_ip text primary key,
+                    ip_present integer not null,
+                    ports text not null,
+                    version integer not null,
+                    source_job_id text not null,
+                    updated_at text not null
+                )
+                """
             )
             conn.execute(
                 """
@@ -193,21 +258,40 @@ class JobStorage:
                 )
             )
 
-    def create_job(self, job: dict[str, Any]) -> None:
+    def create_job(
+        self,
+        job: dict[str, Any],
+        firewall_targets: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         columns = JOB_COLUMNS
         placeholders = ", ".join(["?"] * len(columns))
         column_sql = ", ".join(columns)
-        # ports 是结构化字段，落 SQLite 时统一序列化为 JSON。
-        values = [
-            json.dumps(job.get(column) or []) if column == "ports" else job.get(column)
-            for column in columns
-        ]
+        target_codes = list(firewall_targets or job.get("firewall_targets") or [])
+        job = dict(job)
+        job["firewall_targets"] = target_codes
+        values = [self._serialize_job_value(column, job.get(column)) for column in columns]
 
         with self._lock:
             with self._connect() as conn:
+                conn.execute("begin immediate")
                 conn.execute(
                     "insert into jobs ({0}) values ({1})".format(column_sql, placeholders),
                     values,
+                )
+                conn.executemany(
+                    """
+                    insert into job_firewall_targets (
+                        job_id, firewall_code, status, attempt_count, local_tmp_dir
+                    ) values (?, ?, 'pending', 0, ?)
+                    """,
+                    [
+                        (
+                            job["job_id"],
+                            code,
+                            str(Path(str(job["local_tmp_dir"])) / code),
+                        )
+                        for code in target_codes
+                    ],
                 )
                 conn.commit()
 
@@ -220,6 +304,38 @@ class JobStorage:
         if row is None:
             return None
         return self._deserialize_job(row)
+
+    def ensure_job_targets(
+        self,
+        job_id: str,
+        firewall_targets: list[str] | tuple[str, ...],
+        local_tmp_dir: str,
+    ) -> None:
+        """Backfill child rows for jobs created before multi-target support."""
+        target_codes = list(dict.fromkeys(str(code) for code in firewall_targets))
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("begin immediate")
+                conn.execute(
+                    "update jobs set firewall_targets = ? where job_id = ?",
+                    (json.dumps(target_codes), job_id),
+                )
+                conn.executemany(
+                    """
+                    insert or ignore into job_firewall_targets (
+                        job_id, firewall_code, status, attempt_count, local_tmp_dir
+                    ) values (?, ?, 'pending', 0, ?)
+                    """,
+                    [
+                        (
+                            job_id,
+                            code,
+                            str(Path(local_tmp_dir) / code),
+                        )
+                        for code in target_codes
+                    ],
+                )
+                conn.commit()
 
     def list_jobs(
         self,
@@ -254,19 +370,50 @@ class JobStorage:
         return [self._deserialize_job(row) for row in rows]
 
     def claim_next_pending_job(self, started_at: str) -> dict[str, Any] | None:
-        """Atomically claim the oldest pending job for one worker."""
+        """Atomically claim the oldest pending job."""
+        return self._claim_next_job(started_at, ())
+
+    def claim_next_runnable_job(self, started_at: str) -> dict[str, Any] | None:
+        """Claim a pending job or resume one interrupted by a worker crash.
+
+        The caller must hold the cross-process parent orchestration lock.  That
+        lock proves an unfinished in-progress row no longer has a live owner.
+        """
+        resumable_statuses = (
+            "running",
+            "prechecking",
+            "applying",
+            "verifying",
+            "reconciling",
+        )
+        return self._claim_next_job(started_at, resumable_statuses)
+
+    def _claim_next_job(
+        self,
+        started_at: str,
+        resumable_statuses: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        condition = "status = 'pending'"
+        query_values: tuple[str, ...] = ()
+        if resumable_statuses:
+            placeholders = ", ".join("?" for _ in resumable_statuses)
+            condition += " or (status in ({0}) and finished_at is null)".format(
+                placeholders
+            )
+            query_values = resumable_statuses
+
         with self._lock:
             with self._connect() as conn:
-                # begin immediate 抢写锁，保证多个 worker 不会拿到同一个 pending job。
                 conn.execute("begin immediate")
                 row = conn.execute(
                     """
                     select {0}
                     from jobs
-                    where status = 'pending'
+                    where {1}
                     order by created_at, job_id
                     limit 1
-                    """.format(", ".join(JOB_COLUMNS))
+                    """.format(", ".join(JOB_COLUMNS), condition),
+                    query_values,
                 ).fetchone()
 
                 if row is None:
@@ -274,13 +421,15 @@ class JobStorage:
                     return None
 
                 job_id = row["job_id"]
+                update_values: tuple[Any, ...] = (started_at, job_id, *query_values)
                 cursor = conn.execute(
                     """
                     update jobs
-                    set status = 'running', started_at = ?
-                    where job_id = ? and status = 'pending'
-                    """,
-                    (started_at, job_id),
+                    set status = 'running', started_at = coalesce(started_at, ?)
+                    where job_id = ?
+                      and ({0})
+                    """.format(condition),
+                    update_values,
                 )
                 if cursor.rowcount != 1:
                     conn.rollback()
@@ -290,7 +439,7 @@ class JobStorage:
 
         job = self._deserialize_job(row)
         job["status"] = "running"
-        job["started_at"] = started_at
+        job["started_at"] = job.get("started_at") or started_at
         return job
 
     def update_job(self, job_id: str, fields: dict[str, Any]) -> None:
@@ -302,7 +451,10 @@ class JobStorage:
             raise ValueError("Invalid job columns: {0}".format(", ".join(invalid)))
 
         assignments = ", ".join(["{0} = ?".format(key) for key in fields])
-        values = list(fields.values()) + [job_id]
+        values = [
+            self._serialize_job_value(key, value)
+            for key, value in fields.items()
+        ] + [job_id]
 
         with self._lock:
             with self._connect() as conn:
@@ -311,6 +463,123 @@ class JobStorage:
                     values,
                 )
                 conn.commit()
+
+    def list_job_targets(self, job_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "select {0} from job_firewall_targets where job_id = ? "
+                "order by firewall_code".format(", ".join(TARGET_COLUMNS)),
+                (job_id,),
+            ).fetchall()
+        return [self._deserialize_target(row) for row in rows]
+
+    def get_job_target(
+        self,
+        job_id: str,
+        firewall_code: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select {0} from job_firewall_targets "
+                "where job_id = ? and firewall_code = ?".format(
+                    ", ".join(TARGET_COLUMNS)
+                ),
+                (job_id, firewall_code),
+            ).fetchone()
+        return self._deserialize_target(row) if row is not None else None
+
+    def update_job_target(
+        self,
+        job_id: str,
+        firewall_code: str,
+        fields: dict[str, Any],
+    ) -> None:
+        if not fields:
+            return
+        invalid = [key for key in fields if key not in TARGET_COLUMNS]
+        if invalid:
+            raise ValueError(
+                "Invalid firewall target columns: {0}".format(", ".join(invalid))
+            )
+        assignments = ", ".join("{0} = ?".format(key) for key in fields)
+        values = [
+            json.dumps(value, ensure_ascii=False, sort_keys=True)
+            if key in {"before_state", "desired_state", "observed_state"}
+            and value is not None
+            else value
+            for key, value in fields.items()
+        ]
+        values.extend([job_id, firewall_code])
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "update job_firewall_targets set {0} "
+                    "where job_id = ? and firewall_code = ?".format(assignments),
+                    values,
+                )
+                conn.commit()
+
+    def get_desired_access_state(self, target_ip: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "select target_ip, ip_present, ports, version, source_job_id, updated_at "
+                "from desired_access_states where target_ip = ?",
+                (target_ip,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["ip_present"] = bool(result["ip_present"])
+        result["ports"] = json.loads(result["ports"] or "[]")
+        return result
+
+    def save_desired_access_state(
+        self,
+        target_ip: str,
+        ip_present: bool,
+        ports: list[int],
+        source_job_id: str,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        normalized_ports = sorted({int(port) for port in ports})
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("begin immediate")
+                row = conn.execute(
+                    "select version from desired_access_states where target_ip = ?",
+                    (target_ip,),
+                ).fetchone()
+                version = int(row["version"] if row is not None else 0) + 1
+                conn.execute(
+                    """
+                    insert into desired_access_states (
+                        target_ip, ip_present, ports, version, source_job_id, updated_at
+                    ) values (?, ?, ?, ?, ?, ?)
+                    on conflict(target_ip) do update set
+                        ip_present = excluded.ip_present,
+                        ports = excluded.ports,
+                        version = excluded.version,
+                        source_job_id = excluded.source_job_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        target_ip,
+                        int(ip_present),
+                        json.dumps(normalized_ports),
+                        version,
+                        source_job_id,
+                        updated_at,
+                    ),
+                )
+                conn.commit()
+        return {
+            "target_ip": target_ip,
+            "ip_present": bool(ip_present),
+            "ports": normalized_ports,
+            "version": version,
+            "source_job_id": source_job_id,
+            "updated_at": updated_at,
+        }
 
     def get_subject_permissions(self, subject_id: str) -> list[str]:
         with self._connect() as conn:
@@ -735,7 +1004,32 @@ class JobStorage:
     def _deserialize_job(row: sqlite3.Row) -> dict[str, Any]:
         job = dict(row)
         job["ports"] = json.loads(job.get("ports") or "[]")
+        job["firewall_targets"] = json.loads(job.get("firewall_targets") or "[]")
+        if job.get("desired_state"):
+            job["desired_state"] = json.loads(job["desired_state"])
         return job
+
+    @staticmethod
+    def _serialize_job_value(column: str, value: Any) -> Any:
+        if column == "ports":
+            return json.dumps(value or [])
+        if column == "firewall_targets":
+            return json.dumps(value or [])
+        if column == "desired_state":
+            return (
+                json.dumps(value, ensure_ascii=False, sort_keys=True)
+                if value is not None
+                else None
+            )
+        return value
+
+    @staticmethod
+    def _deserialize_target(row: sqlite3.Row) -> dict[str, Any]:
+        target = dict(row)
+        for key in ("before_state", "desired_state", "observed_state"):
+            if target.get(key):
+                target[key] = json.loads(target[key])
+        return target
 
     def _managed_user_record(self, row: sqlite3.Row) -> dict[str, Any]:
         record = dict(row)

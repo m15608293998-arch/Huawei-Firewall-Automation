@@ -441,9 +441,20 @@ def get_firewall_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    result = runner_service.run_firewall_snapshot("snapshot")
+    result = runner_service.run_reconciled_snapshot("snapshot")
+    if result.rc == 2:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": result.error_message,
+                "reconciliation": result.payload,
+            },
+        )
     if result.rc != 0 or result.payload is None:
-        detail = result.error_message or "Firewall snapshot query failed."
+        detail = {
+            "message": result.error_message or "Firewall snapshot query failed.",
+            "reconciliation": result.payload,
+        }
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=detail,
@@ -459,9 +470,20 @@ def get_firewall_ip_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    result = runner_service.run_firewall_snapshot("ips")
+    result = runner_service.run_reconciled_snapshot("ips")
+    if result.rc == 2:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": result.error_message,
+                "reconciliation": result.payload,
+            },
+        )
     if result.rc != 0 or result.payload is None:
-        detail = result.error_message or "Firewall IP snapshot query failed."
+        detail = {
+            "message": result.error_message or "Firewall IP snapshot query failed.",
+            "reconciliation": result.payload,
+        }
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=detail,
@@ -477,9 +499,20 @@ def get_firewall_port_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    result = runner_service.run_firewall_snapshot("ports")
+    result = runner_service.run_reconciled_snapshot("ports")
+    if result.rc == 2:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": result.error_message,
+                "reconciliation": result.payload,
+            },
+        )
     if result.rc != 0 or result.payload is None:
-        detail = result.error_message or "Firewall port snapshot query failed."
+        detail = {
+            "message": result.error_message or "Firewall port snapshot query failed.",
+            "reconciliation": result.payload,
+        }
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=detail,

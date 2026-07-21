@@ -88,9 +88,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(job["principal_id"], "user-subject")
         self.assertEqual(job["principal_client_id"], "user-subject-client")
         self.assertEqual(job["permission_code"], "firewall.allow")
+        self.assertEqual(job["firewall_targets"], list(settings.firewall_target_codes))
 
         owner_job = get_trade_access_job(job_id=job["job_id"], principal=self.user)
         self.assertEqual(owner_job["ports"], [12001, 12005])
+        self.assertEqual(
+            [target["firewall_code"] for target in owner_job["target_results"]],
+            sorted(settings.firewall_target_codes),
+        )
 
         with self.assertRaises(HTTPException) as caught:
             get_trade_access_job(job_id=job["job_id"], principal=self.other_user)
@@ -197,7 +202,7 @@ class ApiTests(unittest.TestCase):
     def test_firewall_snapshot_endpoint_returns_runner_payload(self) -> None:
         import api.main as main_module
 
-        original_runner = main_module.runner_service.run_firewall_snapshot
+        original_runner = main_module.runner_service.run_reconciled_snapshot
         payload = {
             "generated_at": "2026-07-03T10:30:00+08:00",
             "items": [
@@ -207,7 +212,7 @@ class ApiTests(unittest.TestCase):
                 }
             ],
         }
-        main_module.runner_service.run_firewall_snapshot = lambda snapshot_mode="snapshot": SnapshotRunnerResult(
+        main_module.runner_service.run_reconciled_snapshot = lambda snapshot_mode="snapshot": SnapshotRunnerResult(
             status="successful",
             rc=0,
             artifact_dir="/tmp/artifacts/snapshot",
@@ -216,7 +221,7 @@ class ApiTests(unittest.TestCase):
         try:
             response = get_firewall_snapshot(principal=self.user)
         finally:
-            main_module.runner_service.run_firewall_snapshot = original_runner
+            main_module.runner_service.run_reconciled_snapshot = original_runner
 
         validated = FirewallSnapshotResponse.model_validate(response)
         self.assertEqual(validated.items[0].ip, "192.168.66.22")
@@ -225,7 +230,7 @@ class ApiTests(unittest.TestCase):
     def test_split_firewall_snapshot_endpoints_use_separate_modes(self) -> None:
         import api.main as main_module
 
-        original_runner = main_module.runner_service.run_firewall_snapshot
+        original_runner = main_module.runner_service.run_reconciled_snapshot
         requested_modes = []
 
         def fake_snapshot(snapshot_mode="snapshot"):
@@ -256,12 +261,12 @@ class ApiTests(unittest.TestCase):
                 payload=payload,
             )
 
-        main_module.runner_service.run_firewall_snapshot = fake_snapshot
+        main_module.runner_service.run_reconciled_snapshot = fake_snapshot
         try:
             ip_response = get_firewall_ip_snapshot(principal=self.user)
             port_response = get_firewall_port_snapshot(principal=self.user)
         finally:
-            main_module.runner_service.run_firewall_snapshot = original_runner
+            main_module.runner_service.run_reconciled_snapshot = original_runner
 
         self.assertEqual(requested_modes, ["ips", "ports"])
         self.assertEqual(
@@ -276,8 +281,8 @@ class ApiTests(unittest.TestCase):
     def test_firewall_snapshot_endpoint_reports_runner_failure(self) -> None:
         import api.main as main_module
 
-        original_runner = main_module.runner_service.run_firewall_snapshot
-        main_module.runner_service.run_firewall_snapshot = lambda snapshot_mode="snapshot": SnapshotRunnerResult(
+        original_runner = main_module.runner_service.run_reconciled_snapshot
+        main_module.runner_service.run_reconciled_snapshot = lambda snapshot_mode="snapshot": SnapshotRunnerResult(
             status="failed",
             rc=1,
             artifact_dir="/tmp/artifacts/snapshot",
@@ -287,10 +292,43 @@ class ApiTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as caught:
                 get_firewall_snapshot(principal=self.user)
         finally:
-            main_module.runner_service.run_firewall_snapshot = original_runner
+            main_module.runner_service.run_reconciled_snapshot = original_runner
 
         self.assertEqual(caught.exception.status_code, 503)
-        self.assertEqual(caught.exception.detail, "snapshot failed")
+        self.assertEqual(caught.exception.detail["message"], "snapshot failed")
+
+    def test_firewall_snapshot_endpoint_reports_cross_firewall_drift(self) -> None:
+        import api.main as main_module
+
+        original_runner = main_module.runner_service.run_reconciled_snapshot
+        drift_payload = {
+            "consistency_status": "drifted",
+            "firewalls": {
+                "PG-FW": {"status": "ok", "count": 1},
+                "IDC-FW": {"status": "ok", "count": 0},
+            },
+            "differences": {
+                "IDC-FW": {"missing": [{"ip": "192.168.66.22"}]},
+            },
+        }
+        main_module.runner_service.run_reconciled_snapshot = lambda snapshot_mode="snapshot": SnapshotRunnerResult(
+            status="drifted",
+            rc=2,
+            artifact_dir="",
+            payload=drift_payload,
+            error_message="Firewall snapshots are not logically consistent.",
+        )
+        try:
+            with self.assertRaises(HTTPException) as caught:
+                get_firewall_snapshot(principal=self.user)
+        finally:
+            main_module.runner_service.run_reconciled_snapshot = original_runner
+
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(
+            caught.exception.detail["reconciliation"]["consistency_status"],
+            "drifted",
+        )
 
     def test_api_job_creation_has_no_background_task_parameter(self) -> None:
         allow_parameters = inspect.signature(create_trade_access_allow_job).parameters

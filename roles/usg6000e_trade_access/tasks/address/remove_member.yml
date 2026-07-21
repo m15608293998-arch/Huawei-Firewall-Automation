@@ -111,6 +111,7 @@
 - name: Mark firewall changed after address-set remove in {{ address_context.name }}
   ansible.builtin.set_fact:
     firewall_mutated: true
+    address_mutated: true
   when: address_exists_before_remove | bool
 
 - name: Reuse absent address-set state in {{ address_context.name }}

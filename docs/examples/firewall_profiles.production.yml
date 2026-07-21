@@ -1,0 +1,71 @@
+---
+# 生产配置示例。确认设备管理地址、账号和虚拟系统大小写后，合并到
+# group_vars/all.yml；密码由 API/worker 进程环境变量提供，不写入仓库。
+default_firewall_code: "PG-FW"
+
+firewall_profiles:
+  PG-FW:
+    firewall_device:
+      device_host: "<PG_FW_HOST>"
+      device_user: "<PG_FW_USER>"
+      auth_type: "password"
+      device_password: "{{ lookup('env', 'PG_FW_DEVICE_PASSWORD') }}"
+    address_vsystems:
+      - name: "public"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: false
+      - name: "private"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+      - name: "Internet"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+    application_vsystem: "private"
+    user_defined_application:
+      name_prefix: "UD_TServe_"
+      category: "General"
+      subcategory: "General_TCP"
+      data_model: "client-server"
+      label: "Business-Applications"
+      application_group_name: "UDG_TradeServers"
+
+  PG-FW-1:
+    firewall_device:
+      device_host: "<PG_FW_1_HOST>"
+      device_user: "<PG_FW_1_USER>"
+      auth_type: "password"
+      device_password: "{{ lookup('env', 'PG_FW_1_DEVICE_PASSWORD') }}"
+    address_vsystems:
+      - name: "public"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: false
+    application_vsystem: "public"
+    user_defined_application:
+      name_prefix: "UD_TServe_"
+      category: "General"
+      subcategory: "General_TCP"
+      data_model: "client-server"
+      label: "Business-Applications"
+      application_group_name: "UDG_TradeServers"
+
+  IDC-FW:
+    firewall_device:
+      device_host: "<IDC_FW_HOST>"
+      device_user: "<IDC_FW_USER>"
+      auth_type: "password"
+      device_password: "{{ lookup('env', 'IDC_FW_DEVICE_PASSWORD') }}"
+    address_vsystems:
+      - name: "private"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+      - name: "Internet"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+    application_vsystem: "private"
+    user_defined_application:
+      name_prefix: "UD_TServe_"
+      category: "General"
+      subcategory: "General_TCP"
+      data_model: "client-server"
+      label: "Business-Applications"
+      application_group_name: "UDG_TradeServers"

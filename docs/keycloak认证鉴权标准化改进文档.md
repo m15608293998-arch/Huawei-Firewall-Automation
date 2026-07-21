@@ -45,7 +45,7 @@ Keycloak 负责：身份认证、Token 签发、用户/客户端/组/粗粒度�
 -> Keycloak Client Role 做粗粒度身份分类
 -> SQLite 本地权限和 allowed_ips 做细粒度授权
 -> 写入异步 Job
--> Worker 串行执行 Ansible Runner
+-> Worker 按 FIFO 执行父任务，父任务内按防火墙并行执行 Ansible Runner
 -> Ansible 修改华为防火墙
 -> API 返回任务状态和事件审计
 ```

@@ -1,4 +1,7 @@
 ---
+- name: Resolve logical firewall profile
+  ansible.builtin.include_tasks: "{{ role_path }}/tasks/resolve_firewall.yml"
+
 - name: Run firewall snapshot workflow
   ansible.builtin.include_tasks: "{{ role_path }}/tasks/snapshot/main.yml"
   when: snapshot_mode is defined

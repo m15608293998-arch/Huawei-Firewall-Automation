@@ -8,7 +8,7 @@
 - FastAPI：提供 `/admin-ui`、`/test-ui` 和业务 API。
 - Worker：从本地 SQLite 队列读取任务，调用 Ansible Runner 执行防火墙变更。
 
-业务变更接口会先返回 `202 Accepted` 和 `job_id`，再由 Worker 串行执行。防火墙快照接口会同步调用 Ansible Runner，直接返回设备当前的有效 IP 或 IP:Port 结果。
+业务变更接口会先返回 `202 Accepted` 和 `job_id`。父任务按 FIFO 串行处理，父任务内的防火墙子任务并行执行并逐台校验。全量快照会并行查询所有启用的防火墙，并在结果不一致时返回差异。
 
 ## 1. 准备环境
 
@@ -35,8 +35,8 @@ sudo apt install -y git openssh-client openssl
 拉取代码：
 
 ```bash
-git clone git@github.com:m15608293998-arch/Huawei-Firewall-Automation.git
-cd Huawei-Firewall-Automation
+git clone git@github.com:m15608293998-arch/FireWalld-AutoMation.git
+cd FireWalld-AutoMation
 ```
 
 安装 Python 依赖：
@@ -139,54 +139,67 @@ realm-management:manage-users
 vi group_vars/all.yml
 ```
 
-账号密码登录：
+测试环境保持一个 `TEST-FW` 配置档即可。账号密码登录示例：
 
 ```yaml
-firewall_device:
-  device_host: "<FIREWALL_MGMT_IP>"
-  device_user: "<FIREWALL_USER>"
-  auth_type: "password"
-  device_password: "<FIREWALL_PASSWORD>"
+default_firewall_code: "TEST-FW"
+firewall_profiles:
+  TEST-FW:
+    firewall_device:
+      device_host: "<FIREWALL_MGMT_IP>"
+      device_user: "<FIREWALL_USER>"
+      auth_type: "password"
+      device_password: "<FIREWALL_PASSWORD>"
+    address_vsystems:
+      - name: "public"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: false
+      - name: "Internet"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+      - name: "private"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+    application_vsystem: "private"
+    user_defined_application:
+      name_prefix: "UD_TServe_"
+      category: "General"
+      subcategory: "General_TCP"
+      data_model: "client-server"
+      label: "Business-Applications"
+      application_group_name: "UDG_TradeServers"
 ```
 
-或者使用 SSH 私钥登录：
+也可以将配置档中的设备认证改为 SSH 私钥：
 
 ```yaml
-firewall_device:
-  device_host: "<FIREWALL_MGMT_IP>"
-  device_user: "<FIREWALL_USER>"
-  auth_type: "publickey"
-  identity_file: "/absolute/path/to/firewall_private_key"
+firewall_profiles:
+  TEST-FW:
+    firewall_device:
+      device_host: "<FIREWALL_MGMT_IP>"
+      device_user: "<FIREWALL_USER>"
+      auth_type: "publickey"
+      identity_file: "/absolute/path/to/firewall_private_key"
 ```
 
 私钥必须对运行 API 的账号可读，建议权限设为 `0600`。密码和私钥配置二选一。
+生产三台防火墙的完整拓扑模板在：
 
-继续确认这些业务配置：
+```text
+docs/examples/firewall_profiles.production.yml
+```
+
+生产拓扑为：
+
+| 防火墙 | IP 空间 | Application 空间 |
+| --- | --- | --- |
+| `PG-FW` | `public`、`private`、`Internet` | `private` |
+| `PG-FW-1` | `public` | `public` |
+| `IDC-FW` | `private`、`Internet` | `private` |
+
+公共容量配置继续保留在 `group_vars/all.yml`：
 
 ```yaml
-address_vsystems:
-  - name: "public"
-    address_set_name: "TraderServers-DirectAccess-IPs"
-    switch_required: false
-
-  - name: "Internet"
-    address_set_name: "TraderServers-DirectAccess-IPs"
-    switch_required: true
-
-  - name: "private"
-    address_set_name: "TraderServers-DirectAccess-IPs"
-    switch_required: true
-
-application_vsystem: "private"
-
-user_defined_application:
-  name_prefix: "UD_TServe_"
-  category: "General"
-  subcategory: "General_TCP"
-  data_model: "client-server"
-  label: "Business-Applications"
-  application_group_name: "UDG_TradeServers"
-
 rule_port_limit: 4
 application_rule_limit: 8
 enable_application_config: true
@@ -194,11 +207,9 @@ commit_security_engine: true
 save_config: true
 ```
 
-三个空间使用同名 Address Set `TraderServers-DirectAccess-IPs`。Application
-按 `UD_TServe_<IP>` 命名，每条 Rule 最多 4 个端口、每个 Application 最多
-8 条 Rule；超过 32 个端口后依次创建 `_2`、`_3` 等对象，并统一加入
-`UDG_TradeServers`。华为设备强制要求用户自定义 Application 名以 `UD_`
-开头，Playbook 会在连接设备前校验该约束。
+每条 Rule 最多 4 个端口、每个 Application 最多 8 条 Rule；超过 32 个端口后
+依次创建 `_2`、`_3` 等对象。华为设备强制要求用户自定义 Application 名以
+`UD_` 开头，Playbook 会在连接设备前校验。
 
 ## 4. 配置 API 环境变量
 
@@ -217,6 +228,11 @@ TRADE_ACCESS_API_AUTH_ENABLED=true
 TRADE_ACCESS_API_DATABASE_PATH=.runtime/api/jobs.sqlite3
 TRADE_ACCESS_API_RUNNER_PRIVATE_DATA_DIR=.runtime/runner
 TRADE_ACCESS_API_JOB_TMP_ROOT=.runtime/jobs
+
+# 测试环境只填 TEST-FW；生产改为 PG-FW,PG-FW-1,IDC-FW
+TRADE_ACCESS_API_FIREWALL_TARGETS=TEST-FW
+TRADE_ACCESS_API_FIREWALL_PARALLEL_WORKERS=3
+TRADE_ACCESS_API_FIREWALL_CHILD_MAX_ATTEMPTS=2
 
 TRADE_ACCESS_API_KEYCLOAK_SERVER_URL=http://<KEYCLOAK_HOST>:8080
 TRADE_ACCESS_API_KEYCLOAK_REALM=trade-access
@@ -371,7 +387,9 @@ curl -X POST \
 | `POST /api/v1/trade-access/deny/ip` | 确认该 IP 已无应用端口后，再移出所有业务地址集 | 否 |
 | `POST /api/v1/trade-access/deny` | 删除该 IP 的全部应用端口，再移出所有业务地址集 | 否 |
 
-端口必须在 `1` 到 `65535` 之间，单次最多提交 256 个。变更接口返回 `job_id` 后，查询任务和 Ansible 事件：
+接口路径不区分防火墙。一次请求会创建 `firewall_targets` 中所有设备的子任务，
+并在同一个父任务内并行执行。端口必须在 `1` 到 `65535` 之间，单次最多提交
+256 个。变更接口返回 `job_id` 后，查询任务和 Ansible 事件：
 
 ```bash
 curl \
@@ -383,11 +401,14 @@ curl \
   http://127.0.0.1:8000/api/v1/trade-access/jobs/events/<JOB_ID>
 ```
 
-普通用户只能读取自己的任务；管理员可在 `/admin-ui` 查看全部任务。
+任务详情的 `desired_state` 是该 IP 的完整业务期望状态，`target_results` 是逐台
+防火墙的变更前、期望和实测结果。只有全部子任务实时校验一致，父任务才是
+`successful`；部分成功为 `manual_intervention_required`。普通用户只能读取自己的
+任务，管理员可读取全部任务。
 
 ## 8. 查询防火墙快照
 
-快照来自防火墙实时 CLI 查询，不读取 SQLite 任务库：
+快照来自所有启用防火墙的实时 CLI 查询，不读取 SQLite 任务库：
 
 ```bash
 # 同时存在于 address_vsystems 所有业务地址集中的有效 /32 IP
@@ -400,3 +421,8 @@ curl \
   -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
   http://127.0.0.1:8000/api/v1/trade-access/firewall/snapshot/ports
 ```
+
+三台逻辑结果完全一致时返回 HTTP `200` 和干净的 `items`；结果漂移返回 HTTP
+`409` 及逐台差异；任一设备查询失败返回 HTTP `503`，不会把部分结果当成全量
+结果。完整恢复和一致性边界见
+[`docs/多防火墙并行编排与一致性说明.md`](docs/多防火墙并行编排与一致性说明.md)。

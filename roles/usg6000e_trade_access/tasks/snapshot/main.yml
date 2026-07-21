@@ -27,7 +27,7 @@
       - user_defined_application is defined
       - user_defined_application.name_prefix is defined
       - user_defined_application.application_group_name is defined
-      - snapshot_mode | default('snapshot') in ['snapshot', 'ips', 'ports']
+      - snapshot_mode | default('snapshot') in ['snapshot', 'ips', 'ports', 'state']
     fail_msg: >-
       Snapshot query requires firewall_device, address_vsystems, application_vsystem,
       user_defined_application.name_prefix and user_defined_application.application_group_name.
@@ -101,7 +101,7 @@
     dest: "{{ local_tmp_dir }}/query_application_full_inventory.cli"
     mode: "0600"
   changed_when: false
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
+  when: resolved_snapshot_mode in ['snapshot', 'ports', 'state']
 
 - name: Query firewall snapshot CLI files in one SSH session
   ansible.builtin.command:
@@ -112,7 +112,7 @@
         + (snapshot_address_sources | map(attribute='cli_file') | list)
         + (
           [local_tmp_dir ~ '/query_application_full_inventory.cli']
-          if resolved_snapshot_mode in ['snapshot', 'ports']
+          if resolved_snapshot_mode in ['snapshot', 'ports', 'state']
           else []
         )
       }}
@@ -155,7 +155,7 @@
     mode: "0600"
     content: "{{ snapshot_cli_result.stdout }}"
   changed_when: false
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
+  when: resolved_snapshot_mode in ['snapshot', 'ports', 'state']
 
 - name: Build firewall snapshot JSON
   ansible.builtin.command:
@@ -183,7 +183,7 @@
   register: firewall_snapshot_result
   changed_when: false
   failed_when: firewall_snapshot_result.rc != 0
-  when: resolved_snapshot_mode in ['snapshot', 'ports']
+  when: resolved_snapshot_mode in ['snapshot', 'ports', 'state']
 
 - name: Show firewall snapshot summary
   ansible.builtin.debug:

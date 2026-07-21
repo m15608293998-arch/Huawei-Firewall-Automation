@@ -134,8 +134,8 @@
     .status-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
     .badge { display: inline-block; min-width: 78px; border-radius: 6px; padding: 3px 8px; text-align: center; background: #eceff2; color: #4b5563; font-size: 12px; font-weight: 650; }
     .badge.successful { background: #e8f7f0; color: var(--success); }
-    .badge.failed, .badge.canceled { background: #feeceb; color: var(--danger); }
-    .badge.running { background: #fff5d9; color: var(--warning); }
+    .badge.failed, .badge.canceled, .badge.manual_intervention_required { background: #feeceb; color: var(--danger); }
+    .badge.running, .badge.prechecking, .badge.applying, .badge.verifying, .badge.reconciling { background: #fff5d9; color: var(--warning); }
     .table-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px 18px; border-top: 1px solid var(--line); }
     .pagination-meta { color: var(--muted); font-size: 12px; }
     .pagination-actions { display: inline-flex; align-items: center; gap: 8px; }
@@ -280,8 +280,13 @@
                 <option value="">全部</option>
                 <option value="pending">pending</option>
                 <option value="running">running</option>
+                <option value="prechecking">prechecking</option>
+                <option value="applying">applying</option>
+                <option value="verifying">verifying</option>
+                <option value="reconciling">reconciling</option>
                 <option value="successful">successful</option>
                 <option value="failed">failed</option>
+                <option value="manual_intervention_required">manual_intervention_required</option>
                 <option value="canceled">canceled</option>
               </select>
             </div>
@@ -402,7 +407,12 @@
   <script>
     const TEST_UI_LOGIN_KEY = "trade_access_test_ui_login";
     const API_KEY_RESULT_KEY = "trade-access.api-key.result";
-    const terminalStatuses = new Set(["successful", "failed", "canceled"]);
+    const terminalStatuses = new Set([
+      "successful",
+      "failed",
+      "manual_intervention_required",
+      "canceled",
+    ]);
     const actionConfig = {
       allow_ip: {
         endpoint: "/api/v1/trade-access/allow/ip",
