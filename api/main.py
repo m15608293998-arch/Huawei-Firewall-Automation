@@ -33,6 +33,7 @@ from api.jobs import (
 )
 from api.schemas import (
     CurrentAccessResponse,
+    FirewallConsistencyCheckResponse,
     FirewallIpSnapshotResponse,
     FirewallPortSnapshotResponse,
     FirewallSnapshotResponse,
@@ -431,6 +432,28 @@ def create_trade_access_deny_job(
     job_request = TradeAccessJobCreate(action="deny", **request.model_dump())
     authorize_trade_access_request(principal, job_request)
     return create_job(job_request, principal, FIREWALL_DENY)
+
+
+@app.get(
+    "/api/v1/trade-access/firewall/check",
+    response_model=FirewallConsistencyCheckResponse,
+)
+def check_firewall_consistency(
+    principal: Principal = Depends(require_firewall_snapshot_read),
+):
+    del principal
+    result = runner_service.run_firewall_consistency_check()
+    if result.rc != 0 or result.payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "message": result.error_message or "Firewall consistency check failed.",
+                "check": result.payload,
+            },
+        )
+    # Drift is the expected diagnostic result of this endpoint, so it remains
+    # HTTP 200 and is expressed by overall_status plus per-node repair hints.
+    return result.payload
 
 
 @app.get(

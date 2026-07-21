@@ -406,11 +406,16 @@ curl \
 `successful`；部分成功为 `manual_intervention_required`。普通用户只能读取自己的
 任务，管理员可读取全部任务。
 
-## 8. 查询防火墙快照
+## 8. 查询与一致性检查
 
 快照来自所有启用防火墙的实时 CLI 查询，不读取 SQLite 任务库：
 
 ```bash
+# 一次查询每台防火墙的 IP 和端口，并生成逐台人工纠错建议
+curl \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  http://127.0.0.1:8000/api/v1/trade-access/firewall/check
+
 # 同时存在于 address_vsystems 所有业务地址集中的有效 /32 IP
 curl \
   -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
@@ -421,6 +426,11 @@ curl \
   -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
   http://127.0.0.1:8000/api/v1/trade-access/firewall/snapshot/ports
 ```
+
+`check` 在三台一致或存在漂移时均返回 HTTP `200`，通过 `overall_status` 区分
+`consistent` 和 `drifted`。响应包含 IP/端口差异、每台设备的缺失/多余项，以及
+按严格多数节点计算的 `suggested_actions`；建议仅供人工核实，不会自动执行。任一
+设备查询失败时返回 HTTP `503`、`overall_status=incomplete`，且不生成纠错动作。
 
 三台逻辑结果完全一致时返回 HTTP `200` 和干净的 `items`；结果漂移返回 HTTP
 `409` 及逐台差异；任一设备查询失败返回 HTTP `503`，不会把部分结果当成全量

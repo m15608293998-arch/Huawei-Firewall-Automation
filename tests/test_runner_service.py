@@ -259,6 +259,163 @@ class RunnerServiceTests(unittest.TestCase):
             "connection timed out",
         )
 
+    def test_consistency_check_returns_per_node_manual_correction_hints(self) -> None:
+        service = AnsibleRunnerService()
+        payloads = {
+            "PG-FW": {
+                "ip_items": [{"ip": "192.168.66.22"}],
+                "port_items": [{"ip": "192.168.66.22", "port": 12001}],
+            },
+            "PG-FW-1": {
+                "ip_items": [{"ip": "192.168.66.22"}],
+                "port_items": [{"ip": "192.168.66.22", "port": 12001}],
+            },
+            "IDC-FW": {
+                "ip_items": [{"ip": "192.168.66.33"}],
+                "port_items": [{"ip": "192.168.66.33", "port": 443}],
+            },
+        }
+        calls = []
+
+        def fake_snapshot(snapshot_mode, firewall_code=None):
+            calls.append((snapshot_mode, firewall_code))
+            return SnapshotRunnerResult(
+                status="successful",
+                rc=0,
+                artifact_dir="/tmp/{0}".format(firewall_code),
+                payload={
+                    "generated_at": "2026-07-21T10:00:00+08:00",
+                    **payloads[str(firewall_code)],
+                },
+            )
+
+        service.run_firewall_snapshot = fake_snapshot
+        result = service.run_firewall_consistency_check(
+            ("PG-FW", "PG-FW-1", "IDC-FW")
+        )
+
+        self.assertEqual(result.rc, 0)
+        self.assertEqual(result.status, "drifted")
+        self.assertEqual(result.payload["overall_status"], "drifted")
+        self.assertCountEqual(
+            calls,
+            [
+                ("state", "PG-FW"),
+                ("state", "PG-FW-1"),
+                ("state", "IDC-FW"),
+            ],
+        )
+        self.assertEqual(result.payload["summary"]["ip_drift_item_count"], 2)
+        self.assertEqual(result.payload["summary"]["port_drift_item_count"], 2)
+        self.assertEqual(result.payload["summary"]["suggested_action_count"], 4)
+        idc = result.payload["firewalls"]["IDC-FW"]
+        self.assertEqual(idc["ip_missing"], [{"ip": "192.168.66.22"}])
+        self.assertEqual(idc["ip_extra"], [{"ip": "192.168.66.33"}])
+        self.assertEqual(
+            [item["action"] for item in idc["suggested_actions"]],
+            ["add_ip", "add_port", "remove_port", "remove_ip"],
+        )
+        self.assertEqual(
+            result.payload["differences"]["ips"][0]["reference_state"],
+            "present",
+        )
+        self.assertEqual(
+            result.payload["differences"]["ips"][1]["reference_state"],
+            "absent",
+        )
+
+    def test_consistency_check_returns_consistent_for_single_test_firewall(self) -> None:
+        service = AnsibleRunnerService()
+
+        def fake_snapshot(snapshot_mode, firewall_code=None):
+            return SnapshotRunnerResult(
+                status="successful",
+                rc=0,
+                artifact_dir="/tmp/{0}".format(firewall_code),
+                payload={
+                    "generated_at": "2026-07-21T10:00:00+08:00",
+                    "ip_items": [{"ip": "192.168.66.22"}],
+                    "port_items": [{"ip": "192.168.66.22", "port": 12001}],
+                },
+            )
+
+        service.run_firewall_snapshot = fake_snapshot
+        result = service.run_firewall_consistency_check(("TEST-FW",))
+
+        self.assertEqual(result.rc, 0)
+        self.assertEqual(result.payload["overall_status"], "consistent")
+        self.assertEqual(result.payload["summary"]["suggested_action_count"], 0)
+        self.assertEqual(result.payload["differences"], {"ips": [], "ports": []})
+
+    def test_consistency_check_does_not_suggest_actions_when_a_query_fails(self) -> None:
+        service = AnsibleRunnerService()
+
+        def fake_snapshot(snapshot_mode, firewall_code=None):
+            if firewall_code == "IDC-FW":
+                return SnapshotRunnerResult(
+                    status="failed",
+                    rc=1,
+                    artifact_dir="/tmp/IDC-FW",
+                    error_message="connection timed out",
+                )
+            return SnapshotRunnerResult(
+                status="successful",
+                rc=0,
+                artifact_dir="/tmp/{0}".format(firewall_code),
+                payload={
+                    "generated_at": "2026-07-21T10:00:00+08:00",
+                    "ip_items": [{"ip": "192.168.66.22"}],
+                    "port_items": [{"ip": "192.168.66.22", "port": 12001}],
+                },
+            )
+
+        service.run_firewall_snapshot = fake_snapshot
+        result = service.run_firewall_consistency_check(
+            ("PG-FW", "PG-FW-1", "IDC-FW")
+        )
+
+        self.assertEqual(result.rc, 1)
+        self.assertEqual(result.payload["overall_status"], "incomplete")
+        self.assertEqual(result.payload["summary"]["successful_firewall_count"], 2)
+        self.assertIsNone(result.payload["summary"]["ip_consistent"])
+        self.assertEqual(
+            result.payload["firewalls"]["IDC-FW"]["error_message"],
+            "connection timed out",
+        )
+        self.assertTrue(
+            all(
+                not node["suggested_actions"]
+                for node in result.payload["firewalls"].values()
+            )
+        )
+
+    def test_consistency_check_marks_even_split_as_ambiguous(self) -> None:
+        service = AnsibleRunnerService()
+
+        def fake_snapshot(snapshot_mode, firewall_code=None):
+            has_item = firewall_code == "PG-FW"
+            return SnapshotRunnerResult(
+                status="successful",
+                rc=0,
+                artifact_dir="/tmp/{0}".format(firewall_code),
+                payload={
+                    "generated_at": "2026-07-21T10:00:00+08:00",
+                    "ip_items": [{"ip": "192.168.66.22"}] if has_item else [],
+                    "port_items": [],
+                },
+            )
+
+        service.run_firewall_snapshot = fake_snapshot
+        result = service.run_firewall_consistency_check(("PG-FW", "IDC-FW"))
+
+        self.assertEqual(result.payload["overall_status"], "drifted")
+        self.assertEqual(result.payload["summary"]["ambiguous_item_count"], 1)
+        self.assertEqual(
+            result.payload["differences"]["ips"][0]["reference_state"],
+            "ambiguous",
+        )
+        self.assertEqual(result.payload["summary"]["suggested_action_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

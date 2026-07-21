@@ -11,6 +11,7 @@ from api.config import settings
 from api.permissions import VALID_PERMISSIONS
 from api.main import (
     admin_ui,
+    check_firewall_consistency,
     create_trade_access_allow_job,
     create_trade_access_deny_job,
     create_trade_access_ip_allow_job,
@@ -32,6 +33,7 @@ from api.main import (
     test_ui,
 )
 from api.schemas import (
+    FirewallConsistencyCheckResponse,
     FirewallIpSnapshotResponse,
     FirewallPortSnapshotResponse,
     FirewallSnapshotResponse,
@@ -329,6 +331,107 @@ class ApiTests(unittest.TestCase):
             caught.exception.detail["reconciliation"]["consistency_status"],
             "drifted",
         )
+
+    def test_firewall_check_returns_drift_report_as_successful_http_payload(self) -> None:
+        import api.main as main_module
+
+        original_runner = main_module.runner_service.run_firewall_consistency_check
+        payload = {
+            "checked_at": "2026-07-21T10:00:00+08:00",
+            "overall_status": "drifted",
+            "reference_strategy": "strict_majority_of_all_configured_firewalls",
+            "firewall_codes": ["PG-FW", "PG-FW-1", "IDC-FW"],
+            "summary": {
+                "configured_firewall_count": 3,
+                "successful_firewall_count": 3,
+                "ip_consistent": False,
+                "port_consistent": True,
+                "ip_drift_item_count": 1,
+                "port_drift_item_count": 0,
+                "suggested_action_count": 1,
+                "ambiguous_item_count": 0,
+            },
+            "firewalls": {
+                code: {
+                    "query_status": "successful",
+                    "generated_at": "2026-07-21T10:00:00+08:00",
+                    "artifact_dir": "/tmp/{0}".format(code),
+                    "ip_count": 1 if code != "IDC-FW" else 0,
+                    "port_count": 0,
+                    "error_message": None,
+                    "ip_missing": (
+                        [{"ip": "192.168.66.22"}] if code == "IDC-FW" else []
+                    ),
+                    "ip_extra": [],
+                    "port_missing": [],
+                    "port_extra": [],
+                    "suggested_actions": (
+                        [
+                            {
+                                "firewall_code": "IDC-FW",
+                                "action": "add_ip",
+                                "ip": "192.168.66.22",
+                                "present_on_firewalls": ["PG-FW", "PG-FW-1"],
+                                "absent_on_firewalls": ["IDC-FW"],
+                                "reason": "Present on 2/3 firewalls; strict majority suggests adding it.",
+                            }
+                        ]
+                        if code == "IDC-FW"
+                        else []
+                    ),
+                }
+                for code in ("PG-FW", "PG-FW-1", "IDC-FW")
+            },
+            "differences": {
+                "ips": [
+                    {
+                        "ip": "192.168.66.22",
+                        "present_on_firewalls": ["PG-FW", "PG-FW-1"],
+                        "absent_on_firewalls": ["IDC-FW"],
+                        "reference_state": "present",
+                    }
+                ],
+                "ports": [],
+            },
+            "warning": "Verify intended business state before manual changes.",
+        }
+        main_module.runner_service.run_firewall_consistency_check = lambda: SnapshotRunnerResult(
+            status="drifted",
+            rc=0,
+            artifact_dir="",
+            payload=payload,
+        )
+        try:
+            response = check_firewall_consistency(principal=self.user)
+        finally:
+            main_module.runner_service.run_firewall_consistency_check = original_runner
+
+        validated = FirewallConsistencyCheckResponse.model_validate(response)
+        self.assertEqual(validated.overall_status, "drifted")
+        self.assertEqual(
+            validated.firewalls["IDC-FW"].suggested_actions[0].action,
+            "add_ip",
+        )
+
+    def test_firewall_check_reports_incomplete_query_as_service_unavailable(self) -> None:
+        import api.main as main_module
+
+        original_runner = main_module.runner_service.run_firewall_consistency_check
+        main_module.runner_service.run_firewall_consistency_check = lambda: SnapshotRunnerResult(
+            status="failed",
+            rc=1,
+            artifact_dir="",
+            payload={"overall_status": "incomplete"},
+            error_message="One or more firewall consistency-check queries failed.",
+        )
+        try:
+            with self.assertRaises(HTTPException) as caught:
+                check_firewall_consistency(principal=self.user)
+        finally:
+            main_module.runner_service.run_firewall_consistency_check = original_runner
+
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.detail["check"]["overall_status"], "incomplete")
 
     def test_api_job_creation_has_no_background_task_parameter(self) -> None:
         allow_parameters = inspect.signature(create_trade_access_allow_job).parameters

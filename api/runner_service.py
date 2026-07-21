@@ -10,6 +10,7 @@ from typing import Any
 import fcntl
 
 from api.config import settings
+from api.time_utils import utc_now_iso
 
 
 @dataclass(frozen=True)
@@ -368,6 +369,297 @@ class AnsibleRunnerService:
             rc=0,
             artifact_dir="",
             payload=payload,
+        )
+
+    def run_firewall_consistency_check(
+        self,
+        firewall_codes: tuple[str, ...] | list[str] | None = None,
+    ) -> SnapshotRunnerResult:
+        """Query IP and port state once per firewall and build a repair report."""
+        with self._parent_orchestration_lock():
+            return self._run_firewall_consistency_check_unlocked(firewall_codes)
+
+    def _run_firewall_consistency_check_unlocked(
+        self,
+        firewall_codes: tuple[str, ...] | list[str] | None = None,
+    ) -> SnapshotRunnerResult:
+        codes = tuple(firewall_codes or settings.firewall_target_codes)
+        results: dict[str, SnapshotRunnerResult] = {}
+        worker_count = min(len(codes), settings.firewall_parallel_workers)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(self.run_firewall_snapshot, "state", code): code
+                for code in codes
+            }
+            for future in as_completed(futures):
+                code = futures[future]
+                try:
+                    results[code] = future.result()
+                except Exception as exc:
+                    results[code] = SnapshotRunnerResult(
+                        status="failed",
+                        rc=1,
+                        artifact_dir="",
+                        error_message=str(exc),
+                    )
+
+        ip_sets: dict[str, set[tuple[str, int]]] = {}
+        port_sets: dict[str, set[tuple[str, int]]] = {}
+        failures: dict[str, str] = {}
+        for code in codes:
+            result = results[code]
+            if result.rc != 0 or result.payload is None:
+                failures[code] = result.error_message or "state query failed"
+                continue
+            try:
+                ip_sets[code], port_sets[code] = self._state_snapshot_item_sets(
+                    result.payload
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                failures[code] = "Invalid state snapshot payload: {0}".format(exc)
+
+        checked_at = utc_now_iso()
+        if failures:
+            firewalls = {
+                code: {
+                    "query_status": "failed" if code in failures else "successful",
+                    "generated_at": self._snapshot_generated_at(
+                        results[code].payload
+                    ),
+                    "artifact_dir": results[code].artifact_dir,
+                    "ip_count": len(ip_sets.get(code, set())),
+                    "port_count": len(port_sets.get(code, set())),
+                    "error_message": failures.get(code),
+                    "ip_missing": [],
+                    "ip_extra": [],
+                    "port_missing": [],
+                    "port_extra": [],
+                    "suggested_actions": [],
+                }
+                for code in codes
+            }
+            payload = {
+                "checked_at": checked_at,
+                "overall_status": "incomplete",
+                "reference_strategy": "strict_majority_of_all_configured_firewalls",
+                "firewall_codes": list(codes),
+                "summary": {
+                    "configured_firewall_count": len(codes),
+                    "successful_firewall_count": len(codes) - len(failures),
+                    "ip_consistent": None,
+                    "port_consistent": None,
+                    "ip_drift_item_count": 0,
+                    "port_drift_item_count": 0,
+                    "suggested_action_count": 0,
+                    "ambiguous_item_count": 0,
+                },
+                "firewalls": firewalls,
+                "differences": {"ips": [], "ports": []},
+                "warning": (
+                    "At least one firewall query failed. No correction actions were "
+                    "generated because the comparison is incomplete."
+                ),
+            }
+            return SnapshotRunnerResult(
+                status="failed",
+                rc=1,
+                artifact_dir="",
+                payload=payload,
+                error_message="One or more firewall consistency-check queries failed.",
+            )
+
+        ip_differences = self._build_check_differences(ip_sets, codes)
+        port_differences = self._build_check_differences(port_sets, codes)
+        ip_by_key = {
+            self._snapshot_item_key(item): item for item in ip_differences
+        }
+        port_by_key = {
+            self._snapshot_item_key(item): item for item in port_differences
+        }
+        firewalls: dict[str, dict[str, Any]] = {}
+        action_count = 0
+        for code in codes:
+            ip_missing = {
+                key
+                for key, item in ip_by_key.items()
+                if item["reference_state"] == "present" and key not in ip_sets[code]
+            }
+            ip_extra = {
+                key
+                for key, item in ip_by_key.items()
+                if item["reference_state"] == "absent" and key in ip_sets[code]
+            }
+            port_missing = {
+                key
+                for key, item in port_by_key.items()
+                if item["reference_state"] == "present" and key not in port_sets[code]
+            }
+            port_extra = {
+                key
+                for key, item in port_by_key.items()
+                if item["reference_state"] == "absent" and key in port_sets[code]
+            }
+
+            actions: list[dict[str, Any]] = []
+            for action, keys, evidence in (
+                ("add_ip", ip_missing, ip_by_key),
+                ("add_port", port_missing, port_by_key),
+                ("remove_port", port_extra, port_by_key),
+                ("remove_ip", ip_extra, ip_by_key),
+            ):
+                for key in sorted(keys):
+                    item = evidence[key]
+                    action_item = {
+                        "firewall_code": code,
+                        "action": action,
+                        **self._snapshot_item_from_key(key),
+                        "present_on_firewalls": item["present_on_firewalls"],
+                        "absent_on_firewalls": item["absent_on_firewalls"],
+                        "reason": self._check_action_reason(item["reference_state"], item),
+                    }
+                    actions.append(action_item)
+
+            action_count += len(actions)
+            result = results[code]
+            firewalls[code] = {
+                "query_status": "successful",
+                "generated_at": self._snapshot_generated_at(result.payload),
+                "artifact_dir": result.artifact_dir,
+                "ip_count": len(ip_sets[code]),
+                "port_count": len(port_sets[code]),
+                "error_message": None,
+                "ip_missing": [
+                    self._snapshot_item_from_key(item) for item in sorted(ip_missing)
+                ],
+                "ip_extra": [
+                    self._snapshot_item_from_key(item) for item in sorted(ip_extra)
+                ],
+                "port_missing": [
+                    self._snapshot_item_from_key(item) for item in sorted(port_missing)
+                ],
+                "port_extra": [
+                    self._snapshot_item_from_key(item) for item in sorted(port_extra)
+                ],
+                "suggested_actions": actions,
+            }
+
+        ambiguous_count = sum(
+            1
+            for item in ip_differences + port_differences
+            if item["reference_state"] == "ambiguous"
+        )
+        drifted = bool(ip_differences or port_differences)
+        payload = {
+            "checked_at": checked_at,
+            "overall_status": "drifted" if drifted else "consistent",
+            "reference_strategy": "strict_majority_of_all_configured_firewalls",
+            "firewall_codes": list(codes),
+            "summary": {
+                "configured_firewall_count": len(codes),
+                "successful_firewall_count": len(codes),
+                "ip_consistent": not ip_differences,
+                "port_consistent": not port_differences,
+                "ip_drift_item_count": len(ip_differences),
+                "port_drift_item_count": len(port_differences),
+                "suggested_action_count": action_count,
+                "ambiguous_item_count": ambiguous_count,
+            },
+            "firewalls": firewalls,
+            "differences": {
+                "ips": ip_differences,
+                "ports": port_differences,
+            },
+            "warning": (
+                "Correction actions are majority-based suggestions only. Verify the "
+                "intended business state before changing a firewall manually."
+            ),
+        }
+        return SnapshotRunnerResult(
+            status="drifted" if drifted else "successful",
+            rc=0,
+            artifact_dir="",
+            payload=payload,
+        )
+
+    @staticmethod
+    def _state_snapshot_item_sets(
+        payload: dict[str, Any],
+    ) -> tuple[set[tuple[str, int]], set[tuple[str, int]]]:
+        if not isinstance(payload, dict):
+            raise TypeError("state snapshot payload must be an object")
+        ip_items = payload["ip_items"]
+        port_items = payload["port_items"]
+        if not isinstance(ip_items, list) or not isinstance(port_items, list):
+            raise TypeError("ip_items and port_items must be lists")
+        ip_keys: set[tuple[str, int]] = set()
+        for item in ip_items:
+            if not isinstance(item, dict) or not isinstance(item.get("ip"), str):
+                raise TypeError("each ip_items entry must contain a string ip")
+            ip_keys.add((item["ip"], 0))
+
+        port_keys: set[tuple[str, int]] = set()
+        for item in port_items:
+            if not isinstance(item, dict) or not isinstance(item.get("ip"), str):
+                raise TypeError("each port_items entry must contain a string ip")
+            if "port" not in item:
+                raise KeyError("port")
+            port = int(item["port"])
+            if port < 1 or port > 65535:
+                raise ValueError("port must be between 1 and 65535")
+            port_keys.add((item["ip"], port))
+        return ip_keys, port_keys
+
+    @staticmethod
+    def _snapshot_generated_at(payload: object) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        value = payload.get("generated_at")
+        return str(value) if value is not None else None
+
+    @classmethod
+    def _build_check_differences(
+        cls,
+        item_sets: dict[str, set[tuple[str, int]]],
+        codes: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        union_items = set().union(*(item_sets[code] for code in codes))
+        differences: list[dict[str, Any]] = []
+        for key in sorted(union_items):
+            present_on = [code for code in codes if key in item_sets[code]]
+            if len(present_on) == len(codes):
+                continue
+            absent_on = [code for code in codes if code not in present_on]
+            if len(present_on) * 2 > len(codes):
+                reference_state = "present"
+            elif len(present_on) * 2 < len(codes):
+                reference_state = "absent"
+            else:
+                reference_state = "ambiguous"
+            differences.append(
+                {
+                    **cls._snapshot_item_from_key(key),
+                    "present_on_firewalls": present_on,
+                    "absent_on_firewalls": absent_on,
+                    "reference_state": reference_state,
+                }
+            )
+        return differences
+
+    @staticmethod
+    def _check_action_reason(
+        reference_state: str,
+        item: dict[str, Any],
+    ) -> str:
+        present_count = len(item["present_on_firewalls"])
+        total_count = present_count + len(item["absent_on_firewalls"])
+        if reference_state == "present":
+            return "Present on {0}/{1} firewalls; strict majority suggests adding it.".format(
+                present_count,
+                total_count,
+            )
+        return "Absent on {0}/{1} firewalls; strict majority suggests removing it.".format(
+            total_count - present_count,
+            total_count,
         )
 
     @staticmethod

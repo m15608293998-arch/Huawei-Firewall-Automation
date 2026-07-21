@@ -250,6 +250,68 @@ class FirewallPortSnapshotResponse(BaseModel):
     firewalls: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
+class FirewallCheckAction(BaseModel):
+    firewall_code: str
+    action: str
+    ip: str
+    port: int | None = None
+    present_on_firewalls: list[str] = Field(default_factory=list)
+    absent_on_firewalls: list[str] = Field(default_factory=list)
+    reason: str
+
+
+class FirewallCheckIpDifference(BaseModel):
+    ip: str
+    present_on_firewalls: list[str] = Field(default_factory=list)
+    absent_on_firewalls: list[str] = Field(default_factory=list)
+    reference_state: str
+
+
+class FirewallCheckPortDifference(FirewallCheckIpDifference):
+    port: int
+
+
+class FirewallCheckDifferences(BaseModel):
+    ips: list[FirewallCheckIpDifference] = Field(default_factory=list)
+    ports: list[FirewallCheckPortDifference] = Field(default_factory=list)
+
+
+class FirewallCheckNodeResponse(BaseModel):
+    query_status: str
+    generated_at: str | None = None
+    artifact_dir: str
+    ip_count: int = 0
+    port_count: int = 0
+    error_message: str | None = None
+    ip_missing: list[FirewallIpSnapshotItem] = Field(default_factory=list)
+    ip_extra: list[FirewallIpSnapshotItem] = Field(default_factory=list)
+    port_missing: list[FirewallPortSnapshotItem] = Field(default_factory=list)
+    port_extra: list[FirewallPortSnapshotItem] = Field(default_factory=list)
+    suggested_actions: list[FirewallCheckAction] = Field(default_factory=list)
+
+
+class FirewallCheckSummary(BaseModel):
+    configured_firewall_count: int
+    successful_firewall_count: int
+    ip_consistent: bool | None
+    port_consistent: bool | None
+    ip_drift_item_count: int
+    port_drift_item_count: int
+    suggested_action_count: int
+    ambiguous_item_count: int
+
+
+class FirewallConsistencyCheckResponse(BaseModel):
+    checked_at: str
+    overall_status: str
+    reference_strategy: str
+    firewall_codes: list[str] = Field(default_factory=list)
+    summary: FirewallCheckSummary
+    firewalls: dict[str, FirewallCheckNodeResponse] = Field(default_factory=dict)
+    differences: FirewallCheckDifferences
+    warning: str
+
+
 class CurrentAccessResponse(BaseModel):
     subject_id: str
     subject: str
