@@ -142,14 +142,20 @@ vi group_vars/all.yml
 测试环境保持一个 `TEST-FW` 配置档即可。账号密码登录示例：
 
 ```yaml
+trade_access_api:
+  firewall_targets:
+    - "TEST-FW"
+  firewall_parallel_workers: 3
+  firewall_child_max_attempts: 2
+
 default_firewall_code: "TEST-FW"
 firewall_profiles:
   TEST-FW:
     firewall_device:
-      device_host: "<FIREWALL_MGMT_IP>"
-      device_user: "<FIREWALL_USER>"
+      device_host: "{{ lookup('env', 'TEST_FW_DEVICE_HOST') }}"
+      device_user: "{{ lookup('env', 'TEST_FW_DEVICE_USER') }}"
       auth_type: "password"
-      device_password: "<FIREWALL_PASSWORD>"
+      device_password: "{{ lookup('env', 'TEST_FW_DEVICE_PASSWORD') }}"
     address_vsystems:
       - name: "public"
         address_set_name: "TraderServers-DirectAccess-IPs"
@@ -170,6 +176,11 @@ firewall_profiles:
       application_group_name: "UDG_TradeServers"
 ```
 
+`trade_access_api` 会被 API 和 worker 直接读取；同名的
+`TRADE_ACCESS_API_FIREWALL_*` 环境变量只作为兼容覆盖项。设备密码不要明文写入
+`all.yml`，而是在运行环境文件中提供 `TEST_FW_DEVICE_HOST`、
+`TEST_FW_DEVICE_USER` 和 `TEST_FW_DEVICE_PASSWORD`。
+
 也可以将配置档中的设备认证改为 SSH 私钥：
 
 ```yaml
@@ -187,6 +198,23 @@ firewall_profiles:
 
 ```text
 docs/examples/firewall_profiles.production.yml
+```
+
+生产运行环境文件需要分别提供三组连接信息，模板中的三个 profile 会按变量名精确
+引用，不会串用：
+
+```env
+PG_FW_DEVICE_HOST=<PG-FW管理IP>
+PG_FW_DEVICE_USER=<PG-FW用户名>
+PG_FW_DEVICE_PASSWORD='<PG-FW密码>'
+
+PG_FW_1_DEVICE_HOST=<PG-FW-1管理IP>
+PG_FW_1_DEVICE_USER=<PG-FW-1用户名>
+PG_FW_1_DEVICE_PASSWORD='<PG-FW-1密码>'
+
+IDC_FW_DEVICE_HOST=<IDC-FW管理IP>
+IDC_FW_DEVICE_USER=<IDC-FW用户名>
+IDC_FW_DEVICE_PASSWORD='<IDC-FW密码>'
 ```
 
 生产拓扑为：
@@ -229,10 +257,12 @@ TRADE_ACCESS_API_DATABASE_PATH=.runtime/api/jobs.sqlite3
 TRADE_ACCESS_API_RUNNER_PRIVATE_DATA_DIR=.runtime/runner
 TRADE_ACCESS_API_JOB_TMP_ROOT=.runtime/jobs
 
-# 测试环境只填 TEST-FW；生产改为 PG-FW,PG-FW-1,IDC-FW
-TRADE_ACCESS_API_FIREWALL_TARGETS=TEST-FW
-TRADE_ACCESS_API_FIREWALL_PARALLEL_WORKERS=3
-TRADE_ACCESS_API_FIREWALL_CHILD_MAX_ATTEMPTS=2
+# 防火墙目标、并发数和重试次数统一配置在 group_vars/all.yml 的
+# trade_access_api 中，不需要在这里重复配置。
+
+TEST_FW_DEVICE_HOST=<TEST-FW管理IP>
+TEST_FW_DEVICE_USER=<TEST-FW用户名>
+TEST_FW_DEVICE_PASSWORD='<TEST-FW密码>'
 
 TRADE_ACCESS_API_KEYCLOAK_SERVER_URL=http://<KEYCLOAK_HOST>:8080
 TRADE_ACCESS_API_KEYCLOAK_REALM=trade-access

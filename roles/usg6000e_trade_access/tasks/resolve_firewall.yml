@@ -10,7 +10,8 @@
       - resolved_firewall_code in (firewall_profiles | default({}))
     fail_msg: >-
       Firewall profile {{ resolved_firewall_code }} is not configured. Define it
-      under firewall_profiles before enabling it in TRADE_ACCESS_API_FIREWALL_TARGETS.
+      under firewall_profiles before enabling it in
+      trade_access_api.firewall_targets (or its environment override).
 
 - name: Resolve firewall profile topology
   ansible.builtin.set_fact:

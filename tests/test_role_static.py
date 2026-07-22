@@ -11,6 +11,12 @@ class RoleStaticTests(unittest.TestCase):
     def test_production_resource_names_and_application_capacity(self) -> None:
         config = yaml.safe_load((PROJECT_ROOT / "group_vars/all.yml").read_text())
 
+        self.assertEqual(config["trade_access_api"]["firewall_targets"], ["TEST-FW"])
+        self.assertEqual(config["trade_access_api"]["firewall_parallel_workers"], 3)
+        self.assertEqual(config["trade_access_api"]["firewall_child_max_attempts"], 2)
+        self.assertTrue(config["enable_application_config"])
+        self.assertTrue(config["commit_security_engine"])
+        self.assertTrue(config["save_config"])
         self.assertEqual(
             [context["name"] for context in config["address_vsystems"]],
             ["public", "Internet", "private"],
@@ -49,6 +55,17 @@ class RoleStaticTests(unittest.TestCase):
         profiles = config["firewall_profiles"]
 
         self.assertEqual(
+            config["trade_access_api"]["firewall_targets"],
+            ["PG-FW", "PG-FW-1", "IDC-FW"],
+        )
+        self.assertEqual(config["trade_access_api"]["firewall_parallel_workers"], 3)
+        self.assertEqual(config["trade_access_api"]["firewall_child_max_attempts"], 2)
+        self.assertEqual(config["rule_port_limit"], 4)
+        self.assertEqual(config["application_rule_limit"], 8)
+        self.assertTrue(config["enable_application_config"])
+        self.assertTrue(config["commit_security_engine"])
+        self.assertTrue(config["save_config"])
+        self.assertEqual(
             [item["name"] for item in profiles["PG-FW"]["address_vsystems"]],
             ["public", "private", "Internet"],
         )
@@ -63,6 +80,19 @@ class RoleStaticTests(unittest.TestCase):
             ["private", "Internet"],
         )
         self.assertEqual(profiles["IDC-FW"]["application_vsystem"], "private")
+        expected_environment_names = {
+            "PG-FW": "PG_FW",
+            "PG-FW-1": "PG_FW_1",
+            "IDC-FW": "IDC_FW",
+        }
+        for firewall_code, environment_prefix in expected_environment_names.items():
+            device = profiles[firewall_code]["firewall_device"]
+            self.assertIn(environment_prefix + "_DEVICE_HOST", device["device_host"])
+            self.assertIn(environment_prefix + "_DEVICE_USER", device["device_user"])
+            self.assertIn(
+                environment_prefix + "_DEVICE_PASSWORD",
+                device["device_password"],
+            )
 
     def test_application_upper_limit_error_is_not_whitelisted(self) -> None:
         application_yml = (

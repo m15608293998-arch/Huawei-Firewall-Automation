@@ -1,15 +1,26 @@
 ---
+# API 与 worker 的非敏感编排配置。测试只启用 TEST-FW；生产配置见
+# docs/examples/firewall_profiles.production.yml。
+# 同名 TRADE_ACCESS_API_* 环境变量仍可临时覆盖，但通常无需再配置。
+trade_access_api:
+  firewall_targets:
+    - "TEST-FW"
+  firewall_parallel_workers: 3
+  firewall_child_max_attempts: 2
+
 # 华为 USG6000E 测试节点管理地址
 # firewall_device:
 #   device_host: "<TEST_FIREWALL_MGMT_IP>"
 #   device_user: "<TEST_FIREWALL_USER>"
 #   auth_type: "publickey"
 #   identity_file: "/absolute/path/to/test_firewall_private_key"
+# `&test_firewall_device` 是给下面这段 YAML 配置起名；文件后面的
+# `*test_firewall_device` 表示原样复用这段配置，不是防火墙命令。
 firewall_device: &test_firewall_device
-    device_host: "<TEST_FIREWALL_MGMT_IP>"
-    device_user: "<TEST_FIREWALL_USER>"
+    device_host: "{{ lookup('env', 'TEST_FW_DEVICE_HOST') }}"
+    device_user: "{{ lookup('env', 'TEST_FW_DEVICE_USER') }}"
     auth_type: "password"
-    device_password: "<FIREWALL_PASSWORD>"
+    device_password: "{{ lookup('env', 'TEST_FW_DEVICE_PASSWORD') }}"
  
 address_vsystems: &test_address_vsystems
   - name: "public"
@@ -38,8 +49,8 @@ user_defined_application: &test_user_defined_application
 
 default_firewall_code: "TEST-FW"
 
-# 当前测试环境只启用一个逻辑目标。生产环境通过同一结构配置三台设备，
-# 并由 TRADE_ACCESS_API_FIREWALL_TARGETS 决定一个父任务要执行哪些目标。
+# 当前测试环境只启用一个逻辑目标。这里的 `*名称` 都是在复用前面对应的
+# `&名称` 配置；Ansible 最终得到的是完整字典和列表。
 firewall_profiles:
   TEST-FW:
     firewall_device: *test_firewall_device

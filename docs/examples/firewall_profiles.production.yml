@@ -1,13 +1,21 @@
 ---
 # 生产配置示例。确认设备管理地址、账号和虚拟系统大小写后，合并到
 # group_vars/all.yml；密码由 API/worker 进程环境变量提供，不写入仓库。
+trade_access_api:
+  firewall_targets:
+    - "PG-FW"
+    - "PG-FW-1"
+    - "IDC-FW"
+  firewall_parallel_workers: 3
+  firewall_child_max_attempts: 2
+
 default_firewall_code: "PG-FW"
 
 firewall_profiles:
   PG-FW:
     firewall_device:
-      device_host: "<PG_FW_HOST>"
-      device_user: "<PG_FW_USER>"
+      device_host: "{{ lookup('env', 'PG_FW_DEVICE_HOST') }}"
+      device_user: "{{ lookup('env', 'PG_FW_DEVICE_USER') }}"
       auth_type: "password"
       device_password: "{{ lookup('env', 'PG_FW_DEVICE_PASSWORD') }}"
     address_vsystems:
@@ -31,8 +39,8 @@ firewall_profiles:
 
   PG-FW-1:
     firewall_device:
-      device_host: "<PG_FW_1_HOST>"
-      device_user: "<PG_FW_1_USER>"
+      device_host: "{{ lookup('env', 'PG_FW_1_DEVICE_HOST') }}"
+      device_user: "{{ lookup('env', 'PG_FW_1_DEVICE_USER') }}"
       auth_type: "password"
       device_password: "{{ lookup('env', 'PG_FW_1_DEVICE_PASSWORD') }}"
     address_vsystems:
@@ -50,8 +58,8 @@ firewall_profiles:
 
   IDC-FW:
     firewall_device:
-      device_host: "<IDC_FW_HOST>"
-      device_user: "<IDC_FW_USER>"
+      device_host: "{{ lookup('env', 'IDC_FW_DEVICE_HOST') }}"
+      device_user: "{{ lookup('env', 'IDC_FW_DEVICE_USER') }}"
       auth_type: "password"
       device_password: "{{ lookup('env', 'IDC_FW_DEVICE_PASSWORD') }}"
     address_vsystems:
@@ -69,3 +77,9 @@ firewall_profiles:
       data_model: "client-server"
       label: "Business-Applications"
       application_group_name: "UDG_TradeServers"
+
+rule_port_limit: 4
+application_rule_limit: 8
+enable_application_config: true
+commit_security_engine: true
+save_config: true

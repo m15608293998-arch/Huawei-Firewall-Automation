@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+import yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,12 +15,80 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def load_firewall_orchestration_defaults(
+    path: Path | None = None,
+) -> dict[str, object]:
+    """Load non-secret API/worker orchestration defaults from Ansible all.yml."""
+    config_path = path or (project_root() / "group_vars" / "all.yml")
+    defaults: dict[str, object] = {
+        "firewall_targets": "TEST-FW",
+        "firewall_parallel_workers": 3,
+        "firewall_child_max_attempts": 2,
+    }
+    if not config_path.exists():
+        return defaults
+
+    try:
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            "Failed to parse firewall orchestration config {0}: {1}".format(
+                config_path,
+                exc,
+            )
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Ansible group vars root must be a YAML object: {0}".format(
+                config_path
+            )
+        )
+
+    orchestration = payload.get("trade_access_api") or {}
+    if not isinstance(orchestration, dict):
+        raise ValueError(
+            "trade_access_api must be a YAML object in {0}".format(config_path)
+        )
+
+    raw_targets = orchestration.get("firewall_targets", defaults["firewall_targets"])
+    if isinstance(raw_targets, list):
+        if not raw_targets or not all(
+            isinstance(item, str) and item.strip() for item in raw_targets
+        ):
+            raise ValueError(
+                "trade_access_api.firewall_targets must contain non-empty strings."
+            )
+        firewall_targets = ",".join(item.strip() for item in raw_targets)
+    elif isinstance(raw_targets, str):
+        firewall_targets = raw_targets
+    else:
+        raise ValueError(
+            "trade_access_api.firewall_targets must be a string or YAML list."
+        )
+
+    return {
+        "firewall_targets": firewall_targets,
+        "firewall_parallel_workers": orchestration.get(
+            "firewall_parallel_workers",
+            defaults["firewall_parallel_workers"],
+        ),
+        "firewall_child_max_attempts": orchestration.get(
+            "firewall_child_max_attempts",
+            defaults["firewall_child_max_attempts"],
+        ),
+    }
+
+
+FIREWALL_ORCHESTRATION_DEFAULTS = load_firewall_orchestration_defaults()
+
+
 class Settings(BaseSettings):
     """Runtime settings for the API service."""
 
     model_config = SettingsConfigDict(
         env_prefix="TRADE_ACCESS_API_",
         extra="ignore",
+        validate_default=True,
     )
 
     project_root: Path = Field(default_factory=project_root)
@@ -31,11 +100,19 @@ class Settings(BaseSettings):
     database_path: Path = Field(
         default_factory=lambda: project_root() / ".runtime" / "api" / "jobs.sqlite3"
     )
-    # Logical profile codes executed by every mutation parent job.  Test uses a
-    # single profile; production enables all three profiles via one env value.
-    firewall_targets: str = "TEST-FW"
-    firewall_parallel_workers: int = Field(default=3, ge=1, le=16)
-    firewall_child_max_attempts: int = Field(default=2, ge=1, le=10)
+    # Defaults come from group_vars/all.yml:trade_access_api. Existing
+    # TRADE_ACCESS_API_* environment variables remain optional overrides.
+    firewall_targets: str = str(FIREWALL_ORCHESTRATION_DEFAULTS["firewall_targets"])
+    firewall_parallel_workers: int = Field(
+        default=FIREWALL_ORCHESTRATION_DEFAULTS["firewall_parallel_workers"],
+        ge=1,
+        le=16,
+    )
+    firewall_child_max_attempts: int = Field(
+        default=FIREWALL_ORCHESTRATION_DEFAULTS["firewall_child_max_attempts"],
+        ge=1,
+        le=10,
+    )
     auth_enabled: bool = True
     development_subject: str = "api-placeholder"
     keycloak_server_url: str = "http://127.0.0.1:8080"
@@ -98,7 +175,7 @@ class Settings(BaseSettings):
                 continue
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", code):
                 raise ValueError(
-                    "TRADE_ACCESS_API_FIREWALL_TARGETS contains an invalid profile code: "
+                    "firewall_targets contains an invalid profile code: "
                     "{0}".format(code)
                 )
             if code not in codes:
