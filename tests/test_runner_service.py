@@ -11,6 +11,70 @@ from api.runner_service import AnsibleRunnerService, SnapshotRunnerResult
 
 
 class RunnerServiceTests(unittest.TestCase):
+    def test_job_events_are_business_summary_by_default(self) -> None:
+        payloads = [
+            {
+                "counter": 1,
+                "event": "verbose",
+                "created": "2026-07-22T01:00:00+00:00",
+                "event_data": {},
+            },
+            {
+                "counter": 2,
+                "event": "runner_on_ok",
+                "created": "2026-07-22T01:00:01+00:00",
+                "event_data": {
+                    "task": "Render incremental application port changes",
+                    "res": {"changed": False},
+                },
+            },
+            {
+                "counter": 3,
+                "event": "runner_on_ok",
+                "created": "2026-07-22T01:00:02+00:00",
+                "event_data": {
+                    "task": "Apply incremental application port changes in one SSH session",
+                    "res": {"changed": True},
+                },
+            },
+            {
+                "counter": 4,
+                "event": "runner_on_failed",
+                "created": "2026-07-22T01:00:03+00:00",
+                "event_data": {
+                    "task": "Commit and save firewall configuration in one SSH session",
+                    "res": {"msg": "commit failed"},
+                },
+            },
+            {
+                "counter": 5,
+                "event": "playbook_on_stats",
+                "created": "2026-07-22T01:00:04+00:00",
+                "event_data": {},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_dir = Path(temp_dir) / "artifact"
+            event_dir = artifact_dir / "job_events"
+            event_dir.mkdir(parents=True)
+            for payload in payloads:
+                (event_dir / "{0}-event.json".format(payload["counter"])).write_text(
+                    json.dumps(payload),
+                    encoding="utf-8",
+                )
+
+            service = AnsibleRunnerService()
+            summary = service.read_events(artifact_dir)
+            detailed = service.read_events(artifact_dir, detailed=True)
+
+        self.assertEqual(len(summary), 3)
+        self.assertEqual(
+            [event["event"] for event in summary],
+            ["changed", "failed", "completed"],
+        )
+        self.assertEqual(summary[1]["message"], "commit failed")
+        self.assertEqual(len(detailed), len(payloads))
+
     def test_firewall_target_codes_are_normalized_and_validated(self) -> None:
         original_targets = settings.firewall_targets
         try:

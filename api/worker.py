@@ -83,21 +83,23 @@ class JobWorker:
                 target_codes,
                 str(job["local_tmp_dir"]),
             )
-            self.storage.update_job(
-                job_id,
-                {
-                    "status": JobStatus.prechecking.value,
-                    "runner_status": "prechecking",
-                    "runner_rc": None,
-                    "error_message": None,
-                    "finished_at": None,
-                    "next_attempt_at": None,
-                },
-            )
-            before_states, preflight_errors = self._preflight(job, target_codes)
-            if preflight_errors:
-                self._schedule_preflight_retry(job, preflight_errors)
-                return
+            before_states: dict[str, dict[str, Any]] = {}
+            if self._requires_baseline_query(job):
+                self.storage.update_job(
+                    job_id,
+                    {
+                        "status": JobStatus.prechecking.value,
+                        "runner_status": "initializing_baseline",
+                        "runner_rc": None,
+                        "error_message": None,
+                        "finished_at": None,
+                        "next_attempt_at": None,
+                    },
+                )
+                before_states, preflight_errors = self._preflight(job, target_codes)
+                if preflight_errors:
+                    self._schedule_preflight_retry(job, preflight_errors)
+                    return
 
             desired_state = self._resolve_desired_state(job, before_states)
             self.storage.update_job(
@@ -116,35 +118,54 @@ class JobWorker:
                     {"desired_state": desired_state},
                 )
 
-            target_results = self._execute_targets_parallel(
+            mutation_results = self._execute_targets_parallel(
                 job,
                 target_codes,
                 before_states,
                 desired_state,
             )
-            verified = [code for code, ok in target_results.items() if ok]
-            failed = [code for code, ok in target_results.items() if not ok]
-            if not failed:
-                final_status = JobStatus.successful.value
-                runner_status = "successful"
-                runner_rc = 0
-                error_message = None
-            else:
+            ready = [code for code, ok in mutation_results.items() if ok]
+            retryable = [code for code, ok in mutation_results.items() if not ok]
+            if retryable:
+                self._schedule_target_retry(job, ready, retryable)
+                return
+
+            self.storage.update_job(
+                job_id,
+                {
+                    "status": JobStatus.verifying.value,
+                    "runner_status": "verifying",
+                    "runner_rc": None,
+                    "error_message": None,
+                },
+            )
+            verification_results = self._verify_targets_parallel(
+                job,
+                target_codes,
+                desired_state,
+            )
+            verified = [code for code, ok in verification_results.items() if ok]
+            failed = [code for code, ok in verification_results.items() if not ok]
+            if failed:
                 self._schedule_target_retry(job, verified, failed)
                 return
 
             self.storage.update_job(
                 job_id,
                 {
-                    "status": final_status,
-                    "runner_status": runner_status,
-                    "runner_rc": runner_rc,
-                    "error_message": error_message,
+                    "status": JobStatus.successful.value,
+                    "runner_status": "successful",
+                    "runner_rc": 0,
+                    "error_message": None,
                     "finished_at": utc_now_iso(),
                     "next_attempt_at": None,
                 },
             )
-            logger.info("Finished job %s with status=%s.", job_id, final_status)
+            logger.info(
+                "Finished job %s with status=%s.",
+                job_id,
+                JobStatus.successful.value,
+            )
         except Exception as exc:
             self.storage.update_job(
                 job_id,
@@ -158,6 +179,18 @@ class JobWorker:
                 },
             )
             logger.exception("Job %s failed with an unexpected error.", job_id)
+
+    def _requires_baseline_query(self, job: dict[str, Any]) -> bool:
+        """Only query all firewalls when this IP has never had a desired baseline.
+
+        A resumed job already carries its immutable desired state.  A later job
+        can derive its next state from the desired-state ledger.  Re-querying all
+        firewalls before either case adds latency and, more importantly, turns a
+        retry into an unnecessary second precheck.
+        """
+        if job.get("desired_state"):
+            return False
+        return self.storage.get_desired_access_state(str(job["target_ip"])) is None
 
     def _preflight(
         self,
@@ -418,7 +451,7 @@ class JobWorker:
                     self._execute_target,
                     job,
                     code,
-                    before_states[code],
+                    before_states.get(code),
                     desired_state,
                 ): code
                 for code in target_codes
@@ -444,43 +477,33 @@ class JobWorker:
         self,
         job: dict[str, Any],
         firewall_code: str,
-        before_state: dict[str, Any],
+        before_state: dict[str, Any] | None,
         desired_state: dict[str, Any],
     ) -> bool:
         job_id = str(job["job_id"])
-        if self._state_matches(before_state, desired_state):
-            self.storage.update_job_target(
-                job_id,
-                firewall_code,
-                {
-                    "status": "verified",
-                    "runner_status": "already_converged",
-                    "runner_rc": 0,
-                    "before_state": before_state,
-                    "desired_state": desired_state,
-                    "observed_state": before_state,
-                    "error_message": None,
-                    "finished_at": utc_now_iso(),
-                },
-            )
+        previous = self.storage.get_job_target(job_id, firewall_code) or {}
+        if previous.get("status") in {"applied", "verifying", "verified"}:
             return True
 
         last_error: str | None = None
-        previous = self.storage.get_job_target(job_id, firewall_code) or {}
         previous_attempts = int(previous.get("attempt_count") or 0)
         if previous_attempts >= settings.firewall_child_max_attempts:
             self.storage.update_job_target(
                 job_id,
                 firewall_code,
                 {
-                    "status": "failed",
-                    "runner_status": "attempt_limit_reached",
+                    # A failed runner can still have changed the firewall before
+                    # a later CLI/commit step failed.  Verify once before the
+                    # parent declares the attempt exhausted.
+                    "status": "verifying",
+                    "runner_status": previous.get("runner_status")
+                    or "attempt_limit_reached",
                     "error_message": previous.get("error_message")
                     or "Firewall target attempt limit already reached.",
-                    "finished_at": utc_now_iso(),
+                    "finished_at": None,
                 },
             )
-            return False
+            return True
 
         attempt = previous_attempts + 1
         self.storage.start_job_target_attempt(
@@ -512,65 +535,136 @@ class JobWorker:
                     },
                 )
                 return False
+            attempts_exhausted = attempt >= settings.firewall_child_max_attempts
+            self.storage.update_job_target(
+                job_id,
+                firewall_code,
+                {
+                    "status": "verifying" if attempts_exhausted else "failed",
+                    "runner_status": result.status,
+                    "runner_rc": result.rc,
+                    "before_state": before_state,
+                    "desired_state": desired_state,
+                    "artifact_dir": result.artifact_dir,
+                    "error_message": last_error,
+                    "finished_at": None if attempts_exhausted else utc_now_iso(),
+                },
+            )
+            # Do not spend a full snapshot between idempotent mutation
+            # attempts.  Once the last runner attempt has finished, verify the
+            # real device state exactly once because a late CLI failure may
+            # still have left the requested configuration in place.
+            return attempts_exhausted
 
         self.storage.update_job_target(
             job_id,
             firewall_code,
             {
-                "status": "verifying",
+                "status": "applied",
                 "runner_status": result.status,
                 "runner_rc": result.rc,
+                "before_state": before_state,
+                "desired_state": desired_state,
                 "artifact_dir": result.artifact_dir,
-                "error_message": last_error,
+                "error_message": None,
+                "finished_at": None,
             },
         )
-        self.storage.mark_job_verifying_if_targets_ready(job_id)
+        return True
+
+    def _verify_targets_parallel(
+        self,
+        job: dict[str, Any],
+        target_codes: tuple[str, ...],
+        desired_state: dict[str, Any],
+    ) -> dict[str, bool]:
+        outcomes: dict[str, bool] = {}
+        worker_count = min(len(target_codes), settings.firewall_parallel_workers)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(
+                    self._verify_target,
+                    job,
+                    code,
+                    desired_state,
+                ): code
+                for code in target_codes
+            }
+            for future in as_completed(futures):
+                code = futures[future]
+                try:
+                    outcomes[code] = bool(future.result())
+                except Exception as exc:
+                    outcomes[code] = False
+                    self.storage.update_job_target(
+                        str(job["job_id"]),
+                        code,
+                        {
+                            "status": "failed",
+                            "runner_status": "verification_query_failed",
+                            "error_message": "Verification query failed: {0}".format(exc),
+                            "finished_at": utc_now_iso(),
+                        },
+                    )
+        return outcomes
+
+    def _verify_target(
+        self,
+        job: dict[str, Any],
+        firewall_code: str,
+        desired_state: dict[str, Any],
+    ) -> bool:
+        job_id = str(job["job_id"])
+        previous = self.storage.get_job_target(job_id, firewall_code) or {}
+        self.storage.update_job_target(
+            job_id,
+            firewall_code,
+            {
+                "status": "verifying",
+                "finished_at": None,
+            },
+        )
         try:
             observed_state, _ = self._query_target_state(job, firewall_code)
         except Exception as exc:
-            last_error = "Verification query failed: {0}".format(exc)
-            observed_state = None
+            self.storage.update_job_target(
+                job_id,
+                firewall_code,
+                {
+                    "status": "failed",
+                    "runner_status": "verification_query_failed",
+                    "error_message": "Verification query failed: {0}".format(exc),
+                    "finished_at": utc_now_iso(),
+                },
+            )
+            return False
 
-        if observed_state is not None and self._state_matches(
-            observed_state,
-            desired_state,
-        ):
+        if self._state_matches(observed_state, desired_state):
+            runner_status = str(previous.get("runner_status") or "successful")
+            runner_rc = int(previous.get("runner_rc") or 0)
+            if runner_rc != 0 or runner_status not in ("successful", "ok"):
+                runner_status = "verified_after_runner_failure"
             self.storage.update_job_target(
                 job_id,
                 firewall_code,
                 {
                     "status": "verified",
-                    "before_state": before_state,
-                    "desired_state": desired_state,
+                    "runner_status": runner_status,
                     "observed_state": observed_state,
-                    "artifact_dir": result.artifact_dir,
                     "error_message": None,
                     "finished_at": utc_now_iso(),
                 },
             )
             return True
 
-        if observed_state is not None:
-            if runner_failed:
-                verification_runner_status = result.status
-            else:
-                last_error = "Observed state does not match desired state."
-                verification_runner_status = "verification_failed"
-        else:
-            verification_runner_status = (
-                result.status if runner_failed else "verification_query_failed"
-            )
         self.storage.update_job_target(
             job_id,
             firewall_code,
             {
                 "status": "failed",
-                "runner_status": verification_runner_status,
+                "runner_status": "verification_failed",
                 "observed_state": observed_state,
-                "error_message": last_error,
-                # Keep mutation events available through the job-events API;
-                # verification details are already persisted as state/error.
-                "artifact_dir": result.artifact_dir,
+                "error_message": "Observed state does not match desired state.",
                 "finished_at": utc_now_iso(),
             },
         )

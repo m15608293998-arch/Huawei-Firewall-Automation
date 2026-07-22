@@ -20,6 +20,7 @@ class FakeRunner:
         verification_started=None,
         verification_release=None,
         failure_messages=None,
+        failed_after_apply_codes=None,
     ):
         self.states = {
             code: {
@@ -35,6 +36,7 @@ class FakeRunner:
         self.verification_started = verification_started
         self.verification_release = verification_release
         self.failure_messages = dict(failure_messages or {})
+        self.failed_after_apply_codes = set(failed_after_apply_codes or [])
         self.jobs = []
         self.snapshot_calls = []
         self.active_mutations = 0
@@ -54,7 +56,7 @@ class FakeRunner:
         try:
             if self.mutation_barrier is not None:
                 self.mutation_barrier.wait(timeout=2)
-            if code in self.failed_codes:
+            if code in self.failed_codes and code not in self.failed_after_apply_codes:
                 return RunnerResult(
                     status="failed",
                     rc=2,
@@ -91,6 +93,14 @@ class FakeRunner:
                     if action == "deny":
                         ports.clear()
                 state["ports"] = sorted(ports)
+
+            if code in self.failed_after_apply_codes:
+                return RunnerResult(
+                    status="failed",
+                    rc=2,
+                    artifact_dir="/tmp/artifacts/{0}/{1}".format(job["job_id"], code),
+                    error_message=self.failure_messages.get(code),
+                )
 
             return RunnerResult(
                 status="successful",
@@ -299,8 +309,8 @@ class WorkerTests(unittest.TestCase):
             target["firewall_code"]: target
             for target in self.storage.list_job_targets("job-1")
         }
-        self.assertEqual(targets["PG-FW"]["status"], "verified")
-        self.assertEqual(targets["PG-FW-1"]["status"], "verified")
+        self.assertEqual(targets["PG-FW"]["status"], "applied")
+        self.assertEqual(targets["PG-FW-1"]["status"], "applied")
         self.assertEqual(targets["IDC-FW"]["status"], "failed")
         self.assertEqual(targets["IDC-FW"]["attempt_count"], 1)
 
@@ -358,6 +368,70 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(runner.jobs), 2)
         self.assertFalse(worker.run_once())
         self.assertEqual(len(runner.jobs), 2)
+
+    def test_retry_with_existing_baseline_runs_one_final_snapshot_only(self) -> None:
+        self.create_job()
+        self.storage.save_desired_access_state(
+            target_ip="192.168.5.224",
+            ip_present=False,
+            ports=[],
+            source_job_id="baseline-import",
+            updated_at="2026-06-04T00:00:00+00:00",
+        )
+        runner = FakeRunner(
+            states={"TEST-FW": {"ip_present": False, "ports": []}},
+            failed_codes={"TEST-FW"},
+        )
+        worker = JobWorker(self.storage, runner)
+
+        self.assertTrue(worker.run_once())
+        self.assertEqual(self.storage.get_job("job-1")["status"], "reconciling")
+        self.assertEqual(runner.snapshot_calls, [])
+
+        runner.failed_codes.clear()
+        self.storage.update_job(
+            "job-1",
+            {"next_attempt_at": "2000-01-01T00:00:00+00:00"},
+        )
+        self.assertTrue(worker.run_once())
+
+        self.assertEqual(self.storage.get_job("job-1")["status"], "successful")
+        self.assertEqual(len(runner.jobs), 2)
+        self.assertEqual(runner.snapshot_calls, [("state", "TEST-FW")])
+
+    def test_final_state_can_verify_after_both_runner_attempts_fail_late(self) -> None:
+        self.create_job(action="allow_ip", ports=[])
+        self.storage.save_desired_access_state(
+            target_ip="192.168.5.224",
+            ip_present=False,
+            ports=[],
+            source_job_id="baseline-import",
+            updated_at="2026-06-04T00:00:00+00:00",
+        )
+        runner = FakeRunner(
+            states={"TEST-FW": {"ip_present": False, "ports": []}},
+            failed_codes={"TEST-FW"},
+            failed_after_apply_codes={"TEST-FW"},
+        )
+        worker = JobWorker(self.storage, runner)
+
+        self.assertTrue(worker.run_once())
+        self.assertEqual(self.storage.get_job("job-1")["status"], "reconciling")
+        self.assertEqual(runner.snapshot_calls, [])
+        self.storage.update_job(
+            "job-1",
+            {"next_attempt_at": "2000-01-01T00:00:00+00:00"},
+        )
+
+        self.assertTrue(worker.run_once())
+
+        parent = self.storage.get_job("job-1")
+        target = self.storage.list_job_targets("job-1")[0]
+        self.assertEqual(parent["status"], "successful")
+        self.assertEqual(target["status"], "verified")
+        self.assertEqual(target["runner_status"], "verified_after_runner_failure")
+        self.assertEqual(target["attempt_count"], 2)
+        self.assertEqual(runner.snapshot_calls, [("state", "TEST-FW")])
 
     def test_application_capacity_error_requires_manual_intervention_immediately(self) -> None:
         self.create_job()
@@ -445,6 +519,7 @@ class WorkerTests(unittest.TestCase):
             target_ip="192.168.5.225",
             created_at="2026-06-05T00:00:01+00:00",
         )
+        runner.failed_codes.clear()
 
         self.assertTrue(worker.run_once())
         self.assertEqual(self.storage.get_job("job-other-ip")["status"], "successful")
@@ -490,6 +565,23 @@ class WorkerTests(unittest.TestCase):
                 "state_version": desired["version"],
             },
         )
+        for code in ("PG-FW", "PG-FW-1"):
+            self.storage.update_job_target(
+                "job-1",
+                code,
+                {
+                    "status": "verified",
+                    "desired_state": {
+                        "ip_present": True,
+                        "ports": [12001],
+                        "version": desired["version"],
+                    },
+                    "observed_state": {
+                        "ip_present": True,
+                        "ports": [12001],
+                    },
+                },
+            )
         runner = FakeRunner(
             states={
                 "PG-FW": {"ip_present": True, "ports": [12001]},
@@ -515,8 +607,8 @@ class WorkerTests(unittest.TestCase):
             target["firewall_code"]: target
             for target in self.storage.list_job_targets("job-1")
         }
-        self.assertEqual(targets["PG-FW"]["runner_status"], "already_converged")
-        self.assertEqual(targets["PG-FW-1"]["runner_status"], "already_converged")
+        self.assertEqual(targets["PG-FW"]["status"], "verified")
+        self.assertEqual(targets["PG-FW-1"]["status"], "verified")
         self.assertEqual(targets["IDC-FW"]["status"], "verified")
 
     def test_empty_queue_returns_without_running_ansible(self) -> None:

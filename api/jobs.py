@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -12,6 +13,29 @@ from api.time_utils import utc_now_iso
 
 
 storage = JobStorage(settings.database_path)
+
+
+def _target_artifact_dirs(
+    job_id: str,
+    target: dict[str, Any],
+) -> list[object]:
+    """Return every retained mutation attempt, not only the latest artifact."""
+    artifact_value = target.get("artifact_dir")
+    if not artifact_value:
+        return [None]
+    artifact_path = Path(str(artifact_value))
+    candidates = {artifact_path}
+    parent = artifact_path.parent
+    prefix = "{0}-{1}-".format(job_id, target["firewall_code"])
+    try:
+        candidates.update(
+            candidate
+            for candidate in parent.iterdir()
+            if candidate.is_dir() and candidate.name.startswith(prefix)
+        )
+    except OSError:
+        pass
+    return sorted(candidates, key=lambda candidate: candidate.name)
 
 
 def create_job(
@@ -68,27 +92,42 @@ def get_job_or_404(job_id: str) -> dict[str, Any]:
     return job
 
 
-def get_job_events(job_id: str, principal: Principal) -> list[dict[str, object]]:
+def get_job_events(
+    job_id: str,
+    principal: Principal,
+    detailed: bool = False,
+) -> list[dict[str, object]]:
     job = get_job_or_404(job_id)
     authorize_job_read(principal, job)
     events: list[dict[str, object]] = []
     for target in job.get("target_results") or []:
-        for event in runner_service.read_events(target.get("artifact_dir")):
-            event["firewall_code"] = target["firewall_code"]
-            events.append(event)
+        for artifact_dir in _target_artifact_dirs(job_id, target):
+            for event in runner_service.read_events(
+                artifact_dir,
+                detailed=detailed,
+            ):
+                event["firewall_code"] = target["firewall_code"]
+                events.append(event)
     return sorted(
         events,
         key=lambda event: (str(event.get("created") or ""), int(event.get("counter") or 0)),
     )
 
 
-def get_admin_job_events(job_id: str) -> list[dict[str, object]]:
+def get_admin_job_events(
+    job_id: str,
+    detailed: bool = False,
+) -> list[dict[str, object]]:
     job = get_job_or_404(job_id)
     events: list[dict[str, object]] = []
     for target in job.get("target_results") or []:
-        for event in runner_service.read_events(target.get("artifact_dir")):
-            event["firewall_code"] = target["firewall_code"]
-            events.append(event)
+        for artifact_dir in _target_artifact_dirs(job_id, target):
+            for event in runner_service.read_events(
+                artifact_dir,
+                detailed=detailed,
+            ):
+                event["firewall_code"] = target["firewall_code"]
+                events.append(event)
     return sorted(
         events,
         key=lambda event: (str(event.get("created") or ""), int(event.get("counter") or 0)),

@@ -216,6 +216,7 @@ class JobEvent(BaseModel):
     counter: int | None = None
     event: str | None = None
     task: str | None = None
+    message: str | None = None
     created: str | None = None
 
 

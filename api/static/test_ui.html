@@ -90,6 +90,7 @@
     .job-target-heading strong { font-size: 13px; }
     .job-desired-state { color: var(--muted); font-size: 12px; }
     .job-target-results table { min-width: 720px; }
+    .job-event-results table { min-width: 780px; }
     .job-target-results th, .job-target-results td { padding: 11px 12px; }
     .target-state { color: #4b5563; font-size: 12px; white-space: nowrap; }
     .jobs table { min-width: 940px; }
@@ -154,9 +155,9 @@
     .status-pill { display: inline-flex; align-items: center; gap: 6px; color: var(--success); font-size: 12px; font-weight: 650; }
     .status-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
     .badge { display: inline-block; min-width: 78px; border-radius: 6px; padding: 3px 8px; text-align: center; background: #eceff2; color: #4b5563; font-size: 12px; font-weight: 650; }
-    .badge.successful, .badge.verified { background: #e8f7f0; color: var(--success); }
+    .badge.successful, .badge.verified, .badge.ok, .badge.changed, .badge.completed { background: #e8f7f0; color: var(--success); }
     .badge.failed, .badge.precheck_failed, .badge.canceled, .badge.manual_intervention_required { background: #feeceb; color: var(--danger); }
-    .badge.pending, .badge.running, .badge.prechecking, .badge.prechecked, .badge.applying, .badge.verifying, .badge.reconciling { background: #fff5d9; color: var(--warning); }
+    .badge.pending, .badge.running, .badge.prechecking, .badge.prechecked, .badge.applying, .badge.applied, .badge.verifying, .badge.reconciling { background: #fff5d9; color: var(--warning); }
     .table-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px 18px; border-top: 1px solid var(--line); }
     .pagination-meta { color: var(--muted); font-size: 12px; }
     .pagination-actions { display: inline-flex; align-items: center; gap: 8px; }
@@ -335,6 +336,18 @@
               <table>
                 <thead><tr><th>防火墙节点</th><th>子任务状态</th><th>尝试次数</th><th>实测状态</th><th>错误</th></tr></thead>
                 <tbody id="jobTargetRows"></tbody>
+              </table>
+            </div>
+          </div>
+          <div id="jobEventResults" class="job-target-results job-event-results hidden">
+            <div class="job-target-heading">
+              <strong>关键执行日志</strong>
+              <span class="job-desired-state">默认隐藏模板、变量、文件复制和 skipped 事件</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>时间</th><th>防火墙节点</th><th>结果</th><th>执行步骤</th><th>错误信息</th></tr></thead>
+                <tbody id="jobEventRows"></tbody>
               </table>
             </div>
           </div>
@@ -587,6 +600,8 @@
       jobTargetResults: document.querySelector("#jobTargetResults"),
       jobDesiredState: document.querySelector("#jobDesiredState"),
       jobTargetRows: document.querySelector("#jobTargetRows"),
+      jobEventResults: document.querySelector("#jobEventResults"),
+      jobEventRows: document.querySelector("#jobEventRows"),
       apiKeyRows: document.querySelector("#apiKeyRows"),
       emptyApiKeys: document.querySelector("#emptyApiKeys"),
       apiKeyListError: document.querySelector("#apiKeyListError"),
@@ -841,10 +856,11 @@
     function targetStatusLabel(status) {
       const labels = {
         pending: "等待执行",
-        prechecking: "预检查中",
-        prechecked: "预检查完成",
-        precheck_failed: "预检查失败",
+        prechecking: "首次基线初始化中",
+        prechecked: "基线初始化完成",
+        precheck_failed: "基线初始化失败",
         applying: "配置中",
+        applied: "配置完成，等待统一验证",
         verifying: "验证中",
         reconciling: "等待修复",
         verified: "已验证一致",
@@ -888,7 +904,7 @@
         : "";
       elements.jobDesiredState.textContent = (desiredState
         ? `期望状态 v${job.state_version || desiredState.version || "-"} · ${formatAccessState(desiredState)}`
-        : "预检查完成后生成统一业务期望状态") + retryText;
+        : "任务开始后写入统一业务期望状态；首次接管的 IP 会先初始化基线") + retryText;
       elements.jobTargetRows.replaceChildren();
       targetResults.forEach((target) => {
         const row = document.createElement("tr");
@@ -916,6 +932,51 @@
         elements.jobTargetRows.append(row);
       });
       elements.jobTargetResults.classList.remove("hidden");
+    }
+
+    function renderJobEvents(payload) {
+      const events = payload.events || [];
+      const eventLabels = {
+        ok: "完成",
+        changed: "已变更",
+        failed: "失败",
+        completed: "执行结束",
+      };
+      elements.jobEventRows.replaceChildren();
+      events.forEach((event) => {
+        const row = document.createElement("tr");
+        const timeCell = document.createElement("td");
+        timeCell.textContent = formatDateTime(event.created);
+        row.append(timeCell);
+
+        const firewallCell = document.createElement("td");
+        firewallCell.className = "mono";
+        firewallCell.textContent = event.firewall_code || "-";
+        row.append(firewallCell);
+
+        const statusCell = document.createElement("td");
+        appendStatusBadge(statusCell, event.event, eventLabels[event.event] || event.event || "-");
+        row.append(statusCell);
+
+        const taskCell = document.createElement("td");
+        taskCell.textContent = event.task || "-";
+        row.append(taskCell);
+
+        const messageCell = document.createElement("td");
+        messageCell.textContent = event.message || "-";
+        row.append(messageCell);
+        elements.jobEventRows.append(row);
+      });
+      if (!events.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 5;
+        cell.className = "empty";
+        cell.textContent = "当前任务没有关键执行事件";
+        row.append(cell);
+        elements.jobEventRows.append(row);
+      }
+      elements.jobEventResults.classList.remove("hidden");
     }
 
     function targetProgress(job) {
@@ -1254,7 +1315,9 @@
       if (!hasJobReadPermission()) throw new Error("当前账号没有任务查询权限");
       const jobId = document.querySelector("#jobId").value.trim();
       if (!jobId) throw new Error("请输入 Job ID");
-      return request(`/api/v1/trade-access/jobs/events/${encodeURIComponent(jobId)}`);
+      const data = await request(`/api/v1/trade-access/jobs/events/${encodeURIComponent(jobId)}`);
+      renderJobEvents(data);
+      return data;
     }
 
     async function listJobs(displayResponse = true, synchronizedJob = null) {

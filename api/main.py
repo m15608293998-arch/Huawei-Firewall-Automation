@@ -610,11 +610,12 @@ def get_trade_access_job(
 )
 def get_trade_access_job_events(
     job_id: str,
+    detail: str = Query(default="summary", pattern="^(summary|full)$"),
     principal: Principal = Depends(require_firewall_job_read),
 ):
     return {
         "job_id": job_id,
-        "events": get_job_events(job_id, principal),
+        "events": get_job_events(job_id, principal, detailed=detail == "full"),
     }
 
 
@@ -655,10 +656,11 @@ def get_any_trade_access_job(
 )
 def get_any_trade_access_job_events(
     job_id: str,
+    detail: str = Query(default="summary", pattern="^(summary|full)$"),
     principal: Principal = Depends(require_firewall_job_audit),
 ):
     del principal
     return {
         "job_id": job_id,
-        "events": get_admin_job_events(job_id),
+        "events": get_admin_job_events(job_id, detailed=detail == "full"),
     }

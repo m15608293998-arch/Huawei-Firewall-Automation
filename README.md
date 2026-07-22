@@ -414,14 +414,20 @@ curl \
 curl \
   -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
   http://127.0.0.1:8000/api/v1/trade-access/jobs/events/<JOB_ID>
+
+# 仅在深度排障时读取完整 Ansible 原始事件
+curl \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  'http://127.0.0.1:8000/api/v1/trade-access/jobs/events/<JOB_ID>?detail=full'
 ```
 
 任务详情的 `desired_state` 是该 IP 的完整业务期望状态，`target_results` 是逐台
 防火墙的变更前、期望和实测结果。只有全部子任务实时校验一致，父任务才是
-`successful`；部分成功或预检暂时失败时保持 `reconciling`，到
-`next_attempt_at` 进入下一轮，只对未收敛节点执行配置。等待期间其他 IP 的任务可以
-继续执行，同一 IP 的后续任务保持顺序。普通用户只能读取自己的任务，管理员可读取
-全部任务。
+`successful`。已有期望基线的任务和所有重试均跳过预检；普通 runner 失败时不做
+中间完整查询，到 `next_attempt_at` 只重试失败节点。所有节点执行结束后统一做一轮
+最终验证。等待期间其他 IP 的任务可以继续执行，同一 IP 的后续任务保持顺序。
+事件接口默认返回关键业务步骤摘要，`detail=full` 才返回全部 Ansible 事件。普通用户
+只能读取自己的任务，管理员可读取全部任务。
 
 ## 8. 查询与一致性检查
 

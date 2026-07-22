@@ -14,6 +14,24 @@ from api.config import settings
 from api.time_utils import utc_now_iso
 
 
+SUMMARY_EVENT_TASK_MARKERS = (
+    "Query address-set member before",
+    "Add target IP to address-set",
+    "Remove target IP from address-set",
+    "Validate target IP exists",
+    "Validate target IP removed",
+    "Query application inventory for target IP",
+    "Query applications belonging to target IP",
+    "Apply incremental application port changes",
+    "Remove user-defined application and application group member",
+    "Validate incremental application state",
+    "Validate application removed",
+    "Reject IP deny while ports still exist",
+    "Commit and save firewall configuration",
+    "Report unchanged firewall state",
+)
+
+
 @dataclass(frozen=True)
 class RunnerResult:
     status: str
@@ -744,7 +762,11 @@ class AnsibleRunnerService:
             return {"ip": ip_value}
         return {"ip": ip_value, "port": port}
 
-    def read_events(self, artifact_dir: object) -> list[dict[str, object]]:
+    def read_events(
+        self,
+        artifact_dir: object,
+        detailed: bool = False,
+    ) -> list[dict[str, object]]:
         if not artifact_dir:
             return []
 
@@ -769,14 +791,41 @@ class AnsibleRunnerService:
                 continue
 
             event_data = payload.get("event_data") or {}
-            events.append(
-                {
-                    "counter": payload.get("counter", event_counter(event_file)),
-                    "event": payload.get("event"),
-                    "task": event_data.get("task"),
-                    "created": payload.get("created"),
-                }
-            )
+            event_name = str(payload.get("event") or "")
+            task_name = event_data.get("task")
+            event = {
+                "counter": payload.get("counter", event_counter(event_file)),
+                "event": event_name or None,
+                "task": task_name,
+                "created": payload.get("created"),
+            }
+            if detailed:
+                events.append(event)
+                continue
+
+            if event_name in {
+                "runner_on_failed",
+                "runner_on_unreachable",
+                "runner_on_async_failed",
+            }:
+                event["event"] = "failed"
+                event["message"] = self._failure_message_from_event(payload)
+                events.append(event)
+                continue
+
+            if event_name == "playbook_on_stats":
+                event["event"] = "completed"
+                event["task"] = "Ansible execution completed"
+                events.append(event)
+                continue
+
+            if event_name != "runner_on_ok" or not isinstance(task_name, str):
+                continue
+            if not any(marker in task_name for marker in SUMMARY_EVENT_TASK_MARKERS):
+                continue
+            result = event_data.get("res") or {}
+            event["event"] = "changed" if bool(result.get("changed")) else "ok"
+            events.append(event)
 
         return events
 

@@ -387,6 +387,8 @@ curl -sS \
   http://192.168.6.38:8000/api/v1/trade-access/jobs/events/<job_id>
 ```
 
+默认只返回关键业务事件；完整 Ansible 原始事件在 URL 后追加 `?detail=full`。
+
 ## 8. 当前 API 接口
 
 ### 8.1 公共和登录辅助接口
@@ -435,14 +437,17 @@ curl -sS \
 API 完成参数与权限检查后，把任务写入 SQLite 并返回 `202 Accepted`：
 
 ```text
-pending -> running -> successful
-             |-----> reconciling --(到点重试)--> running
-             `-----> failed
+pending -> [prechecking] -> applying -> verifying -> successful
+                           |     ^          |
+                           v     |          `-> failed
+                      reconciling
 ```
 
 `canceled` 当前仅作为预留状态，尚未提供任务取消接口。单 Worker 每轮只执行一个父任务；
 失败任务写入 `next_attempt_at` 后释放队列。调度器跳过尚未到点的修复任务，并阻止同一 IP
-的后续任务越过它，不同 IP 的变更仍可继续执行。
+的后续任务越过它，不同 IP 的变更仍可继续执行。`prechecking` 仅用于首次建立未知 IP
+基线；已有基线和重试任务直接进入配置阶段。普通 runner 失败不触发中间完整查询，
+所有节点执行结束后统一进行一轮最终验证。
 
 统一启动命令：
 

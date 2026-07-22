@@ -650,7 +650,7 @@ class ApiTests(unittest.TestCase):
     def test_user_and_admin_event_endpoints(self) -> None:
         job = self.create_job()
         original_read_events = jobs_module.runner_service.read_events
-        jobs_module.runner_service.read_events = lambda artifact_dir: [
+        jobs_module.runner_service.read_events = lambda artifact_dir, detailed=False: [
             {
                 "counter": 1,
                 "event": "runner_on_ok",
