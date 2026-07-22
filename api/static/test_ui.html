@@ -862,7 +862,7 @@
         applying: "配置中",
         applied: "配置完成，等待统一验证",
         verifying: "验证中",
-        reconciling: "等待修复",
+        reconciling: "修复重试中",
         verified: "已验证一致",
         failed: "执行失败",
         manual_intervention_required: "需人工处理",
@@ -900,7 +900,7 @@
 
       const desiredState = job.desired_state;
       const retryText = job.next_attempt_at
-        ? ` · 下轮修复 ${formatDateTime(job.next_attempt_at)}`
+        ? ` · 计划重试 ${formatDateTime(job.next_attempt_at)}`
         : "";
       elements.jobDesiredState.textContent = (desiredState
         ? `期望状态 v${job.state_version || desiredState.version || "-"} · ${formatAccessState(desiredState)}`

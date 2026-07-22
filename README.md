@@ -148,8 +148,8 @@ trade_access_api:
   firewall_parallel_workers: 3
   # 整个父任务生命周期内，每个防火墙子任务累计最多执行 2 次。
   firewall_child_max_attempts: 2
-  # 第一次可恢复失败后等待 30 秒，再执行最后一次重试。
-  firewall_reconcile_retry_seconds: 30
+  # 第一次可恢复配置失败后，在父任务内短暂退避再只重试失败节点。
+  firewall_reconcile_retry_seconds: 3
 
 default_firewall_code: "TEST-FW"
 firewall_profiles:
@@ -424,8 +424,8 @@ curl \
 任务详情的 `desired_state` 是该 IP 的完整业务期望状态，`target_results` 是逐台
 防火墙的变更前、期望和实测结果。只有全部子任务实时校验一致，父任务才是
 `successful`。已有期望基线的任务和所有重试均跳过预检；普通 runner 失败时不做
-中间完整查询，到 `next_attempt_at` 只重试失败节点。所有节点执行结束后统一做一轮
-最终验证。等待期间其他 IP 的任务可以继续执行，同一 IP 的后续任务保持顺序。
+中间完整查询，父任务内部短暂退避后只重试失败节点。所有节点执行结束后统一做一轮
+最终验证；当前父任务终止前，后来的任务不会插入这次修复过程。
 事件接口默认返回关键业务步骤摘要，`detail=full` 才返回全部 Ansible 事件。普通用户
 只能读取自己的任务，管理员可读取全部任务。
 

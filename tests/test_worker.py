@@ -21,6 +21,7 @@ class FakeRunner:
         verification_release=None,
         failure_messages=None,
         failed_after_apply_codes=None,
+        failure_counts=None,
     ):
         self.states = {
             code: {
@@ -37,6 +38,10 @@ class FakeRunner:
         self.verification_release = verification_release
         self.failure_messages = dict(failure_messages or {})
         self.failed_after_apply_codes = set(failed_after_apply_codes or [])
+        self.remaining_failures = {
+            str(code): int(count)
+            for code, count in (failure_counts or {}).items()
+        }
         self.jobs = []
         self.snapshot_calls = []
         self.active_mutations = 0
@@ -56,7 +61,16 @@ class FakeRunner:
         try:
             if self.mutation_barrier is not None:
                 self.mutation_barrier.wait(timeout=2)
-            if code in self.failed_codes and code not in self.failed_after_apply_codes:
+            with self._lock:
+                remaining_failures = self.remaining_failures.get(code, 0)
+                if remaining_failures > 0:
+                    self.remaining_failures[code] = remaining_failures - 1
+                should_fail = (
+                    code in self.failed_codes
+                    or code in self.failed_after_apply_codes
+                    or remaining_failures > 0
+                )
+            if should_fail and code not in self.failed_after_apply_codes:
                 return RunnerResult(
                     status="failed",
                     rc=2,
@@ -94,7 +108,7 @@ class FakeRunner:
                         ports.clear()
                 state["ports"] = sorted(ports)
 
-            if code in self.failed_after_apply_codes:
+            if should_fail and code in self.failed_after_apply_codes:
                 return RunnerResult(
                     status="failed",
                     rc=2,
@@ -158,13 +172,22 @@ class WorkerTests(unittest.TestCase):
         self.original_retry_seconds = settings.firewall_reconcile_retry_seconds
         settings.firewall_parallel_workers = 3
         settings.firewall_child_max_attempts = 2
-        settings.firewall_reconcile_retry_seconds = 30
+        settings.firewall_reconcile_retry_seconds = 3
 
     def tearDown(self) -> None:
         settings.firewall_parallel_workers = self.original_parallel_workers
         settings.firewall_child_max_attempts = self.original_max_attempts
         settings.firewall_reconcile_retry_seconds = self.original_retry_seconds
         self.temp_dir.cleanup()
+
+    def make_worker(self, runner, retry_waiter=None) -> JobWorker:
+        if retry_waiter is None:
+            retry_waiter = lambda _: None
+        return JobWorker(
+            self.storage,
+            runner,
+            retry_waiter=retry_waiter,
+        )
 
     def create_job(
         self,
@@ -212,7 +235,7 @@ class WorkerTests(unittest.TestCase):
         runner = FakeRunner(
             states={"TEST-FW": {"ip_present": False, "ports": []}},
         )
-        worker = JobWorker(self.storage, runner)
+        worker = self.make_worker(runner)
 
         self.assertTrue(worker.run_once())
 
@@ -250,7 +273,7 @@ class WorkerTests(unittest.TestCase):
             mutation_barrier=threading.Barrier(len(codes)),
         )
 
-        self.assertTrue(JobWorker(self.storage, runner).run_once())
+        self.assertTrue(self.make_worker(runner).run_once())
 
         job = self.storage.get_job("job-1")
         self.assertEqual(job["status"], "successful")
@@ -269,7 +292,7 @@ class WorkerTests(unittest.TestCase):
             verification_started=verification_started,
             verification_release=verification_release,
         )
-        worker = JobWorker(self.storage, runner)
+        worker = self.make_worker(runner)
         worker_thread = threading.Thread(target=worker.run_once)
         worker_thread.start()
         try:
@@ -286,7 +309,7 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(worker_thread.is_alive())
         self.assertEqual(self.storage.get_job("job-1")["status"], "successful")
 
-    def test_partial_target_failure_is_rescheduled_until_all_targets_verify(self) -> None:
+    def test_partial_target_failure_retries_inside_same_parent(self) -> None:
         codes = ("PG-FW", "PG-FW-1", "IDC-FW")
         self.create_job(firewall_targets=codes)
         runner = FakeRunner(
@@ -294,45 +317,30 @@ class WorkerTests(unittest.TestCase):
                 code: {"ip_present": False, "ports": []}
                 for code in codes
             },
-            failed_codes={"IDC-FW"},
+            failure_counts={"IDC-FW": 1},
         )
+        retry_delays = []
+        worker = self.make_worker(runner, retry_delays.append)
 
-        self.assertTrue(JobWorker(self.storage, runner).run_once())
+        self.assertTrue(worker.run_once())
 
         job = self.storage.get_job("job-1")
-        self.assertEqual(job["status"], "reconciling")
-        self.assertEqual(job["runner_status"], "partially_successful_retry_scheduled")
-        self.assertIn("IDC-FW", job["error_message"])
-        self.assertIsNotNone(job["next_attempt_at"])
-        self.assertIsNone(job["finished_at"])
+        self.assertEqual(job["status"], "successful")
+        self.assertEqual(job["runner_status"], "successful")
+        self.assertIsNone(job["next_attempt_at"])
+        self.assertIsNotNone(job["finished_at"])
+        self.assertEqual(retry_delays, [3.0])
         targets = {
             target["firewall_code"]: target
             for target in self.storage.list_job_targets("job-1")
         }
-        self.assertEqual(targets["PG-FW"]["status"], "applied")
-        self.assertEqual(targets["PG-FW-1"]["status"], "applied")
-        self.assertEqual(targets["IDC-FW"]["status"], "failed")
-        self.assertEqual(targets["IDC-FW"]["attempt_count"], 1)
-
-        runner.failed_codes.clear()
-        self.storage.update_job(
-            "job-1",
-            {"next_attempt_at": "2000-01-01T00:00:00+00:00"},
-        )
-        self.assertTrue(JobWorker(self.storage, runner).run_once())
-
-        repaired = self.storage.get_job("job-1")
-        self.assertEqual(repaired["status"], "successful")
-        self.assertIsNone(repaired["next_attempt_at"])
-        repaired_targets = {
-            target["firewall_code"]: target
-            for target in self.storage.list_job_targets("job-1")
-        }
         self.assertEqual(
-            {target["status"] for target in repaired_targets.values()},
+            {target["status"] for target in targets.values()},
             {"verified"},
         )
-        self.assertEqual(repaired_targets["IDC-FW"]["attempt_count"], 2)
+        self.assertEqual(targets["PG-FW"]["attempt_count"], 1)
+        self.assertEqual(targets["PG-FW-1"]["attempt_count"], 1)
+        self.assertEqual(targets["IDC-FW"]["attempt_count"], 2)
         mutation_codes = [code for _, code in runner.jobs]
         self.assertEqual(mutation_codes.count("PG-FW"), 1)
         self.assertEqual(mutation_codes.count("PG-FW-1"), 1)
@@ -344,17 +352,9 @@ class WorkerTests(unittest.TestCase):
             states={"TEST-FW": {"ip_present": False, "ports": []}},
             failed_codes={"TEST-FW"},
         )
-        worker = JobWorker(self.storage, runner)
+        retry_delays = []
+        worker = self.make_worker(runner, retry_delays.append)
 
-        self.assertTrue(worker.run_once())
-        first = self.storage.get_job("job-1")
-        self.assertEqual(first["status"], "reconciling")
-        self.assertEqual(self.storage.list_job_targets("job-1")[0]["attempt_count"], 1)
-
-        self.storage.update_job(
-            "job-1",
-            {"next_attempt_at": "2000-01-01T00:00:00+00:00"},
-        )
         self.assertTrue(worker.run_once())
 
         final = self.storage.get_job("job-1")
@@ -366,6 +366,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(target["status"], "failed")
         self.assertEqual(target["attempt_count"], 2)
         self.assertEqual(len(runner.jobs), 2)
+        self.assertEqual(retry_delays, [3.0])
         self.assertFalse(worker.run_once())
         self.assertEqual(len(runner.jobs), 2)
 
@@ -380,23 +381,16 @@ class WorkerTests(unittest.TestCase):
         )
         runner = FakeRunner(
             states={"TEST-FW": {"ip_present": False, "ports": []}},
-            failed_codes={"TEST-FW"},
+            failure_counts={"TEST-FW": 1},
         )
-        worker = JobWorker(self.storage, runner)
+        retry_delays = []
+        worker = self.make_worker(runner, retry_delays.append)
 
-        self.assertTrue(worker.run_once())
-        self.assertEqual(self.storage.get_job("job-1")["status"], "reconciling")
-        self.assertEqual(runner.snapshot_calls, [])
-
-        runner.failed_codes.clear()
-        self.storage.update_job(
-            "job-1",
-            {"next_attempt_at": "2000-01-01T00:00:00+00:00"},
-        )
         self.assertTrue(worker.run_once())
 
         self.assertEqual(self.storage.get_job("job-1")["status"], "successful")
         self.assertEqual(len(runner.jobs), 2)
+        self.assertEqual(retry_delays, [3.0])
         self.assertEqual(runner.snapshot_calls, [("state", "TEST-FW")])
 
     def test_final_state_can_verify_after_both_runner_attempts_fail_late(self) -> None:
@@ -413,15 +407,8 @@ class WorkerTests(unittest.TestCase):
             failed_codes={"TEST-FW"},
             failed_after_apply_codes={"TEST-FW"},
         )
-        worker = JobWorker(self.storage, runner)
-
-        self.assertTrue(worker.run_once())
-        self.assertEqual(self.storage.get_job("job-1")["status"], "reconciling")
-        self.assertEqual(runner.snapshot_calls, [])
-        self.storage.update_job(
-            "job-1",
-            {"next_attempt_at": "2000-01-01T00:00:00+00:00"},
-        )
+        retry_delays = []
+        worker = self.make_worker(runner, retry_delays.append)
 
         self.assertTrue(worker.run_once())
 
@@ -431,6 +418,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(target["status"], "verified")
         self.assertEqual(target["runner_status"], "verified_after_runner_failure")
         self.assertEqual(target["attempt_count"], 2)
+        self.assertEqual(retry_delays, [3.0])
         self.assertEqual(runner.snapshot_calls, [("state", "TEST-FW")])
 
     def test_application_capacity_error_requires_manual_intervention_immediately(self) -> None:
@@ -444,7 +432,7 @@ class WorkerTests(unittest.TestCase):
             failed_codes={"TEST-FW"},
             failure_messages={"TEST-FW": capacity_error},
         )
-        worker = JobWorker(self.storage, runner)
+        worker = self.make_worker(runner)
 
         self.assertTrue(worker.run_once())
 
@@ -470,7 +458,7 @@ class WorkerTests(unittest.TestCase):
             no_op_codes={"TEST-FW"},
         )
 
-        self.assertTrue(JobWorker(self.storage, runner).run_once())
+        self.assertTrue(self.make_worker(runner).run_once())
 
         job = self.storage.get_job("job-1")
         self.assertEqual(job["status"], "failed")
@@ -492,7 +480,7 @@ class WorkerTests(unittest.TestCase):
             snapshot_failed_codes={"IDC-FW"},
         )
 
-        self.assertTrue(JobWorker(self.storage, runner).run_once())
+        self.assertTrue(self.make_worker(runner).run_once())
 
         job = self.storage.get_job("job-1")
         self.assertEqual(job["status"], "reconciling")
@@ -500,17 +488,9 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNotNone(job["next_attempt_at"])
         self.assertEqual(runner.jobs, [])
 
-    def test_reconciliation_wait_allows_a_different_ip_parent_to_run(self) -> None:
+    def test_internal_retry_finishes_before_a_different_ip_parent_can_run(self) -> None:
         codes = ("PG-FW", "PG-FW-1", "IDC-FW")
         self.create_job(job_id="job-retry", firewall_targets=codes)
-        runner = FakeRunner(
-            states={code: {"ip_present": False, "ports": []} for code in codes},
-            failed_codes={"IDC-FW"},
-        )
-        worker = JobWorker(self.storage, runner)
-
-        self.assertTrue(worker.run_once())
-        self.assertEqual(self.storage.get_job("job-retry")["status"], "reconciling")
         self.create_job(
             job_id="job-other-ip",
             firewall_targets=codes,
@@ -519,11 +499,39 @@ class WorkerTests(unittest.TestCase):
             target_ip="192.168.5.225",
             created_at="2026-06-05T00:00:01+00:00",
         )
-        runner.failed_codes.clear()
+        runner = FakeRunner(
+            states={code: {"ip_present": False, "ports": []} for code in codes},
+            failure_counts={"IDC-FW": 1},
+        )
+        retry_started = threading.Event()
+        retry_release = threading.Event()
 
+        def wait_for_retry(_seconds):
+            retry_started.set()
+            retry_release.wait(timeout=2)
+
+        worker = self.make_worker(runner, wait_for_retry)
+        worker_thread = threading.Thread(target=worker.run_once)
+        worker_thread.start()
+        try:
+            self.assertTrue(retry_started.wait(timeout=2))
+            retrying = self.storage.get_job("job-retry")
+            self.assertEqual(retrying["status"], "reconciling")
+            self.assertEqual(
+                retrying["runner_status"],
+                "partially_successful_retrying",
+            )
+            self.assertIsNone(retrying["next_attempt_at"])
+            self.assertEqual(self.storage.get_job("job-other-ip")["status"], "pending")
+        finally:
+            retry_release.set()
+            worker_thread.join(timeout=2)
+
+        self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(self.storage.get_job("job-retry")["status"], "successful")
+        self.assertEqual(self.storage.get_job("job-other-ip")["status"], "pending")
         self.assertTrue(worker.run_once())
         self.assertEqual(self.storage.get_job("job-other-ip")["status"], "successful")
-        self.assertEqual(self.storage.get_job("job-retry")["status"], "reconciling")
 
     def test_preflight_rejects_drift_without_a_desired_state_baseline(self) -> None:
         codes = ("PG-FW", "IDC-FW")
@@ -535,7 +543,7 @@ class WorkerTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(JobWorker(self.storage, runner).run_once())
+        self.assertTrue(self.make_worker(runner).run_once())
 
         job = self.storage.get_job("job-1")
         self.assertEqual(job["status"], "failed")
@@ -590,7 +598,7 @@ class WorkerTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(JobWorker(self.storage, runner).run_once())
+        self.assertTrue(self.make_worker(runner).run_once())
 
         job = self.storage.get_job("job-1")
         self.assertEqual(job["status"], "successful")
@@ -613,7 +621,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_empty_queue_returns_without_running_ansible(self) -> None:
         runner = FakeRunner()
-        worker = JobWorker(self.storage, runner)
+        worker = self.make_worker(runner)
 
         self.assertFalse(worker.run_once())
         self.assertEqual(runner.jobs, [])

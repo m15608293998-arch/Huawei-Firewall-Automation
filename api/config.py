@@ -24,7 +24,7 @@ def load_firewall_orchestration_defaults(
         "firewall_targets": "TEST-FW",
         "firewall_parallel_workers": 3,
         "firewall_child_max_attempts": 2,
-        "firewall_reconcile_retry_seconds": 30,
+        "firewall_reconcile_retry_seconds": 3,
     }
     if not config_path.exists():
         return defaults

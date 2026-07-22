@@ -3,6 +3,8 @@ import fcntl
 import logging
 import signal
 import threading
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from typing import Any
@@ -30,15 +32,17 @@ class JobWorker:
         storage: JobStorage,
         runner: AnsibleRunnerService,
         poll_interval: float = 0.5,
+        retry_waiter: Callable[[float], None] | None = None,
     ) -> None:
         self.storage = storage
         self.runner = runner
         self.poll_interval = poll_interval
+        self.retry_waiter = retry_waiter or time.sleep
 
     def run_once(self) -> bool:
-        # One parent execution cycle is serialized so an all-node query never
-        # observes the middle of a three-firewall mutation. A failed cycle is
-        # rescheduled with backoff and releases this lock before another IP runs.
+        # One parent execution is serialized so an all-node query never observes
+        # the middle of a three-firewall mutation.  A recoverable child failure
+        # is retried inside this boundary before another parent can overtake it.
         with self._parent_orchestration_lock():
             job = self.storage.claim_next_runnable_job(utc_now_iso())
             if job is None:
@@ -118,37 +122,45 @@ class JobWorker:
                     {"desired_state": desired_state},
                 )
 
-            mutation_results = self._execute_targets_parallel(
-                job,
-                target_codes,
-                before_states,
-                desired_state,
-            )
-            ready = [code for code, ok in mutation_results.items() if ok]
-            retryable = [code for code, ok in mutation_results.items() if not ok]
-            if retryable:
-                self._schedule_target_retry(job, ready, retryable)
-                return
+            while True:
+                mutation_results = self._execute_targets_parallel(
+                    job,
+                    target_codes,
+                    before_states,
+                    desired_state,
+                )
+                ready = [code for code, ok in mutation_results.items() if ok]
+                retryable = [code for code, ok in mutation_results.items() if not ok]
+                if retryable:
+                    if self._prepare_internal_target_retry(job, ready, retryable):
+                        continue
+                    return
 
-            self.storage.update_job(
-                job_id,
-                {
-                    "status": JobStatus.verifying.value,
-                    "runner_status": "verifying",
-                    "runner_rc": None,
-                    "error_message": None,
-                },
-            )
-            verification_results = self._verify_targets_parallel(
-                job,
-                target_codes,
-                desired_state,
-            )
-            verified = [code for code, ok in verification_results.items() if ok]
-            failed = [code for code, ok in verification_results.items() if not ok]
-            if failed:
-                self._schedule_target_retry(job, verified, failed)
-                return
+                self.storage.update_job(
+                    job_id,
+                    {
+                        "status": JobStatus.verifying.value,
+                        "runner_status": "verifying",
+                        "runner_rc": None,
+                        "error_message": None,
+                    },
+                )
+                verification_results = self._verify_targets_parallel(
+                    job,
+                    target_codes,
+                    desired_state,
+                )
+                verified = [
+                    code for code, ok in verification_results.items() if ok
+                ]
+                failed = [
+                    code for code, ok in verification_results.items() if not ok
+                ]
+                if failed:
+                    if self._prepare_internal_target_retry(job, verified, failed):
+                        continue
+                    return
+                break
 
             self.storage.update_job(
                 job_id,
@@ -259,12 +271,12 @@ class JobWorker:
             },
         )
 
-    def _schedule_target_retry(
+    def _prepare_internal_target_retry(
         self,
         job: dict[str, Any],
-        verified: list[str],
+        completed: list[str],
         failed: list[str],
-    ) -> None:
+    ) -> bool:
         job_id = str(job["job_id"])
         targets = {
             str(target["firewall_code"]): target
@@ -301,7 +313,7 @@ class JobWorker:
                     "next_attempt_at": None,
                 },
             )
-            return
+            return False
 
         exhausted_targets = [
             code
@@ -315,7 +327,7 @@ class JobWorker:
                 {
                     "status": JobStatus.failed.value,
                     "runner_status": "attempt_limit_reached",
-                    "runner_rc": 2 if verified else 1,
+                    "runner_rc": 2 if completed else 1,
                     "error_message": (
                         "Firewall target attempt limit reached (maximum {0}): {1}. "
                         "Automatic retries stopped; manual repair is required."
@@ -327,18 +339,18 @@ class JobWorker:
                     "next_attempt_at": None,
                 },
             )
-            return
+            return False
 
-        if verified:
-            runner_status = "partially_successful_retry_scheduled"
+        if completed:
+            runner_status = "partially_successful_retrying"
             runner_rc = 2
-            message = "Firewall targets still differ from desired state: {0}".format(
-                ", ".join(failed)
+            message = "Retrying failed firewall targets inside this parent: {0}".format(
+                ", ".join(sorted(failed))
             )
         else:
-            runner_status = "retry_scheduled"
+            runner_status = "retrying"
             runner_rc = 1
-            message = "No firewall target reached the desired state; retry scheduled."
+            message = "Retrying all failed firewall targets inside this parent."
         self.storage.update_job(
             job_id,
             {
@@ -347,11 +359,18 @@ class JobWorker:
                 "runner_rc": runner_rc,
                 "error_message": message,
                 "finished_at": None,
-                "next_attempt_at": utc_after_iso(
-                    settings.firewall_reconcile_retry_seconds
-                ),
+                "next_attempt_at": None,
             },
         )
+        retry_delay = float(settings.firewall_reconcile_retry_seconds)
+        logger.info(
+            "Job %s will retry targets %s after %.1f seconds inside the parent.",
+            job_id,
+            ",".join(sorted(failed)),
+            retry_delay,
+        )
+        self.retry_waiter(retry_delay)
+        return True
 
     def _build_desired_state(
         self,
