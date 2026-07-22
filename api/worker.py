@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
+MANUAL_INTERVENTION_ERROR_MARKERS = (
+    "user-defined applications reached the upper limit",
+    "no more user-defined applications can be created",
+)
+
+
 class JobWorker:
     def __init__(
         self,
@@ -226,6 +232,70 @@ class JobWorker:
         verified: list[str],
         failed: list[str],
     ) -> None:
+        job_id = str(job["job_id"])
+        targets = {
+            str(target["firewall_code"]): target
+            for target in self.storage.list_job_targets(job_id)
+        }
+        manual_targets = [
+            code
+            for code in failed
+            if targets.get(code, {}).get("status")
+            == JobStatus.manual_intervention_required.value
+        ]
+        if manual_targets:
+            details = "; ".join(
+                "{0}: {1}".format(
+                    code,
+                    targets[code].get("error_message") or "manual repair required",
+                )
+                for code in manual_targets
+            )
+            self.storage.update_job(
+                job_id,
+                {
+                    "status": JobStatus.manual_intervention_required.value,
+                    "runner_status": "manual_intervention_required",
+                    "runner_rc": max(
+                        int(targets[code].get("runner_rc") or 1)
+                        for code in manual_targets
+                    ),
+                    "error_message": (
+                        "Automatic retries stopped because manual intervention is "
+                        "required: {0}"
+                    ).format(details),
+                    "finished_at": utc_now_iso(),
+                    "next_attempt_at": None,
+                },
+            )
+            return
+
+        exhausted_targets = [
+            code
+            for code in failed
+            if int(targets.get(code, {}).get("attempt_count") or 0)
+            >= settings.firewall_child_max_attempts
+        ]
+        if exhausted_targets:
+            self.storage.update_job(
+                job_id,
+                {
+                    "status": JobStatus.failed.value,
+                    "runner_status": "attempt_limit_reached",
+                    "runner_rc": 2 if verified else 1,
+                    "error_message": (
+                        "Firewall target attempt limit reached (maximum {0}): {1}. "
+                        "Automatic retries stopped; manual repair is required."
+                    ).format(
+                        settings.firewall_child_max_attempts,
+                        ", ".join(exhausted_targets),
+                    ),
+                    "finished_at": utc_now_iso(),
+                    "next_attempt_at": None,
+                },
+            )
+            return
+
         if verified:
             runner_status = "partially_successful_retry_scheduled"
             runner_rc = 2
@@ -237,7 +307,7 @@ class JobWorker:
             runner_rc = 1
             message = "No firewall target reached the desired state; retry scheduled."
         self.storage.update_job(
-            str(job["job_id"]),
+            job_id,
             {
                 "status": JobStatus.reconciling.value,
                 "runner_status": runner_status,
@@ -398,96 +468,118 @@ class JobWorker:
         last_error: str | None = None
         previous = self.storage.get_job_target(job_id, firewall_code) or {}
         previous_attempts = int(previous.get("attempt_count") or 0)
-        for attempt_offset in range(1, settings.firewall_child_max_attempts + 1):
-            attempt = previous_attempts + attempt_offset
-            self.storage.start_job_target_attempt(
-                job_id,
-                firewall_code,
-                "applying" if attempt == 1 else "reconciling",
-                attempt,
-                utc_now_iso(),
-            )
-            result: RunnerResult = self.runner.run_trade_access(job, firewall_code)
-            last_error = result.error_message
-            if result.rc != 0 or result.status not in ("successful", "ok"):
-                last_error = last_error or "ansible-runner status={0}, rc={1}".format(
-                    result.status,
-                    result.rc,
-                )
+        if previous_attempts >= settings.firewall_child_max_attempts:
             self.storage.update_job_target(
                 job_id,
                 firewall_code,
                 {
-                    "status": "verifying",
-                    "runner_status": result.status,
-                    "runner_rc": result.rc,
-                    "artifact_dir": result.artifact_dir,
-                    "error_message": last_error,
+                    "status": "failed",
+                    "runner_status": "attempt_limit_reached",
+                    "error_message": previous.get("error_message")
+                    or "Firewall target attempt limit already reached.",
+                    "finished_at": utc_now_iso(),
                 },
             )
-            self.storage.mark_job_verifying_if_targets_ready(job_id)
-            try:
-                observed_state, _ = self._query_target_state(job, firewall_code)
-            except Exception as exc:
-                last_error = "Verification query failed: {0}".format(exc)
-                observed_state = None
+            return False
 
-            if observed_state is not None and self._state_matches(
-                observed_state,
-                desired_state,
-            ):
+        attempt = previous_attempts + 1
+        self.storage.start_job_target_attempt(
+            job_id,
+            firewall_code,
+            "applying" if attempt == 1 else "reconciling",
+            attempt,
+            utc_now_iso(),
+        )
+        result: RunnerResult = self.runner.run_trade_access(job, firewall_code)
+        runner_failed = result.rc != 0 or result.status not in ("successful", "ok")
+        last_error = result.error_message
+        if runner_failed:
+            last_error = last_error or "ansible-runner status={0}, rc={1}".format(
+                result.status,
+                result.rc,
+            )
+            if self._requires_manual_intervention(last_error):
                 self.storage.update_job_target(
                     job_id,
                     firewall_code,
                     {
-                        "status": "verified",
-                        "before_state": before_state,
-                        "desired_state": desired_state,
-                        "observed_state": observed_state,
+                        "status": JobStatus.manual_intervention_required.value,
+                        "runner_status": "manual_intervention_required",
+                        "runner_rc": result.rc,
                         "artifact_dir": result.artifact_dir,
-                        "error_message": None,
+                        "error_message": last_error,
                         "finished_at": utc_now_iso(),
                     },
                 )
-                return True
-
-            if observed_state is not None:
-                last_error = "Observed state does not match desired state."
-                verification_runner_status = (
-                    "verification_failed"
-                    if result.rc == 0 and result.status in ("successful", "ok")
-                    else result.status
-                )
-            else:
-                verification_runner_status = (
-                    "verification_query_failed"
-                    if result.rc == 0 and result.status in ("successful", "ok")
-                    else result.status
-                )
-            self.storage.update_job_target(
-                job_id,
-                firewall_code,
-                {
-                    "status": "reconciling",
-                    "runner_status": verification_runner_status,
-                    "observed_state": observed_state,
-                    "error_message": last_error,
-                    # Keep mutation events available through the job-events API;
-                    # verification details are already persisted as state/error.
-                    "artifact_dir": result.artifact_dir,
-                },
-            )
+                return False
 
         self.storage.update_job_target(
             job_id,
             firewall_code,
             {
+                "status": "verifying",
+                "runner_status": result.status,
+                "runner_rc": result.rc,
+                "artifact_dir": result.artifact_dir,
+                "error_message": last_error,
+            },
+        )
+        self.storage.mark_job_verifying_if_targets_ready(job_id)
+        try:
+            observed_state, _ = self._query_target_state(job, firewall_code)
+        except Exception as exc:
+            last_error = "Verification query failed: {0}".format(exc)
+            observed_state = None
+
+        if observed_state is not None and self._state_matches(
+            observed_state,
+            desired_state,
+        ):
+            self.storage.update_job_target(
+                job_id,
+                firewall_code,
+                {
+                    "status": "verified",
+                    "before_state": before_state,
+                    "desired_state": desired_state,
+                    "observed_state": observed_state,
+                    "artifact_dir": result.artifact_dir,
+                    "error_message": None,
+                    "finished_at": utc_now_iso(),
+                },
+            )
+            return True
+
+        if observed_state is not None:
+            if runner_failed:
+                verification_runner_status = result.status
+            else:
+                last_error = "Observed state does not match desired state."
+                verification_runner_status = "verification_failed"
+        else:
+            verification_runner_status = (
+                result.status if runner_failed else "verification_query_failed"
+            )
+        self.storage.update_job_target(
+            job_id,
+            firewall_code,
+            {
                 "status": "failed",
-                "error_message": last_error or "Target did not reach desired state.",
+                "runner_status": verification_runner_status,
+                "observed_state": observed_state,
+                "error_message": last_error,
+                # Keep mutation events available through the job-events API;
+                # verification details are already persisted as state/error.
+                "artifact_dir": result.artifact_dir,
                 "finished_at": utc_now_iso(),
             },
         )
         return False
+
+    @staticmethod
+    def _requires_manual_intervention(error_message: str | None) -> bool:
+        normalized = (error_message or "").casefold()
+        return any(marker in normalized for marker in MANUAL_INTERVENTION_ERROR_MARKERS)
 
     def _query_target_state(
         self,

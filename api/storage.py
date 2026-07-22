@@ -628,6 +628,7 @@ class JobStorage:
                 conn.execute(
                     "update job_firewall_targets "
                     "set status = ?, attempt_count = ?, started_at = ?, "
+                    "finished_at = null, runner_status = null, runner_rc = null, "
                     "error_message = null "
                     "where job_id = ? and firewall_code = ?",
                     (status, attempt_count, started_at, job_id, firewall_code),

@@ -244,7 +244,17 @@ class StorageQueueTests(unittest.TestCase):
             "/tmp/jobs/job-1",
         )
         self.storage.update_job("job-1", {"status": "applying"})
-        self.storage.update_job_target("job-1", "PG-FW", {"status": "verifying"})
+        self.storage.update_job_target(
+            "job-1",
+            "PG-FW",
+            {
+                "status": "verifying",
+                "runner_status": "failed",
+                "runner_rc": 2,
+                "error_message": "old failure",
+                "finished_at": "2026-06-05T00:00:30+00:00",
+            },
+        )
 
         self.assertFalse(self.storage.mark_job_verifying_if_targets_ready("job-1"))
         self.assertEqual(self.storage.get_job("job-1")["status"], "applying")
@@ -277,6 +287,10 @@ class StorageQueueTests(unittest.TestCase):
         self.assertEqual(job["runner_status"], "applying")
         self.assertEqual(job["target_results"][0]["status"], "reconciling")
         self.assertEqual(job["target_results"][0]["attempt_count"], 2)
+        self.assertIsNone(job["target_results"][0]["runner_status"])
+        self.assertIsNone(job["target_results"][0]["runner_rc"])
+        self.assertIsNone(job["target_results"][0]["error_message"])
+        self.assertIsNone(job["target_results"][0]["finished_at"])
 
     def test_two_storage_instances_cannot_claim_same_job(self) -> None:
         self.create_job("job-1", "2026-06-05T00:00:00+00:00")

@@ -65,6 +65,30 @@ class AnsibleRunnerService:
         # required because child jobs execute concurrently.
         return settings.runner_private_data_dir / firewall_code
 
+    @staticmethod
+    def _failure_message_from_event(event: dict[str, Any]) -> str | None:
+        if event.get("event") not in {
+            "runner_on_failed",
+            "runner_on_unreachable",
+            "runner_on_async_failed",
+        }:
+            return None
+        event_data = event.get("event_data")
+        if not isinstance(event_data, dict):
+            return None
+        result = event_data.get("res")
+        if not isinstance(result, dict):
+            return None
+        for key in ("stderr", "msg", "stdout"):
+            value = result.get(key)
+            if not isinstance(value, str):
+                continue
+            for line in value.splitlines():
+                message = line.strip()
+                if message:
+                    return message[:2000]
+        return None
+
     @contextmanager
     def _isolated_private_data_dir(
         self,
@@ -116,6 +140,13 @@ class AnsibleRunnerService:
         )
         local_tmp_dir.mkdir(parents=True, exist_ok=True)
         ident = "{0}-{1}-{2}".format(job_id, target_code, uuid.uuid4().hex[:8])
+        failure_messages: list[str] = []
+
+        def capture_failure(event: dict[str, Any]) -> bool:
+            message = self._failure_message_from_event(event)
+            if message:
+                failure_messages.append(message)
+            return True
 
         # API 只组装业务请求，真正的华为设备操作仍交给原 playbook/role 链路。
         extravars = {
@@ -155,6 +186,7 @@ class AnsibleRunnerService:
                         suppress_env_files=True,
                         rotate_artifacts=20,
                         quiet=True,
+                        event_handler=capture_failure,
                     )
         except Exception as exc:
             return RunnerResult(
@@ -164,11 +196,13 @@ class AnsibleRunnerService:
                 error_message=str(exc),
             )
 
+        status = getattr(result, "status", "unknown")
+        rc = int(getattr(result, "rc", 1) or 0)
         return RunnerResult(
-            status=getattr(result, "status", "unknown"),
-            rc=int(getattr(result, "rc", 1) or 0),
+            status=status,
+            rc=rc,
             artifact_dir=str(artifact_root / ident),
-            error_message=None,
+            error_message=failure_messages[-1] if rc != 0 and failure_messages else None,
         )
 
     def run_firewall_snapshot(

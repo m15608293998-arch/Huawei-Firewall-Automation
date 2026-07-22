@@ -578,6 +578,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"selectedJobId", response.body)
         self.assertIn(b"listJobs(false, job)", response.body)
         self.assertIn(b"getJob().then(followJob)", response.body)
+        self.assertIn("需人工处理".encode("utf-8"), response.body)
         self.assertIn("多防火墙执行结果".encode("utf-8"), response.body)
         self.assertIn("人工纠错建议".encode("utf-8"), response.body)
         self.assertNotIn(b"/api/v1/trade-access/ip/allow", response.body)

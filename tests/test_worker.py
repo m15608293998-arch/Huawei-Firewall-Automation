@@ -19,6 +19,7 @@ class FakeRunner:
         mutation_barrier=None,
         verification_started=None,
         verification_release=None,
+        failure_messages=None,
     ):
         self.states = {
             code: {
@@ -33,6 +34,7 @@ class FakeRunner:
         self.mutation_barrier = mutation_barrier
         self.verification_started = verification_started
         self.verification_release = verification_release
+        self.failure_messages = dict(failure_messages or {})
         self.jobs = []
         self.snapshot_calls = []
         self.active_mutations = 0
@@ -57,6 +59,7 @@ class FakeRunner:
                     status="failed",
                     rc=2,
                     artifact_dir="/tmp/artifacts/{0}/{1}".format(job["job_id"], code),
+                    error_message=self.failure_messages.get(code),
                 )
 
             if code in self.no_op_codes:
@@ -299,7 +302,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(targets["PG-FW"]["status"], "verified")
         self.assertEqual(targets["PG-FW-1"]["status"], "verified")
         self.assertEqual(targets["IDC-FW"]["status"], "failed")
-        self.assertEqual(targets["IDC-FW"]["attempt_count"], 2)
+        self.assertEqual(targets["IDC-FW"]["attempt_count"], 1)
 
         runner.failed_codes.clear()
         self.storage.update_job(
@@ -319,11 +322,71 @@ class WorkerTests(unittest.TestCase):
             {target["status"] for target in repaired_targets.values()},
             {"verified"},
         )
-        self.assertEqual(repaired_targets["IDC-FW"]["attempt_count"], 3)
+        self.assertEqual(repaired_targets["IDC-FW"]["attempt_count"], 2)
         mutation_codes = [code for _, code in runner.jobs]
         self.assertEqual(mutation_codes.count("PG-FW"), 1)
         self.assertEqual(mutation_codes.count("PG-FW-1"), 1)
-        self.assertEqual(mutation_codes.count("IDC-FW"), 3)
+        self.assertEqual(mutation_codes.count("IDC-FW"), 2)
+
+    def test_retryable_failure_stops_after_two_total_attempts(self) -> None:
+        self.create_job()
+        runner = FakeRunner(
+            states={"TEST-FW": {"ip_present": False, "ports": []}},
+            failed_codes={"TEST-FW"},
+        )
+        worker = JobWorker(self.storage, runner)
+
+        self.assertTrue(worker.run_once())
+        first = self.storage.get_job("job-1")
+        self.assertEqual(first["status"], "reconciling")
+        self.assertEqual(self.storage.list_job_targets("job-1")[0]["attempt_count"], 1)
+
+        self.storage.update_job(
+            "job-1",
+            {"next_attempt_at": "2000-01-01T00:00:00+00:00"},
+        )
+        self.assertTrue(worker.run_once())
+
+        final = self.storage.get_job("job-1")
+        target = self.storage.list_job_targets("job-1")[0]
+        self.assertEqual(final["status"], "failed")
+        self.assertEqual(final["runner_status"], "attempt_limit_reached")
+        self.assertIsNone(final["next_attempt_at"])
+        self.assertIsNotNone(final["finished_at"])
+        self.assertEqual(target["status"], "failed")
+        self.assertEqual(target["attempt_count"], 2)
+        self.assertEqual(len(runner.jobs), 2)
+        self.assertFalse(worker.run_once())
+        self.assertEqual(len(runner.jobs), 2)
+
+    def test_application_capacity_error_requires_manual_intervention_immediately(self) -> None:
+        self.create_job()
+        capacity_error = (
+            "Error: The number of user-defined applications reached the upper limit. "
+            "No more user-defined applications can be created."
+        )
+        runner = FakeRunner(
+            states={"TEST-FW": {"ip_present": False, "ports": []}},
+            failed_codes={"TEST-FW"},
+            failure_messages={"TEST-FW": capacity_error},
+        )
+        worker = JobWorker(self.storage, runner)
+
+        self.assertTrue(worker.run_once())
+
+        parent = self.storage.get_job("job-1")
+        target = self.storage.list_job_targets("job-1")[0]
+        self.assertEqual(parent["status"], "manual_intervention_required")
+        self.assertEqual(parent["runner_status"], "manual_intervention_required")
+        self.assertIn("upper limit", parent["error_message"])
+        self.assertIsNone(parent["next_attempt_at"])
+        self.assertIsNotNone(parent["finished_at"])
+        self.assertEqual(target["status"], "manual_intervention_required")
+        self.assertEqual(target["runner_status"], "manual_intervention_required")
+        self.assertEqual(target["attempt_count"], 1)
+        self.assertEqual(target["error_message"], capacity_error)
+        self.assertEqual(len(runner.jobs), 1)
+        self.assertFalse(worker.run_once())
 
     def test_runner_success_without_verified_state_is_not_reported_as_success(self) -> None:
         settings.firewall_child_max_attempts = 1
@@ -336,7 +399,8 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(JobWorker(self.storage, runner).run_once())
 
         job = self.storage.get_job("job-1")
-        self.assertEqual(job["status"], "reconciling")
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["runner_status"], "attempt_limit_reached")
         target = self.storage.list_job_targets("job-1")[0]
         self.assertEqual(target["status"], "failed")
         self.assertEqual(target["runner_status"], "verification_failed")

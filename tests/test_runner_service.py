@@ -86,6 +86,54 @@ class RunnerServiceTests(unittest.TestCase):
         self.assertNotIn("application_ports", captured_calls[1]["extravars"])
         self.assertEqual(captured_calls[2]["extravars"]["application_ports"], [12001])
 
+    def test_trade_access_failure_returns_device_error_from_runner_event(self) -> None:
+        capacity_error = (
+            "Error: The number of user-defined applications reached the upper limit. "
+            "No more user-defined applications can be created."
+        )
+
+        def fake_run(**kwargs):
+            self.assertIn("event_handler", kwargs)
+            kwargs["event_handler"](
+                {
+                    "event": "runner_on_failed",
+                    "event_data": {
+                        "res": {
+                            "stderr": capacity_error + "\nCollected output follows.",
+                            "msg": "non-zero return code",
+                        }
+                    },
+                }
+            )
+            return types.SimpleNamespace(status="failed", rc=2)
+
+        fake_runner = types.SimpleNamespace(run=fake_run)
+        original_private_data_dir = settings.runner_private_data_dir
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings.runner_private_data_dir = Path(temp_dir) / "runner"
+            try:
+                with patch.dict(sys.modules, {"ansible_runner": fake_runner}):
+                    result = AnsibleRunnerService().run_trade_access(
+                        {
+                            "job_id": "capacity-job",
+                            "action": "allow_ports",
+                            "target_ip": "192.168.5.224",
+                            "mask": 32,
+                            "ports": [12001],
+                            "principal_subject": "employee-a",
+                            "description": None,
+                            "local_tmp_dir": str(Path(temp_dir) / "capacity-job"),
+                        },
+                        "TEST-FW",
+                    )
+            finally:
+                settings.runner_private_data_dir = original_private_data_dir
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.rc, 2)
+        self.assertEqual(result.error_message, capacity_error)
+
     def test_snapshot_mode_is_passed_to_ansible(self) -> None:
         captured_calls = []
 

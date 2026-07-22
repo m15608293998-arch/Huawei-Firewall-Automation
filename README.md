@@ -146,7 +146,9 @@ trade_access_api:
   firewall_targets:
     - "TEST-FW"
   firewall_parallel_workers: 3
+  # 整个父任务生命周期内，每个防火墙子任务累计最多执行 2 次。
   firewall_child_max_attempts: 2
+  # 第一次可恢复失败后等待 30 秒，再执行最后一次重试。
   firewall_reconcile_retry_seconds: 30
 
 default_firewall_code: "TEST-FW"
