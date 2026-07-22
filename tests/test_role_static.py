@@ -7,9 +7,26 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def load_commented_production_config() -> dict:
+    source = (PROJECT_ROOT / "group_vars/all.yml").read_text(encoding="utf-8")
+    block = source.split("# BEGIN_PRODUCTION_CONFIG", 1)[1].split(
+        "# END_PRODUCTION_CONFIG",
+        1,
+    )[0]
+    yaml_lines = []
+    for line in block.splitlines():
+        if line == "#":
+            yaml_lines.append("")
+        elif line.startswith("# "):
+            yaml_lines.append(line[2:])
+    return yaml.safe_load("\n".join(yaml_lines))
+
+
 class RoleStaticTests(unittest.TestCase):
-    def test_production_resource_names_and_application_capacity(self) -> None:
-        config = yaml.safe_load((PROJECT_ROOT / "group_vars/all.yml").read_text())
+    def test_test_profile_and_application_capacity(self) -> None:
+        source = (PROJECT_ROOT / "group_vars/all.yml").read_text(encoding="utf-8")
+        config = yaml.safe_load(source)
+        test_profile = config["firewall_profiles"]["TEST-FW"]
 
         self.assertEqual(config["trade_access_api"]["firewall_targets"], ["TEST-FW"])
         self.assertEqual(config["trade_access_api"]["firewall_parallel_workers"], 3)
@@ -18,40 +35,33 @@ class RoleStaticTests(unittest.TestCase):
         self.assertTrue(config["commit_security_engine"])
         self.assertTrue(config["save_config"])
         self.assertEqual(
-            [context["name"] for context in config["address_vsystems"]],
+            [context["name"] for context in test_profile["address_vsystems"]],
             ["public", "Internet", "private"],
         )
         self.assertEqual(
             {
                 context["address_set_name"]
-                for context in config["address_vsystems"]
+                for context in test_profile["address_vsystems"]
             },
             {"TraderServers-DirectAccess-IPs"},
         )
-        self.assertEqual(config["application_vsystem"], "private")
+        self.assertEqual(test_profile["application_vsystem"], "private")
         self.assertEqual(
-            config["user_defined_application"]["name_prefix"],
+            test_profile["user_defined_application"]["name_prefix"],
             "UD_TServe_",
         )
         self.assertEqual(
-            config["user_defined_application"]["application_group_name"],
+            test_profile["user_defined_application"]["application_group_name"],
             "UDG_TradeServers",
         )
         self.assertEqual(config["rule_port_limit"], 4)
         self.assertEqual(config["application_rule_limit"], 8)
         self.assertEqual(config["default_firewall_code"], "TEST-FW")
-        self.assertEqual(
-            config["firewall_profiles"]["TEST-FW"]["address_vsystems"],
-            config["address_vsystems"],
-        )
+        self.assertNotIn("&test_", source)
+        self.assertNotIn("*test_", source)
 
     def test_production_firewall_profiles_match_required_vsystem_topology(self) -> None:
-        config = yaml.safe_load(
-            (
-                PROJECT_ROOT
-                / "docs/examples/firewall_profiles.production.yml"
-            ).read_text()
-        )
+        config = load_commented_production_config()
         profiles = config["firewall_profiles"]
 
         self.assertEqual(
@@ -80,19 +90,50 @@ class RoleStaticTests(unittest.TestCase):
             ["private", "Internet"],
         )
         self.assertEqual(profiles["IDC-FW"]["application_vsystem"], "private")
-        expected_environment_names = {
-            "PG-FW": "PG_FW",
-            "PG-FW-1": "PG_FW_1",
-            "IDC-FW": "IDC_FW",
+        expected_device_values = {
+            "PG-FW": ("<PG_FW_MGMT_IP>", "<PG_FW_USER>", "<PG_FW_PASSWORD>"),
+            "PG-FW-1": (
+                "<PG_FW_1_MGMT_IP>",
+                "<PG_FW_1_USER>",
+                "<PG_FW_1_PASSWORD>",
+            ),
+            "IDC-FW": ("<IDC_FW_MGMT_IP>", "<IDC_FW_USER>", "<IDC_FW_PASSWORD>"),
         }
-        for firewall_code, environment_prefix in expected_environment_names.items():
+        for firewall_code, expected_values in expected_device_values.items():
             device = profiles[firewall_code]["firewall_device"]
-            self.assertIn(environment_prefix + "_DEVICE_HOST", device["device_host"])
-            self.assertIn(environment_prefix + "_DEVICE_USER", device["device_user"])
-            self.assertIn(
-                environment_prefix + "_DEVICE_PASSWORD",
-                device["device_password"],
+            self.assertEqual(
+                (device["device_host"], device["device_user"], device["device_password"]),
+                expected_values,
             )
+
+    def test_production_environment_template_excludes_firewall_connections(self) -> None:
+        environment_template = (
+            PROJECT_ROOT / "config/production/trade-access.env.example"
+        ).read_text(encoding="utf-8")
+        for variable_name in (
+            "PG_FW_DEVICE_HOST",
+            "PG_FW_DEVICE_USER",
+            "PG_FW_DEVICE_PASSWORD",
+            "PG_FW_1_DEVICE_HOST",
+            "PG_FW_1_DEVICE_USER",
+            "PG_FW_1_DEVICE_PASSWORD",
+            "IDC_FW_DEVICE_HOST",
+            "IDC_FW_DEVICE_USER",
+            "IDC_FW_DEVICE_PASSWORD",
+        ):
+            self.assertNotIn(variable_name + "=", environment_template)
+
+        self.assertIn("TRADE_ACCESS_API_AUTH_ENABLED=true", environment_template)
+        self.assertIn("TRADE_ACCESS_API_KEYCLOAK_SERVER_URL=", environment_template)
+        self.assertNotIn("TRADE_ACCESS_API_FIREWALL_TARGETS=", environment_template)
+        self.assertNotIn(
+            "TRADE_ACCESS_API_FIREWALL_PARALLEL_WORKERS=",
+            environment_template,
+        )
+        self.assertNotIn(
+            "TRADE_ACCESS_API_FIREWALL_CHILD_MAX_ATTEMPTS=",
+            environment_template,
+        )
 
     def test_application_upper_limit_error_is_not_whitelisted(self) -> None:
         application_yml = (

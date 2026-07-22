@@ -152,10 +152,10 @@ default_firewall_code: "TEST-FW"
 firewall_profiles:
   TEST-FW:
     firewall_device:
-      device_host: "{{ lookup('env', 'TEST_FW_DEVICE_HOST') }}"
-      device_user: "{{ lookup('env', 'TEST_FW_DEVICE_USER') }}"
+      device_host: "<FIREWALL_MGMT_IP>"
+      device_user: "<FIREWALL_USER>"
       auth_type: "password"
-      device_password: "{{ lookup('env', 'TEST_FW_DEVICE_PASSWORD') }}"
+      device_password: "<FIREWALL_PASSWORD>"
     address_vsystems:
       - name: "public"
         address_set_name: "TraderServers-DirectAccess-IPs"
@@ -177,9 +177,8 @@ firewall_profiles:
 ```
 
 `trade_access_api` 会被 API 和 worker 直接读取；同名的
-`TRADE_ACCESS_API_FIREWALL_*` 环境变量只作为兼容覆盖项。设备密码不要明文写入
-`all.yml`，而是在运行环境文件中提供 `TEST_FW_DEVICE_HOST`、
-`TEST_FW_DEVICE_USER` 和 `TEST_FW_DEVICE_PASSWORD`。
+`TRADE_ACCESS_API_FIREWALL_*` 环境变量只作为兼容覆盖项。设备管理 IP、用户名和
+密码都直接填写在对应 profile 的 `firewall_device` 中。
 
 也可以将配置档中的设备认证改为 SSH 私钥：
 
@@ -194,28 +193,15 @@ firewall_profiles:
 ```
 
 私钥必须对运行 API 的账号可读，建议权限设为 `0600`。密码和私钥配置二选一。
-生产三台防火墙的完整拓扑模板在：
+同一个 `group_vars/all.yml` 文件末尾已经注释保存了完整生产配置：
 
 ```text
-docs/examples/firewall_profiles.production.yml
+BEGIN_PRODUCTION_CONFIG ... END_PRODUCTION_CONFIG
 ```
 
-生产运行环境文件需要分别提供三组连接信息，模板中的三个 profile 会按变量名精确
-引用，不会串用：
-
-```env
-PG_FW_DEVICE_HOST=<PG-FW管理IP>
-PG_FW_DEVICE_USER=<PG-FW用户名>
-PG_FW_DEVICE_PASSWORD='<PG-FW密码>'
-
-PG_FW_1_DEVICE_HOST=<PG-FW-1管理IP>
-PG_FW_1_DEVICE_USER=<PG-FW-1用户名>
-PG_FW_1_DEVICE_PASSWORD='<PG-FW-1密码>'
-
-IDC_FW_DEVICE_HOST=<IDC-FW管理IP>
-IDC_FW_DEVICE_USER=<IDC-FW用户名>
-IDC_FW_DEVICE_PASSWORD='<IDC-FW密码>'
-```
+生产启用时删除或注释上面的 TEST-FW 配置，将该生产区块整体取消注释，并直接填写
+PG-FW、PG-FW-1、IDC-FW 各自的 `device_host`、`device_user` 和
+`device_password`。生产区块完整展开，不使用 `&/*`，也不使用环境变量引用。
 
 生产拓扑为：
 
@@ -259,10 +245,6 @@ TRADE_ACCESS_API_JOB_TMP_ROOT=.runtime/jobs
 
 # 防火墙目标、并发数和重试次数统一配置在 group_vars/all.yml 的
 # trade_access_api 中，不需要在这里重复配置。
-
-TEST_FW_DEVICE_HOST=<TEST-FW管理IP>
-TEST_FW_DEVICE_USER=<TEST-FW用户名>
-TEST_FW_DEVICE_PASSWORD='<TEST-FW密码>'
 
 TRADE_ACCESS_API_KEYCLOAK_SERVER_URL=http://<KEYCLOAK_HOST>:8080
 TRADE_ACCESS_API_KEYCLOAK_REALM=trade-access
