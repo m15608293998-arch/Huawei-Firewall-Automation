@@ -23,6 +23,22 @@ def load_commented_production_config() -> dict:
 
 
 class RoleStaticTests(unittest.TestCase):
+    def test_role_uses_explicit_workflow_mode(self) -> None:
+        main_yml = (
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("firewall_workflow_mode_resolved", main_yml)
+        self.assertIn("if access_request is defined", main_yml)
+        self.assertIn(
+            "when: firewall_workflow_mode_resolved == 'snapshot'",
+            main_yml,
+        )
+        self.assertIn(
+            "when: firewall_workflow_mode_resolved == 'access'",
+            main_yml,
+        )
+
     def test_test_profile_and_application_capacity(self) -> None:
         source = (PROJECT_ROOT / "group_vars/all.yml").read_text(encoding="utf-8")
         config = yaml.safe_load(source)

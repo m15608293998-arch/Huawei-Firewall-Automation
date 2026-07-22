@@ -14,6 +14,7 @@ class FakeRunner:
         self,
         states=None,
         failed_codes=None,
+        no_op_codes=None,
         snapshot_failed_codes=None,
         mutation_barrier=None,
     ):
@@ -25,6 +26,7 @@ class FakeRunner:
             for code, state in (states or {}).items()
         }
         self.failed_codes = set(failed_codes or [])
+        self.no_op_codes = set(no_op_codes or [])
         self.snapshot_failed_codes = set(snapshot_failed_codes or [])
         self.mutation_barrier = mutation_barrier
         self.jobs = []
@@ -50,6 +52,13 @@ class FakeRunner:
                 return RunnerResult(
                     status="failed",
                     rc=2,
+                    artifact_dir="/tmp/artifacts/{0}/{1}".format(job["job_id"], code),
+                )
+
+            if code in self.no_op_codes:
+                return RunnerResult(
+                    status="successful",
+                    rc=0,
                     artifact_dir="/tmp/artifacts/{0}/{1}".format(job["job_id"], code),
                 )
 
@@ -279,6 +288,27 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(mutation_codes.count("PG-FW"), 1)
         self.assertEqual(mutation_codes.count("PG-FW-1"), 1)
         self.assertEqual(mutation_codes.count("IDC-FW"), 3)
+
+    def test_runner_success_without_verified_state_is_not_reported_as_success(self) -> None:
+        settings.firewall_child_max_attempts = 1
+        self.create_job()
+        runner = FakeRunner(
+            states={"TEST-FW": {"ip_present": False, "ports": []}},
+            no_op_codes={"TEST-FW"},
+        )
+
+        self.assertTrue(JobWorker(self.storage, runner).run_once())
+
+        job = self.storage.get_job("job-1")
+        self.assertEqual(job["status"], "reconciling")
+        target = self.storage.list_job_targets("job-1")[0]
+        self.assertEqual(target["status"], "failed")
+        self.assertEqual(target["runner_status"], "verification_failed")
+        self.assertEqual(target["runner_rc"], 0)
+        self.assertEqual(
+            target["error_message"],
+            "Observed state does not match desired state.",
+        )
 
     def test_preflight_failure_stops_before_any_mutation(self) -> None:
         codes = ("PG-FW", "IDC-FW")

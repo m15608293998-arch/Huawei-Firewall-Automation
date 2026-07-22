@@ -454,11 +454,23 @@ class JobWorker:
 
             if observed_state is not None:
                 last_error = "Observed state does not match desired state."
+                verification_runner_status = (
+                    "verification_failed"
+                    if result.rc == 0 and result.status in ("successful", "ok")
+                    else result.status
+                )
+            else:
+                verification_runner_status = (
+                    "verification_query_failed"
+                    if result.rc == 0 and result.status in ("successful", "ok")
+                    else result.status
+                )
             self.storage.update_job_target(
                 job_id,
                 firewall_code,
                 {
                     "status": "reconciling",
+                    "runner_status": verification_runner_status,
                     "observed_state": observed_state,
                     "error_message": last_error,
                     # Keep mutation events available through the job-events API;

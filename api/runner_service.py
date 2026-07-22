@@ -1,5 +1,6 @@
 import json
 import sys
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -64,6 +65,26 @@ class AnsibleRunnerService:
         # required because child jobs execute concurrently.
         return settings.runner_private_data_dir / firewall_code
 
+    @contextmanager
+    def _isolated_private_data_dir(
+        self,
+        firewall_runner_dir: Path,
+        ident: str,
+    ):
+        """Keep runner env files isolated to one invocation.
+
+        ansible-runner automatically reuses ``env/extravars`` when the same
+        private data directory is used again.  Snapshot variables such as
+        ``snapshot_mode`` must never leak into a later access mutation.
+        """
+        run_root = firewall_runner_dir / "runs"
+        run_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="{0}-".format(ident),
+            dir=str(run_root),
+        ) as private_data_dir:
+            yield Path(private_data_dir)
+
     def run_trade_access(
         self,
         job: dict[str, Any],
@@ -82,8 +103,9 @@ class AnsibleRunnerService:
 
         project_root = settings.project_root
         playbook = str(project_root / settings.playbook_path)
-        private_data_dir = self._private_data_dir(target_code)
-        private_data_dir.mkdir(parents=True, exist_ok=True)
+        firewall_runner_dir = self._private_data_dir(target_code)
+        firewall_runner_dir.mkdir(parents=True, exist_ok=True)
+        artifact_root = firewall_runner_dir / "artifacts"
 
         job_id = str(job["job_id"])
         local_tmp_dir = Path(
@@ -97,6 +119,7 @@ class AnsibleRunnerService:
 
         # API 只组装业务请求，真正的华为设备操作仍交给原 playbook/role 链路。
         extravars = {
+            "firewall_workflow_mode": "access",
             "access_request": {
                 "action": job["action"],
                 "target_ip": job["target_ip"],
@@ -114,31 +137,37 @@ class AnsibleRunnerService:
             extravars["application_ports"] = job["ports"]
 
         try:
-            with self._exclusive_runner_lock(private_data_dir):
-                result = ansible_runner.run(
-                    private_data_dir=str(private_data_dir),
-                    project_dir=str(project_root),
-                    playbook=playbook,
-                    ident=ident,
-                    extravars=extravars,
-                    envvars={
-                        "ANSIBLE_CONFIG": str(project_root / "ansible.cfg"),
-                    },
-                    rotate_artifacts=20,
-                    quiet=True,
-                )
+            with self._exclusive_runner_lock(firewall_runner_dir):
+                with self._isolated_private_data_dir(
+                    firewall_runner_dir,
+                    ident,
+                ) as private_data_dir:
+                    result = ansible_runner.run(
+                        private_data_dir=str(private_data_dir),
+                        artifact_dir=str(artifact_root),
+                        project_dir=str(project_root),
+                        playbook=playbook,
+                        ident=ident,
+                        extravars=extravars,
+                        envvars={
+                            "ANSIBLE_CONFIG": str(project_root / "ansible.cfg"),
+                        },
+                        suppress_env_files=True,
+                        rotate_artifacts=20,
+                        quiet=True,
+                    )
         except Exception as exc:
             return RunnerResult(
                 status="failed",
                 rc=1,
-                artifact_dir=str(private_data_dir / "artifacts" / ident),
+                artifact_dir=str(artifact_root / ident),
                 error_message=str(exc),
             )
 
         return RunnerResult(
             status=getattr(result, "status", "unknown"),
             rc=int(getattr(result, "rc", 1) or 0),
-            artifact_dir=str(private_data_dir / "artifacts" / ident),
+            artifact_dir=str(artifact_root / ident),
             error_message=None,
         )
 
@@ -167,8 +196,9 @@ class AnsibleRunnerService:
 
         project_root = settings.project_root
         playbook = str(project_root / settings.playbook_path)
-        private_data_dir = self._private_data_dir(target_code)
-        private_data_dir.mkdir(parents=True, exist_ok=True)
+        firewall_runner_dir = self._private_data_dir(target_code)
+        firewall_runner_dir.mkdir(parents=True, exist_ok=True)
+        artifact_root = firewall_runner_dir / "artifacts"
 
         snapshot_id = "{0}-{1}-snapshot-{2}".format(
             target_code,
@@ -182,6 +212,7 @@ class AnsibleRunnerService:
         )
 
         extravars = {
+            "firewall_workflow_mode": "snapshot",
             "local_tmp_dir": str(local_tmp_dir),
             "local_python_interpreter": sys.executable,
             "snapshot_mode": snapshot_mode,
@@ -189,21 +220,27 @@ class AnsibleRunnerService:
             "firewall_code": target_code,
         }
 
-        artifact_dir = str(private_data_dir / "artifacts" / snapshot_id)
+        artifact_dir = str(artifact_root / snapshot_id)
         try:
-            with self._exclusive_runner_lock(private_data_dir):
-                result = ansible_runner.run(
-                    private_data_dir=str(private_data_dir),
-                    project_dir=str(project_root),
-                    playbook=playbook,
-                    ident=snapshot_id,
-                    extravars=extravars,
-                    envvars={
-                        "ANSIBLE_CONFIG": str(project_root / "ansible.cfg"),
-                    },
-                    rotate_artifacts=20,
-                    quiet=True,
-                )
+            with self._exclusive_runner_lock(firewall_runner_dir):
+                with self._isolated_private_data_dir(
+                    firewall_runner_dir,
+                    snapshot_id,
+                ) as private_data_dir:
+                    result = ansible_runner.run(
+                        private_data_dir=str(private_data_dir),
+                        artifact_dir=str(artifact_root),
+                        project_dir=str(project_root),
+                        playbook=playbook,
+                        ident=snapshot_id,
+                        extravars=extravars,
+                        envvars={
+                            "ANSIBLE_CONFIG": str(project_root / "ansible.cfg"),
+                        },
+                        suppress_env_files=True,
+                        rotate_artifacts=20,
+                        quiet=True,
+                    )
         except Exception as exc:
             return SnapshotRunnerResult(
                 status="failed",

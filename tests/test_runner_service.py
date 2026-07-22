@@ -117,9 +117,14 @@ class RunnerServiceTests(unittest.TestCase):
         self.assertEqual(result.payload["items"], [])
         self.assertEqual(captured_calls[0]["playbook"], str(settings.project_root / settings.playbook_path))
         self.assertNotIn("trade_access_tasks_from", captured_calls[0]["extravars"])
+        self.assertEqual(
+            captured_calls[0]["extravars"]["firewall_workflow_mode"],
+            "snapshot",
+        )
         self.assertEqual(captured_calls[0]["extravars"]["snapshot_mode"], "ips")
         self.assertEqual(captured_calls[0]["extravars"]["firewall_code"], "TEST-FW")
         self.assertIn("firewall_ips_snapshot.json", captured_calls[0]["extravars"]["snapshot_output_path"])
+        self.assertTrue(captured_calls[0]["suppress_env_files"])
 
     def test_explicit_firewall_code_gets_isolated_runner_directory(self) -> None:
         captured_calls = []
@@ -154,13 +159,94 @@ class RunnerServiceTests(unittest.TestCase):
         self.assertEqual(result.rc, 0)
         self.assertEqual(captured_calls[0]["extravars"]["firewall_code"], "PG-FW-1")
         self.assertEqual(
-            Path(captured_calls[0]["private_data_dir"]).name,
+            captured_calls[0]["extravars"]["firewall_workflow_mode"],
+            "access",
+        )
+        self.assertEqual(
+            Path(captured_calls[0]["private_data_dir"]).parent.parent.name,
             "PG-FW-1",
         )
+        self.assertEqual(
+            Path(captured_calls[0]["private_data_dir"]).parent.name,
+            "runs",
+        )
+        artifact_dir = Path(captured_calls[0]["artifact_dir"])
+        self.assertEqual(artifact_dir.name, "artifacts")
+        self.assertEqual(artifact_dir.parent.name, "PG-FW-1")
+        self.assertTrue(captured_calls[0]["suppress_env_files"])
         self.assertEqual(
             Path(captured_calls[0]["extravars"]["local_tmp_dir"]).name,
             "PG-FW-1",
         )
+
+    def test_snapshot_extravars_cannot_leak_into_following_access_run(self) -> None:
+        captured_calls = []
+
+        def fake_run(**kwargs):
+            captured_calls.append(kwargs)
+            if kwargs["extravars"]["firewall_workflow_mode"] == "snapshot":
+                output_path = Path(kwargs["extravars"]["snapshot_output_path"])
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(
+                    json.dumps({"ip_items": [], "port_items": []}),
+                    encoding="utf-8",
+                )
+            return types.SimpleNamespace(status="successful", rc=0)
+
+        fake_runner = types.SimpleNamespace(run=fake_run)
+        original_private_data_dir = settings.runner_private_data_dir
+        original_job_tmp_root = settings.job_tmp_root
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings.runner_private_data_dir = Path(temp_dir) / "runner"
+            settings.job_tmp_root = Path(temp_dir) / "jobs"
+            stale_env_dir = settings.runner_private_data_dir / "TEST-FW" / "env"
+            stale_env_dir.mkdir(parents=True)
+            stale_extravars = stale_env_dir / "extravars"
+            stale_extravars.write_text(
+                json.dumps({"snapshot_mode": "state"}),
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(sys.modules, {"ansible_runner": fake_runner}):
+                    service = AnsibleRunnerService()
+                    snapshot_result = service.run_firewall_snapshot("state", "TEST-FW")
+                    access_result = service.run_trade_access(
+                        {
+                            "job_id": "allow-after-snapshot",
+                            "action": "allow_ip",
+                            "target_ip": "192.168.5.224",
+                            "mask": 32,
+                            "ports": [],
+                            "principal_subject": "employee-a",
+                            "description": None,
+                            "local_tmp_dir": str(Path(temp_dir) / "allow-after-snapshot"),
+                        },
+                        "TEST-FW",
+                    )
+            finally:
+                settings.runner_private_data_dir = original_private_data_dir
+                settings.job_tmp_root = original_job_tmp_root
+
+        self.assertEqual(snapshot_result.rc, 0)
+        self.assertEqual(access_result.rc, 0)
+        self.assertEqual(len(captured_calls), 2)
+        snapshot_call, access_call = captured_calls
+        self.assertNotEqual(
+            snapshot_call["private_data_dir"],
+            access_call["private_data_dir"],
+        )
+        self.assertEqual(
+            snapshot_call["extravars"]["firewall_workflow_mode"],
+            "snapshot",
+        )
+        self.assertEqual(
+            access_call["extravars"]["firewall_workflow_mode"],
+            "access",
+        )
+        self.assertNotIn("snapshot_mode", access_call["extravars"])
+        self.assertTrue(snapshot_call["suppress_env_files"])
+        self.assertTrue(access_call["suppress_env_files"])
 
     def test_reconciled_snapshot_returns_clean_items_when_all_targets_match(self) -> None:
         service = AnsibleRunnerService()
