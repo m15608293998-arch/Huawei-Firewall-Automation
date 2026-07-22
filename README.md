@@ -8,7 +8,7 @@
 - FastAPI：提供 `/admin-ui`、`/test-ui` 和业务 API。
 - Worker：从本地 SQLite 队列读取任务，调用 Ansible Runner 执行防火墙变更。
 
-业务变更接口会先返回 `202 Accepted` 和 `job_id`。父任务按 FIFO 串行处理，父任务内的防火墙子任务并行执行并逐台校验。全量快照会并行查询所有启用的防火墙，并在结果不一致时返回差异。
+业务变更接口会先返回 `202 Accepted` 和 `job_id`。父任务内的防火墙子任务并行执行并逐台校验；失败节点按轮次继续修复，等待重试时不会阻塞其他 IP 的变更。全量快照会并行查询所有启用防火墙，但存在未收敛父任务时暂停查询，改用一致性检查查看差异。
 
 ## 1. 准备环境
 
@@ -147,6 +147,7 @@ trade_access_api:
     - "TEST-FW"
   firewall_parallel_workers: 3
   firewall_child_max_attempts: 2
+  firewall_reconcile_retry_seconds: 30
 
 default_firewall_code: "TEST-FW"
 firewall_profiles:
@@ -243,7 +244,7 @@ TRADE_ACCESS_API_DATABASE_PATH=.runtime/api/jobs.sqlite3
 TRADE_ACCESS_API_RUNNER_PRIVATE_DATA_DIR=.runtime/runner
 TRADE_ACCESS_API_JOB_TMP_ROOT=.runtime/jobs
 
-# 防火墙目标、并发数和重试次数统一配置在 group_vars/all.yml 的
+# 防火墙目标、并发数、单轮重试次数和跨轮修复间隔统一配置在 group_vars/all.yml 的
 # trade_access_api 中，不需要在这里重复配置。
 
 TRADE_ACCESS_API_KEYCLOAK_SERVER_URL=http://<KEYCLOAK_HOST>:8080
@@ -415,8 +416,10 @@ curl \
 
 任务详情的 `desired_state` 是该 IP 的完整业务期望状态，`target_results` 是逐台
 防火墙的变更前、期望和实测结果。只有全部子任务实时校验一致，父任务才是
-`successful`；部分成功为 `manual_intervention_required`。普通用户只能读取自己的
-任务，管理员可读取全部任务。
+`successful`；部分成功或预检暂时失败时保持 `reconciling`，到
+`next_attempt_at` 进入下一轮，只对未收敛节点执行配置。等待期间其他 IP 的任务可以
+继续执行，同一 IP 的后续任务保持顺序。普通用户只能读取自己的任务，管理员可读取
+全部任务。
 
 ## 8. 查询与一致性检查
 
@@ -443,6 +446,10 @@ curl \
 `consistent` 和 `drifted`。响应包含 IP/端口差异、每台设备的缺失/多余项，以及
 按严格多数节点计算的 `suggested_actions`；建议仅供人工核实，不会自动执行。任一
 设备查询失败时返回 HTTP `503`、`overall_status=incomplete`，且不生成纠错动作。
+
+存在 `reconciling` 父任务时，普通全量快照接口返回 HTTP `409`，避免把已知不一致
+状态当作可用清单；`check` 仍可执行，用于查看失败节点和人工纠错建议。测试页和管理
+页均提供“检查节点一致性”按钮，测试页任务详情还会展示逐台子任务状态。
 
 三台逻辑结果完全一致时返回 HTTP `200` 和干净的 `items`；结果漂移返回 HTTP
 `409` 及逐台差异；任一设备查询失败返回 HTTP `503`，不会把部分结果当成全量

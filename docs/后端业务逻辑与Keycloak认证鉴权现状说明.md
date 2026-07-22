@@ -19,7 +19,7 @@
 1. 认证调用者身份。
 2. 检查接口权限和可操作 IP。
 3. 创建持久化异步任务。
-4. 父任务按 FIFO 串行处理，父任务中的防火墙子任务并行执行。
+4. 同一 IP 的父任务按 FIFO 处理；失败父任务等待下一轮时，其他 IP 可继续执行。
 5. 通过 SSH 修改三台防火墙各自配置的 Address Set 和 Application。
 6. 逐台实时查询本次 IP 的完整状态，全部符合期望后才标记父任务成功。
 7. 保存期望状态、逐台结果、调用身份和 Ansible 事件用于恢复、查询和审计。
@@ -58,11 +58,11 @@
 
 | 层次 | 当前实现 | 职责 |
 | --- | --- | --- |
-| 用户界面 | `/test-ui`、`/admin-ui` | 登录、输入业务参数、管理授权和查询任务 |
+| 用户界面 | `/test-ui`、`/admin-ui` | 登录、输入业务参数、管理授权、查询任务和检查节点一致性 |
 | 身份认证 | Keycloak Access Token + Offline API Key | 浏览器短期登录与普通用户长期调用 |
 | 业务鉴权 | FastAPI + SQLite | 接口权限、IPv4 `/32` 校验、任务所有权和本地启用状态 |
 | 任务队列 | SQLite 父任务、子任务和期望状态表 | FIFO、恢复、状态版本和审计记录 |
-| 执行层 | Worker + Ansible Runner | 父任务串行、设备子任务并行、逐台校验 |
+| 执行层 | Worker + Ansible Runner | 父任务分轮调度、设备子任务并行、逐台校验 |
 | 设备层 | Ansible Role + SSH CLI | 修改防火墙并确认安全引擎提交完成 |
 
 ## 3. 三类凭据及其关系
@@ -436,12 +436,13 @@ API 完成参数与权限检查后，把任务写入 SQLite 并返回 `202 Accep
 
 ```text
 pending -> running -> successful
-                   -> failed
+             |-----> reconciling --(到点重试)--> running
+             `-----> failed
 ```
 
-`canceled` 当前仅作为预留状态，尚未提供任务取消接口。单 Worker 使用原子更新领取最早的
-`pending` 任务，因此同一时间只执行一个防火墙变更，避免 allow、deny 或 Application 重建
-互相干扰。
+`canceled` 当前仅作为预留状态，尚未提供任务取消接口。单 Worker 每轮只执行一个父任务；
+失败任务写入 `next_attempt_at` 后释放队列。调度器跳过尚未到点的修复任务，并阻止同一 IP
+的后续任务越过它，不同 IP 的变更仍可继续执行。
 
 统一启动命令：
 

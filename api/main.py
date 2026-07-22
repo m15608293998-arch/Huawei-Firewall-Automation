@@ -30,6 +30,7 @@ from api.jobs import (
     get_job_events,
     get_job_or_404,
     list_jobs,
+    list_reconciling_jobs,
 )
 from api.schemas import (
     CurrentAccessResponse,
@@ -456,6 +457,31 @@ def check_firewall_consistency(
     return result.payload
 
 
+def _reject_snapshot_during_reconciliation() -> None:
+    reconciling_jobs = list_reconciling_jobs()
+    if not reconciling_jobs:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "message": (
+                "Firewall snapshot query is disabled while one or more parent "
+                "jobs are reconciling. Use the firewall check endpoint for "
+                "per-node diagnostics."
+            ),
+            "blocking_jobs": [
+                {
+                    "job_id": job["job_id"],
+                    "target_ip": job["target_ip"],
+                    "next_attempt_at": job.get("next_attempt_at"),
+                }
+                for job in reconciling_jobs
+            ],
+            "check_endpoint": "/api/v1/trade-access/firewall/check",
+        },
+    )
+
+
 @app.get(
     "/api/v1/trade-access/firewall/snapshot",
     response_model=FirewallSnapshotResponse,
@@ -464,6 +490,7 @@ def get_firewall_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
+    _reject_snapshot_during_reconciliation()
     result = runner_service.run_reconciled_snapshot("snapshot")
     if result.rc == 2:
         raise HTTPException(
@@ -493,6 +520,7 @@ def get_firewall_ip_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
+    _reject_snapshot_during_reconciliation()
     result = runner_service.run_reconciled_snapshot("ips")
     if result.rc == 2:
         raise HTTPException(
@@ -522,6 +550,7 @@ def get_firewall_port_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
+    _reject_snapshot_during_reconciliation()
     result = runner_service.run_reconciled_snapshot("ports")
     if result.rc == 2:
         raise HTTPException(

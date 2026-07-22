@@ -35,6 +35,7 @@ JOB_COLUMNS = [
     "firewall_targets",
     "desired_state",
     "state_version",
+    "next_attempt_at",
 ]
 
 TARGET_COLUMNS = [
@@ -94,7 +95,8 @@ class JobStorage:
                     local_tmp_dir text,
                     firewall_targets text not null default '[]',
                     desired_state text,
-                    state_version integer
+                    state_version integer,
+                    next_attempt_at text
                 )
                 """
             )
@@ -107,6 +109,7 @@ class JobStorage:
             self._ensure_column(conn, "jobs", "firewall_targets", "text not null default '[]'")
             self._ensure_column(conn, "jobs", "desired_state", "text")
             self._ensure_column(conn, "jobs", "state_version", "integer")
+            self._ensure_column(conn, "jobs", "next_attempt_at", "text")
             conn.execute(
                 "create index if not exists jobs_status_created_idx "
                 "on jobs (status, created_at)"
@@ -114,6 +117,10 @@ class JobStorage:
             conn.execute(
                 "create index if not exists jobs_principal_created_idx "
                 "on jobs (principal_id, created_at)"
+            )
+            conn.execute(
+                "create index if not exists jobs_runnable_idx "
+                "on jobs (status, next_attempt_at, created_at)"
             )
             conn.execute(
                 """
@@ -371,7 +378,7 @@ class JobStorage:
 
     def claim_next_pending_job(self, started_at: str) -> dict[str, Any] | None:
         """Atomically claim the oldest pending job."""
-        return self._claim_next_job(started_at, ())
+        return self._claim_next_job(started_at, (), include_reconciling=False)
 
     def claim_next_runnable_job(self, started_at: str) -> dict[str, Any] | None:
         """Claim a pending job or resume one interrupted by a worker crash.
@@ -379,28 +386,62 @@ class JobStorage:
         The caller must hold the cross-process parent orchestration lock.  That
         lock proves an unfinished in-progress row no longer has a live owner.
         """
-        resumable_statuses = (
+        resumable_statuses = ("running", "prechecking", "applying", "verifying")
+        return self._claim_next_job(
+            started_at,
+            resumable_statuses,
+            include_reconciling=True,
+        )
+
+    def _claim_next_job(
+        self,
+        started_at: str,
+        resumable_statuses: tuple[str, ...],
+        include_reconciling: bool,
+    ) -> dict[str, Any] | None:
+        candidate_conditions = ["jobs.status = 'pending'"]
+        query_values: list[str] = []
+        if include_reconciling:
+            candidate_conditions.append(
+                "(jobs.status = 'reconciling' and "
+                "(jobs.next_attempt_at is null or jobs.next_attempt_at <= ?))"
+            )
+            query_values.append(started_at)
+        if resumable_statuses:
+            placeholders = ", ".join("?" for _ in resumable_statuses)
+            candidate_conditions.append(
+                "(jobs.status in ({0}) and jobs.finished_at is null)".format(
+                    placeholders
+                )
+            )
+            query_values.extend(resumable_statuses)
+
+        active_statuses = (
+            "pending",
             "running",
             "prechecking",
             "applying",
             "verifying",
             "reconciling",
         )
-        return self._claim_next_job(started_at, resumable_statuses)
-
-    def _claim_next_job(
-        self,
-        started_at: str,
-        resumable_statuses: tuple[str, ...],
-    ) -> dict[str, Any] | None:
-        condition = "status = 'pending'"
-        query_values: tuple[str, ...] = ()
-        if resumable_statuses:
-            placeholders = ", ".join("?" for _ in resumable_statuses)
-            condition += " or (status in ({0}) and finished_at is null)".format(
-                placeholders
+        active_placeholders = ", ".join("'{0}'".format(value) for value in active_statuses)
+        condition = """
+            ({0})
+            and not exists (
+                select 1
+                from jobs as earlier
+                where earlier.target_ip = jobs.target_ip
+                  and earlier.job_id != jobs.job_id
+                  and earlier.status in ({1})
+                  and (
+                      earlier.created_at < jobs.created_at
+                      or (
+                          earlier.created_at = jobs.created_at
+                          and earlier.job_id < jobs.job_id
+                      )
+                  )
             )
-            query_values = resumable_statuses
+        """.format(" or ".join(candidate_conditions), active_placeholders)
 
         with self._lock:
             with self._connect() as conn:
@@ -413,7 +454,7 @@ class JobStorage:
                     order by created_at, job_id
                     limit 1
                     """.format(", ".join(JOB_COLUMNS), condition),
-                    query_values,
+                    tuple(query_values),
                 ).fetchone()
 
                 if row is None:
@@ -425,7 +466,9 @@ class JobStorage:
                 cursor = conn.execute(
                     """
                     update jobs
-                    set status = 'running', started_at = coalesce(started_at, ?)
+                    set status = 'running',
+                        started_at = coalesce(started_at, ?),
+                        next_attempt_at = null
                     where job_id = ?
                       and ({0})
                     """.format(condition),
@@ -440,6 +483,7 @@ class JobStorage:
         job = self._deserialize_job(row)
         job["status"] = "running"
         job["started_at"] = job.get("started_at") or started_at
+        job["next_attempt_at"] = None
         return job
 
     def update_job(self, job_id: str, fields: dict[str, Any]) -> None:

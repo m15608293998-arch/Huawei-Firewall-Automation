@@ -72,6 +72,27 @@
     .snapshot-actions { display: flex; flex-wrap: wrap; gap: 10px; }
     .snapshot table { min-width: 520px; }
     .snapshot-meta { color: var(--muted); font-size: 12px; }
+    .consistency-report { border-top: 1px solid var(--line); padding: 22px; }
+    .consistency-overview { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 18px; }
+    .consistency-status { display: inline-flex; align-items: center; min-height: 28px; border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; }
+    .consistency-status.consistent { background: #e8f7f0; color: var(--success); }
+    .consistency-status.drifted { background: #fff5d9; color: var(--warning); }
+    .consistency-status.incomplete { background: #feeceb; color: var(--danger); }
+    .consistency-summary { color: #4b5563; font-size: 13px; }
+    .check-section + .check-section { margin-top: 20px; }
+    .check-section-title { margin: 0 0 9px; color: #363b44; font-size: 13px; font-weight: 700; }
+    .consistency-report table { min-width: 920px; }
+    .check-list { color: #4b5563; font-size: 12px; line-height: 1.7; white-space: pre-line; }
+    .check-list.empty { padding: 0; text-align: left; color: #9aa0aa; }
+    .check-warning { margin-top: 18px; padding: 11px 13px; border-radius: 8px; background: #fff8e6; color: #7a5200; font-size: 12px; }
+    .job-target-results { margin-top: 20px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .job-target-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; padding: 12px 14px; background: var(--surface-soft); }
+    .job-target-heading strong { font-size: 13px; }
+    .job-desired-state { color: var(--muted); font-size: 12px; }
+    .job-target-results table { min-width: 720px; }
+    .job-target-results th, .job-target-results td { padding: 11px 12px; }
+    .target-state { color: #4b5563; font-size: 12px; white-space: nowrap; }
+    .jobs table { min-width: 940px; }
     .field { min-width: 0; }
     .field + .field { margin-top: 16px; }
     label { display: block; margin-bottom: 7px; color: #363b44; font-size: 13px; font-weight: 650; }
@@ -133,9 +154,9 @@
     .status-pill { display: inline-flex; align-items: center; gap: 6px; color: var(--success); font-size: 12px; font-weight: 650; }
     .status-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
     .badge { display: inline-block; min-width: 78px; border-radius: 6px; padding: 3px 8px; text-align: center; background: #eceff2; color: #4b5563; font-size: 12px; font-weight: 650; }
-    .badge.successful { background: #e8f7f0; color: var(--success); }
-    .badge.failed, .badge.canceled, .badge.manual_intervention_required { background: #feeceb; color: var(--danger); }
-    .badge.running, .badge.prechecking, .badge.applying, .badge.verifying, .badge.reconciling { background: #fff5d9; color: var(--warning); }
+    .badge.successful, .badge.verified { background: #e8f7f0; color: var(--success); }
+    .badge.failed, .badge.precheck_failed, .badge.canceled, .badge.manual_intervention_required { background: #feeceb; color: var(--danger); }
+    .badge.pending, .badge.running, .badge.prechecking, .badge.prechecked, .badge.applying, .badge.verifying, .badge.reconciling { background: #fff5d9; color: var(--warning); }
     .table-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px 18px; border-top: 1px solid var(--line); }
     .pagination-meta { color: var(--muted); font-size: 12px; }
     .pagination-actions { display: inline-flex; align-items: center; gap: 8px; }
@@ -175,6 +196,9 @@
       .query-bar .field, .filter-bar button { grid-column: auto; }
       .actions { flex-direction: column; }
       .actions button { width: 100%; }
+      .snapshot-actions { width: 100%; }
+      .snapshot-actions button { flex: 1 1 100%; }
+      .consistency-report { padding: 18px 14px; }
       .table-footer { align-items: stretch; flex-direction: column; }
       .pagination-actions { width: 100%; }
       .pagination-actions button { flex: 1; }
@@ -302,6 +326,18 @@
             <span id="responseStatus" class="status-code"></span>
           </div>
           <pre id="responseOutput">{}</pre>
+          <div id="jobTargetResults" class="job-target-results hidden">
+            <div class="job-target-heading">
+              <strong>多防火墙执行结果</strong>
+              <span id="jobDesiredState" class="job-desired-state">期望状态尚未生成</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>防火墙节点</th><th>子任务状态</th><th>尝试次数</th><th>实测状态</th><th>错误</th></tr></thead>
+                <tbody id="jobTargetRows"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -314,6 +350,7 @@
           <div class="snapshot-actions">
             <button id="queryIpSnapshot" class="command secondary" type="button">查询 IP 清单</button>
             <button id="queryPortSnapshot" class="command secondary" type="button">查询端口清单</button>
+            <button id="queryFirewallCheck" class="command primary" type="button">检查节点一致性</button>
           </div>
         </div>
         <div class="table-wrap">
@@ -331,6 +368,40 @@
         <div class="table-footer">
           <span id="snapshotMeta" class="snapshot-meta">尚未查询</span>
         </div>
+        <div id="consistencyReport" class="consistency-report hidden" aria-live="polite">
+          <div class="consistency-overview">
+            <span id="consistencyStatus" class="consistency-status"></span>
+            <span id="consistencySummary" class="consistency-summary"></span>
+          </div>
+          <section class="check-section">
+            <h3 class="check-section-title">节点查询与差异</h3>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>防火墙节点</th><th>查询状态</th><th>IP / 端口数量</th><th>缺失配置</th><th>多余配置</th><th>查询错误</th></tr></thead>
+                <tbody id="consistencyNodeRows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section id="consistencyActionsSection" class="check-section hidden">
+            <h3 class="check-section-title">人工纠错建议（不会自动执行）</h3>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>目标节点</th><th>建议操作</th><th>对象</th><th>多数节点依据</th></tr></thead>
+                <tbody id="consistencyActionRows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section id="consistencyAmbiguousSection" class="check-section hidden">
+            <h3 class="check-section-title">无法按多数节点判定，需人工确认</h3>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>对象</th><th>存在于</th><th>缺失于</th></tr></thead>
+                <tbody id="consistencyAmbiguousRows"></tbody>
+              </table>
+            </div>
+          </section>
+          <div id="consistencyWarning" class="check-warning"></div>
+        </div>
       </section>
 
       <section class="panel jobs">
@@ -343,6 +414,7 @@
             <thead>
               <tr>
                 <th>状态</th>
+                <th>节点进度</th>
                 <th>操作</th>
                 <th>目标 IP</th>
                 <th>端口</th>
@@ -464,6 +536,7 @@
       jobsPage: 1,
       jobsHasNextPage: false,
       snapshotLoading: false,
+      consistencyCheckLoading: false,
       creatingApiKey: false,
       editingApiKey: false,
       pendingEditApiKey: null,
@@ -497,9 +570,22 @@
       nextJobsPageButton: document.querySelector("#nextJobsPage"),
       queryIpSnapshotButton: document.querySelector("#queryIpSnapshot"),
       queryPortSnapshotButton: document.querySelector("#queryPortSnapshot"),
+      queryFirewallCheckButton: document.querySelector("#queryFirewallCheck"),
       snapshotRows: document.querySelector("#snapshotRows"),
       emptySnapshot: document.querySelector("#emptySnapshot"),
       snapshotMeta: document.querySelector("#snapshotMeta"),
+      consistencyReport: document.querySelector("#consistencyReport"),
+      consistencyStatus: document.querySelector("#consistencyStatus"),
+      consistencySummary: document.querySelector("#consistencySummary"),
+      consistencyNodeRows: document.querySelector("#consistencyNodeRows"),
+      consistencyActionsSection: document.querySelector("#consistencyActionsSection"),
+      consistencyActionRows: document.querySelector("#consistencyActionRows"),
+      consistencyAmbiguousSection: document.querySelector("#consistencyAmbiguousSection"),
+      consistencyAmbiguousRows: document.querySelector("#consistencyAmbiguousRows"),
+      consistencyWarning: document.querySelector("#consistencyWarning"),
+      jobTargetResults: document.querySelector("#jobTargetResults"),
+      jobDesiredState: document.querySelector("#jobDesiredState"),
+      jobTargetRows: document.querySelector("#jobTargetRows"),
       apiKeyRows: document.querySelector("#apiKeyRows"),
       emptyApiKeys: document.querySelector("#emptyApiKeys"),
       apiKeyListError: document.querySelector("#apiKeyListError"),
@@ -572,7 +658,10 @@
 
         if (!response.ok) {
           const detail = data && data.detail ? data.detail : `HTTP ${response.status}`;
-          throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+          const requestError = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+          requestError.status = response.status;
+          requestError.payload = data;
+          throw requestError;
         }
         return data;
       } catch (error) {
@@ -666,9 +755,12 @@
     }
 
     function updateSnapshotAvailability() {
-      const enabled = hasSnapshotReadPermission() && !state.snapshotLoading;
+      const enabled = hasSnapshotReadPermission()
+        && !state.snapshotLoading
+        && !state.consistencyCheckLoading;
       elements.queryIpSnapshotButton.disabled = !enabled;
       elements.queryPortSnapshotButton.disabled = !enabled;
+      elements.queryFirewallCheckButton.disabled = !enabled;
       if (!state.accessProfile) {
         elements.emptySnapshot.textContent = "正在读取 Keycloak 用户权限";
         return;
@@ -743,6 +835,96 @@
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return value;
       return new Intl.DateTimeFormat("zh-CN", { timeZone:"Asia/Shanghai", year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit", hourCycle:"h23" }).format(date).replaceAll("/", "-");
+    }
+
+    function targetStatusLabel(status) {
+      const labels = {
+        pending: "等待执行",
+        prechecking: "预检查中",
+        prechecked: "预检查完成",
+        precheck_failed: "预检查失败",
+        applying: "配置中",
+        verifying: "验证中",
+        reconciling: "等待修复",
+        verified: "已验证一致",
+        failed: "执行失败",
+      };
+      return labels[status] || status || "未知";
+    }
+
+    function appendStatusBadge(cell, status, label = targetStatusLabel(status)) {
+      const badge = document.createElement("span");
+      badge.className = `badge ${status || "pending"}`;
+      badge.textContent = label;
+      cell.append(badge);
+    }
+
+    function formatAccessState(accessState) {
+      if (!accessState) return "尚未取得实测状态";
+      const ipState = accessState.ip_present ? "IP 已放行" : "IP 未放行";
+      const ports = (accessState.ports || []).join(", ");
+      return `${ipState} · ${ports ? `端口 ${ports}` : "无端口"}`;
+    }
+
+    function renderJobTargetResults(job) {
+      const targetResults = [...(job.target_results || [])];
+      const knownCodes = new Set(targetResults.map((target) => target.firewall_code));
+      (job.firewall_targets || []).forEach((firewallCode) => {
+        if (!knownCodes.has(firewallCode)) {
+          targetResults.push({ firewall_code: firewallCode, status: "pending", attempt_count: 0 });
+        }
+      });
+      if (!targetResults.length) {
+        elements.jobTargetResults.classList.add("hidden");
+        elements.jobTargetRows.replaceChildren();
+        return;
+      }
+
+      const desiredState = job.desired_state;
+      const retryText = job.next_attempt_at
+        ? ` · 下轮修复 ${formatDateTime(job.next_attempt_at)}`
+        : "";
+      elements.jobDesiredState.textContent = (desiredState
+        ? `期望状态 v${job.state_version || desiredState.version || "-"} · ${formatAccessState(desiredState)}`
+        : "预检查完成后生成统一业务期望状态") + retryText;
+      elements.jobTargetRows.replaceChildren();
+      targetResults.forEach((target) => {
+        const row = document.createElement("tr");
+        const firewallCell = document.createElement("td");
+        firewallCell.className = "mono";
+        firewallCell.textContent = target.firewall_code;
+        row.append(firewallCell);
+
+        const statusCell = document.createElement("td");
+        appendStatusBadge(statusCell, target.status);
+        row.append(statusCell);
+
+        const attemptCell = document.createElement("td");
+        attemptCell.textContent = String(target.attempt_count || 0);
+        row.append(attemptCell);
+
+        const observedCell = document.createElement("td");
+        observedCell.className = "target-state";
+        observedCell.textContent = formatAccessState(target.observed_state);
+        row.append(observedCell);
+
+        const errorCell = document.createElement("td");
+        errorCell.textContent = target.error_message || "-";
+        row.append(errorCell);
+        elements.jobTargetRows.append(row);
+      });
+      elements.jobTargetResults.classList.remove("hidden");
+    }
+
+    function targetProgress(job) {
+      const targetResults = job.target_results || [];
+      const total = Math.max((job.firewall_targets || []).length, targetResults.length);
+      if (!total) return { text: "-", status: "pending" };
+      const verified = targetResults.filter((target) => target.status === "verified").length;
+      const failed = targetResults.filter((target) => target.status === "failed").length;
+      const suffix = failed ? ` · ${failed} 失败` : "";
+      const status = failed ? "failed" : (verified === total ? "successful" : "running");
+      return { text: `${verified}/${total} 已验证${suffix}`, status };
     }
 
     function maskedApiKey(keyHint) {
@@ -1061,6 +1243,7 @@
         displayResponse,
       );
       document.querySelector("#jobId").value = jobId;
+      renderJobTargetResults(data);
       return data;
     }
 
@@ -1103,21 +1286,20 @@
       elements.emptyJobs.classList.toggle("hidden", jobs.length > 0);
       jobs.forEach((job) => {
         const row = document.createElement("tr");
+        const progress = targetProgress(job);
         const values = [
           { value: job.status, badge: true },
+          { value: progress.text, badge: true, badgeStatus: progress.status },
           { value: job.action },
           { value: `${job.target_ip}/${job.mask}` },
           { value: (job.ports || []).join(", ") || "-" },
           { value: job.job_id, mono: true },
           { value: job.created_at || "-" },
         ];
-        values.forEach(({ value, badge, mono }) => {
+        values.forEach(({ value, badge, badgeStatus, mono }) => {
           const cell = document.createElement("td");
           if (badge) {
-            const span = document.createElement("span");
-            span.className = `badge ${value}`;
-            span.textContent = value;
-            cell.append(span);
+            appendStatusBadge(cell, badgeStatus || value, value);
           } else {
             cell.textContent = value;
           }
@@ -1154,8 +1336,165 @@
       });
     }
 
+    function appendTextCell(row, value, className = "") {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      if (className) cell.className = className;
+      row.append(cell);
+      return cell;
+    }
+
+    function formatNodeDifference(node, direction) {
+      const ipItems = node[`ip_${direction}`] || [];
+      const portItems = node[`port_${direction}`] || [];
+      const lines = [
+        ...ipItems.map((item) => `IP：${item.ip}`),
+        ...portItems.map((item) => `端口：${item.ip}:${item.port}`),
+      ];
+      return lines.join("\n") || "无";
+    }
+
+    function checkStatusLabel(status) {
+      const labels = {
+        consistent: "节点数据一致",
+        drifted: "节点数据不一致",
+        incomplete: "查询不完整",
+      };
+      return labels[status] || status || "未知状态";
+    }
+
+    function actionLabel(action) {
+      const labels = {
+        add_ip: "补充 IP",
+        remove_ip: "删除 IP",
+        add_port: "补充端口",
+        remove_port: "删除端口",
+      };
+      return labels[action] || action;
+    }
+
+    function actionObject(action) {
+      return action.port == null ? action.ip : `${action.ip}:${action.port}`;
+    }
+
+    function actionBasis(action) {
+      const present = (action.present_on_firewalls || []).join("、") || "无";
+      const absent = (action.absent_on_firewalls || []).join("、") || "无";
+      return `存在：${present}；缺失：${absent}`;
+    }
+
+    function renderConsistencyCheck(check) {
+      const status = ["consistent", "drifted", "incomplete"].includes(check.overall_status)
+        ? check.overall_status
+        : "incomplete";
+      const summary = check.summary || {};
+      elements.consistencyStatus.className = `consistency-status ${status}`;
+      elements.consistencyStatus.textContent = checkStatusLabel(status);
+      elements.consistencySummary.textContent = [
+        `已查询 ${summary.successful_firewall_count || 0}/${summary.configured_firewall_count || (check.firewall_codes || []).length} 台`,
+        `IP 差异 ${summary.ip_drift_item_count || 0}`,
+        `端口差异 ${summary.port_drift_item_count || 0}`,
+        `纠错建议 ${summary.suggested_action_count || 0}`,
+        `需人工判定 ${summary.ambiguous_item_count || 0}`,
+        `检查时间 ${formatDateTime(check.checked_at)}`,
+      ].join(" · ");
+
+      elements.consistencyNodeRows.replaceChildren();
+      const firewallCodes = check.firewall_codes || Object.keys(check.firewalls || {});
+      firewallCodes.forEach((firewallCode) => {
+        const node = (check.firewalls || {})[firewallCode] || {};
+        const row = document.createElement("tr");
+        appendTextCell(row, firewallCode, "mono");
+        const statusCell = document.createElement("td");
+        appendStatusBadge(
+          statusCell,
+          node.query_status === "successful" ? "successful" : "failed",
+          node.query_status === "successful" ? "查询成功" : "查询失败",
+        );
+        row.append(statusCell);
+        appendTextCell(row, `${node.ip_count || 0} / ${node.port_count || 0}`);
+        appendTextCell(row, formatNodeDifference(node, "missing"), "check-list");
+        appendTextCell(row, formatNodeDifference(node, "extra"), "check-list");
+        appendTextCell(row, node.error_message || "-");
+        elements.consistencyNodeRows.append(row);
+      });
+
+      const actions = firewallCodes.flatMap(
+        (firewallCode) => ((check.firewalls || {})[firewallCode] || {}).suggested_actions || [],
+      );
+      elements.consistencyActionRows.replaceChildren();
+      actions.forEach((action) => {
+        const row = document.createElement("tr");
+        appendTextCell(row, action.firewall_code, "mono");
+        appendTextCell(row, actionLabel(action.action));
+        appendTextCell(row, actionObject(action), "mono");
+        appendTextCell(row, actionBasis(action));
+        elements.consistencyActionRows.append(row);
+      });
+      elements.consistencyActionsSection.classList.toggle("hidden", actions.length === 0);
+
+      const differences = check.differences || {};
+      const ambiguous = [
+        ...(differences.ips || [])
+          .filter((item) => item.reference_state === "ambiguous")
+          .map((item) => ({ ...item, object: item.ip })),
+        ...(differences.ports || [])
+          .filter((item) => item.reference_state === "ambiguous")
+          .map((item) => ({ ...item, object: `${item.ip}:${item.port}` })),
+      ];
+      elements.consistencyAmbiguousRows.replaceChildren();
+      ambiguous.forEach((item) => {
+        const row = document.createElement("tr");
+        appendTextCell(row, item.object, "mono");
+        appendTextCell(row, (item.present_on_firewalls || []).join("、") || "无");
+        appendTextCell(row, (item.absent_on_firewalls || []).join("、") || "无");
+        elements.consistencyAmbiguousRows.append(row);
+      });
+      elements.consistencyAmbiguousSection.classList.toggle("hidden", ambiguous.length === 0);
+      elements.consistencyWarning.textContent = status === "incomplete"
+        ? "部分防火墙查询失败，本次不会生成纠错建议。请先恢复失败节点连接，再重新检查。"
+        : "纠错建议依据全部配置节点的严格多数结果，仅供人工核实，不会自动执行；操作前请确认真实业务期望状态。";
+      elements.consistencyReport.classList.remove("hidden");
+    }
+
+    function consistencyCheckFromError(error) {
+      return error
+        && error.payload
+        && error.payload.detail
+        && error.payload.detail.check
+        ? error.payload.detail.check
+        : null;
+    }
+
+    async function queryFirewallConsistency(button) {
+      if (state.consistencyCheckLoading || state.snapshotLoading) return;
+      if (!hasSnapshotReadPermission()) {
+        showLocalError(new Error("当前账号没有防火墙快照查询权限"));
+        return;
+      }
+      const originalText = button.textContent;
+      try {
+        state.consistencyCheckLoading = true;
+        button.textContent = "检查中...";
+        updateSnapshotAvailability();
+        const check = await request("/api/v1/trade-access/firewall/check");
+        renderConsistencyCheck(check);
+      } catch (error) {
+        const check = consistencyCheckFromError(error);
+        if (check) {
+          renderConsistencyCheck(check);
+        } else {
+          showLocalError(error);
+        }
+      } finally {
+        state.consistencyCheckLoading = false;
+        button.textContent = originalText;
+        updateSnapshotAvailability();
+      }
+    }
+
     async function querySnapshot(mode, button) {
-      if (state.snapshotLoading) return;
+      if (state.snapshotLoading || state.consistencyCheckLoading) return;
       if (!hasSnapshotReadPermission()) {
         showLocalError(new Error("当前账号没有防火墙快照查询权限"));
         return;
@@ -1170,8 +1509,12 @@
         const snapshot = await request(`/api/v1/trade-access/firewall/snapshot/${mode}`);
         renderSnapshot(snapshot, mode);
       } catch (error) {
+        const detail = error.payload && error.payload.detail;
+        const detailMessage = detail && (detail.blocking_jobs || []).length
+          ? `存在 ${detail.blocking_jobs.length} 个未收敛父任务，普通全量查询已暂停；请使用“检查节点一致性”查看差异。`
+          : (detail && detail.message ? detail.message : error.message);
         elements.emptySnapshot.classList.remove("hidden");
-        elements.emptySnapshot.textContent = error.message;
+        elements.emptySnapshot.textContent = detailMessage;
         showLocalError(error);
       } finally {
         state.snapshotLoading = false;
@@ -1333,6 +1676,7 @@
     document.querySelector("#listJobs").addEventListener("click", () => listJobs().catch(showLocalError));
     document.querySelector("#queryIpSnapshot").addEventListener("click", (event) => querySnapshot("ips", event.currentTarget));
     document.querySelector("#queryPortSnapshot").addEventListener("click", (event) => querySnapshot("ports", event.currentTarget));
+    document.querySelector("#queryFirewallCheck").addEventListener("click", (event) => queryFirewallConsistency(event.currentTarget));
     document.querySelector("#jobStatus").addEventListener("change", () => {
       resetJobsPagination();
       listJobs(false).catch(showLocalError);

@@ -193,9 +193,16 @@ class JobDetailResponse(BaseModel):
     firewall_targets: list[str] = Field(default_factory=list)
     desired_state: dict[str, object] | None = None
     state_version: int | None = None
+    next_attempt_at: str | None = None
     target_results: list[FirewallTargetResponse] = Field(default_factory=list)
 
-    @field_validator("created_at", "started_at", "finished_at", mode="before")
+    @field_validator(
+        "created_at",
+        "started_at",
+        "finished_at",
+        "next_attempt_at",
+        mode="before",
+    )
     @classmethod
     def serialize_job_time_as_china_standard_time(
         cls,

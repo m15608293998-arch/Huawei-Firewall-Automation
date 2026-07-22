@@ -24,6 +24,7 @@ def load_firewall_orchestration_defaults(
         "firewall_targets": "TEST-FW",
         "firewall_parallel_workers": 3,
         "firewall_child_max_attempts": 2,
+        "firewall_reconcile_retry_seconds": 30,
     }
     if not config_path.exists():
         return defaults
@@ -76,6 +77,10 @@ def load_firewall_orchestration_defaults(
             "firewall_child_max_attempts",
             defaults["firewall_child_max_attempts"],
         ),
+        "firewall_reconcile_retry_seconds": orchestration.get(
+            "firewall_reconcile_retry_seconds",
+            defaults["firewall_reconcile_retry_seconds"],
+        ),
     }
 
 
@@ -112,6 +117,11 @@ class Settings(BaseSettings):
         default=FIREWALL_ORCHESTRATION_DEFAULTS["firewall_child_max_attempts"],
         ge=1,
         le=10,
+    )
+    firewall_reconcile_retry_seconds: int = Field(
+        default=FIREWALL_ORCHESTRATION_DEFAULTS["firewall_reconcile_retry_seconds"],
+        ge=1,
+        le=3600,
     )
     auth_enabled: bool = True
     development_subject: str = "api-placeholder"

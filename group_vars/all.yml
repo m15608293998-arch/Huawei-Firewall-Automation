@@ -5,6 +5,8 @@ trade_access_api:
     - "TEST-FW"
   firewall_parallel_workers: 3
   firewall_child_max_attempts: 2
+  # 单轮子任务失败后，父任务释放队列并在该秒数后只修复未收敛节点。
+  firewall_reconcile_retry_seconds: 30
 
 default_firewall_code: "TEST-FW"
 
@@ -60,6 +62,8 @@ local_tmp_dir: "/tmp/usg6000e_trade_access"
 #     - "IDC-FW"
 #   firewall_parallel_workers: 3
 #   firewall_child_max_attempts: 2
+#   # 失败父任务每 30 秒进入下一轮修复；其他 IP 变更可继续，普通快照暂停。
+#   firewall_reconcile_retry_seconds: 30
 #
 # default_firewall_code: "PG-FW"
 #

@@ -20,6 +20,7 @@ trade_access_api:
     - IDC-FW
   firewall_parallel_workers: 3
   firewall_child_max_attempts: 2
+  firewall_reconcile_retry_seconds: 45
 """.strip(),
                 encoding="utf-8",
             )
@@ -29,12 +30,14 @@ trade_access_api:
         self.assertEqual(defaults["firewall_targets"], "PG-FW,PG-FW-1,IDC-FW")
         self.assertEqual(defaults["firewall_parallel_workers"], 3)
         self.assertEqual(defaults["firewall_child_max_attempts"], 2)
+        self.assertEqual(defaults["firewall_reconcile_retry_seconds"], 45)
 
     def test_environment_can_override_all_yml_compatibility_defaults(self) -> None:
         overrides = {
             "TRADE_ACCESS_API_FIREWALL_TARGETS": "PG-FW,IDC-FW",
             "TRADE_ACCESS_API_FIREWALL_PARALLEL_WORKERS": "2",
             "TRADE_ACCESS_API_FIREWALL_CHILD_MAX_ATTEMPTS": "4",
+            "TRADE_ACCESS_API_FIREWALL_RECONCILE_RETRY_SECONDS": "60",
         }
         with patch.dict(os.environ, overrides, clear=False):
             configured = Settings()
@@ -42,6 +45,7 @@ trade_access_api:
         self.assertEqual(configured.firewall_target_codes, ("PG-FW", "IDC-FW"))
         self.assertEqual(configured.firewall_parallel_workers, 2)
         self.assertEqual(configured.firewall_child_max_attempts, 4)
+        self.assertEqual(configured.firewall_reconcile_retry_seconds, 60)
 
     def test_empty_firewall_target_list_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

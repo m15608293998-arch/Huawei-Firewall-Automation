@@ -332,6 +332,74 @@ class ApiTests(unittest.TestCase):
             "drifted",
         )
 
+    def test_clean_snapshot_queries_are_blocked_while_parent_reconciles(self) -> None:
+        import api.main as main_module
+
+        job = self.create_job()
+        self.storage.update_job(
+            job["job_id"],
+            {
+                "status": "reconciling",
+                "next_attempt_at": "2026-07-21T10:00:30+00:00",
+                "error_message": "IDC-FW did not reach desired state.",
+            },
+        )
+        original_runner = main_module.runner_service.run_reconciled_snapshot
+        runner_called = False
+
+        def unexpected_snapshot(snapshot_mode="snapshot"):
+            nonlocal runner_called
+            runner_called = True
+            raise AssertionError("clean snapshot runner must not be called")
+
+        main_module.runner_service.run_reconciled_snapshot = unexpected_snapshot
+        try:
+            for endpoint in (
+                get_firewall_snapshot,
+                get_firewall_ip_snapshot,
+                get_firewall_port_snapshot,
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    endpoint(principal=self.user)
+                self.assertEqual(caught.exception.status_code, 409)
+                self.assertEqual(
+                    caught.exception.detail["blocking_jobs"][0]["job_id"],
+                    job["job_id"],
+                )
+                self.assertEqual(
+                    caught.exception.detail["check_endpoint"],
+                    "/api/v1/trade-access/firewall/check",
+                )
+        finally:
+            main_module.runner_service.run_reconciled_snapshot = original_runner
+
+        self.assertFalse(runner_called)
+
+    def test_consistency_check_remains_available_while_parent_reconciles(self) -> None:
+        import api.main as main_module
+
+        job = self.create_job()
+        self.storage.update_job(
+            job["job_id"],
+            {
+                "status": "reconciling",
+                "next_attempt_at": "2026-07-21T10:00:30+00:00",
+            },
+        )
+        original_runner = main_module.runner_service.run_firewall_consistency_check
+        main_module.runner_service.run_firewall_consistency_check = lambda: SnapshotRunnerResult(
+            status="drifted",
+            rc=0,
+            artifact_dir="",
+            payload={"overall_status": "drifted"},
+        )
+        try:
+            response = check_firewall_consistency(principal=self.user)
+        finally:
+            main_module.runner_service.run_firewall_consistency_check = original_runner
+
+        self.assertEqual(response["overall_status"], "drifted")
+
     def test_firewall_check_returns_drift_report_as_successful_http_payload(self) -> None:
         import api.main as main_module
 
@@ -503,6 +571,12 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"/api/v1/trade-access/deny/ports", response.body)
         self.assertIn(b"/api/v1/trade-access/deny/ip", response.body)
         self.assertIn(b"/api/v1/trade-access/jobs/events/", response.body)
+        self.assertIn(b"/api/v1/trade-access/firewall/check", response.body)
+        self.assertIn(b"queryFirewallCheck", response.body)
+        self.assertIn(b"renderConsistencyCheck", response.body)
+        self.assertIn(b"renderJobTargetResults", response.body)
+        self.assertIn("多防火墙执行结果".encode("utf-8"), response.body)
+        self.assertIn("人工纠错建议".encode("utf-8"), response.body)
         self.assertNotIn(b"/api/v1/trade-access/ip/allow", response.body)
         self.assertNotIn(b"/api/v1/trade-access/ports/allow", response.body)
         self.assertNotIn(b"/api/v1/trade-access/ports/deny", response.body)
@@ -539,6 +613,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"saveFeedback", response.body)
         self.assertIn("正在保存用户授权".encode("utf-8"), response.body)
         self.assertIn("保存成功，授权已立即生效".encode("utf-8"), response.body)
+        self.assertIn(b"/api/v1/trade-access/firewall/check", response.body)
+        self.assertIn(b"queryFirewallCheck", response.body)
+        self.assertIn(b"renderConsistencyCheck", response.body)
+        self.assertIn("人工纠错建议".encode("utf-8"), response.body)
         self.assertNotIn(b"userAllowedIps", response.body)
         self.assertNotIn("允许操作的精确 IP".encode("utf-8"), response.body)
         self.assertNotIn("IP 数量".encode("utf-8"), response.body)
@@ -554,11 +632,16 @@ class ApiTests(unittest.TestCase):
                 "created_at": "2026-06-08T01:41:58.242945+00:00",
                 "started_at": "2026-06-08T01:41:58.488974Z",
                 "finished_at": None,
+                "next_attempt_at": "2026-06-08T01:42:28.488974+00:00",
             }
         )
         self.assertEqual(response.created_at, "2026-06-08T09:41:58.242945+08:00")
         self.assertEqual(response.started_at, "2026-06-08T09:41:58.488974+08:00")
         self.assertIsNone(response.finished_at)
+        self.assertEqual(
+            response.next_attempt_at,
+            "2026-06-08T09:42:28.488974+08:00",
+        )
 
     def test_user_and_admin_event_endpoints(self) -> None:
         job = self.create_job()

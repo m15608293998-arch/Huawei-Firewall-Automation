@@ -11,7 +11,7 @@ from api.config import settings
 from api.runner_service import AnsibleRunnerService, RunnerResult, SnapshotRunnerResult, runner_service
 from api.schemas import JobStatus
 from api.storage import JobStorage
-from api.time_utils import utc_now_iso
+from api.time_utils import utc_after_iso, utc_now_iso
 
 
 logger = logging.getLogger(__name__)
@@ -30,10 +30,9 @@ class JobWorker:
         self.poll_interval = poll_interval
 
     def run_once(self) -> bool:
-        # Acquire the orchestration lock before claiming so multiple worker
-        # processes cannot reverse FIFO order while waiting for the same lock.
-        # Parent jobs are serialized; only one parent's firewall children run
-        # in parallel at a time.
+        # One parent execution cycle is serialized so an all-node query never
+        # observes the middle of a three-firewall mutation. A failed cycle is
+        # rescheduled with backoff and releases this lock before another IP runs.
         with self._parent_orchestration_lock():
             job = self.storage.claim_next_runnable_job(utc_now_iso())
             if job is None:
@@ -78,10 +77,20 @@ class JobWorker:
                 target_codes,
                 str(job["local_tmp_dir"]),
             )
-            self.storage.update_job(job_id, {"status": JobStatus.prechecking.value})
+            self.storage.update_job(
+                job_id,
+                {
+                    "status": JobStatus.prechecking.value,
+                    "runner_status": "prechecking",
+                    "runner_rc": None,
+                    "error_message": None,
+                    "finished_at": None,
+                    "next_attempt_at": None,
+                },
+            )
             before_states, preflight_errors = self._preflight(job, target_codes)
             if preflight_errors:
-                self._finish_preflight_failure(job, preflight_errors)
+                self._schedule_preflight_retry(job, preflight_errors)
                 return
 
             desired_state = self._resolve_desired_state(job, before_states)
@@ -113,18 +122,9 @@ class JobWorker:
                 runner_status = "successful"
                 runner_rc = 0
                 error_message = None
-            elif verified:
-                final_status = JobStatus.manual_intervention_required.value
-                runner_status = "partially_successful"
-                runner_rc = 2
-                error_message = "Firewall targets still differ from desired state: {0}".format(
-                    ", ".join(failed)
-                )
             else:
-                final_status = JobStatus.failed.value
-                runner_status = "failed"
-                runner_rc = 1
-                error_message = "No firewall target reached the desired state."
+                self._schedule_target_retry(job, verified, failed)
+                return
 
             self.storage.update_job(
                 job_id,
@@ -134,6 +134,7 @@ class JobWorker:
                     "runner_rc": runner_rc,
                     "error_message": error_message,
                     "finished_at": utc_now_iso(),
+                    "next_attempt_at": None,
                 },
             )
             logger.info("Finished job %s with status=%s.", job_id, final_status)
@@ -146,6 +147,7 @@ class JobWorker:
                     "runner_rc": 1,
                     "error_message": str(exc),
                     "finished_at": utc_now_iso(),
+                    "next_attempt_at": None,
                 },
             )
             logger.exception("Job %s failed with an unexpected error.", job_id)
@@ -175,6 +177,8 @@ class JobWorker:
                         {
                             "status": "prechecked",
                             "before_state": state,
+                            "error_message": None,
+                            "finished_at": None,
                             "artifact_dir": snapshot.artifact_dir,
                         },
                     )
@@ -191,7 +195,7 @@ class JobWorker:
                     )
         return states, errors
 
-    def _finish_preflight_failure(
+    def _schedule_preflight_retry(
         self,
         job: dict[str, Any],
         errors: dict[str, str],
@@ -199,8 +203,8 @@ class JobWorker:
         self.storage.update_job(
             str(job["job_id"]),
             {
-                "status": JobStatus.failed.value,
-                "runner_status": "precheck_failed",
+                "status": JobStatus.reconciling.value,
+                "runner_status": "precheck_retry_scheduled",
                 "runner_rc": 1,
                 "error_message": "Firewall precheck failed: {0}".format(
                     "; ".join(
@@ -208,7 +212,40 @@ class JobWorker:
                         for code, message in sorted(errors.items())
                     )
                 ),
-                "finished_at": utc_now_iso(),
+                "finished_at": None,
+                "next_attempt_at": utc_after_iso(
+                    settings.firewall_reconcile_retry_seconds
+                ),
+            },
+        )
+
+    def _schedule_target_retry(
+        self,
+        job: dict[str, Any],
+        verified: list[str],
+        failed: list[str],
+    ) -> None:
+        if verified:
+            runner_status = "partially_successful_retry_scheduled"
+            runner_rc = 2
+            message = "Firewall targets still differ from desired state: {0}".format(
+                ", ".join(failed)
+            )
+        else:
+            runner_status = "retry_scheduled"
+            runner_rc = 1
+            message = "No firewall target reached the desired state; retry scheduled."
+        self.storage.update_job(
+            str(job["job_id"]),
+            {
+                "status": JobStatus.reconciling.value,
+                "runner_status": runner_status,
+                "runner_rc": runner_rc,
+                "error_message": message,
+                "finished_at": None,
+                "next_attempt_at": utc_after_iso(
+                    settings.firewall_reconcile_retry_seconds
+                ),
             },
         )
 

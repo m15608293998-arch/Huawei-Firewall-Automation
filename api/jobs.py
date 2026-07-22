@@ -52,6 +52,7 @@ def create_job(
         "firewall_targets": firewall_targets,
         "desired_state": None,
         "state_version": None,
+        "next_attempt_at": None,
     }
     storage.create_job(job, firewall_targets)
     return job
@@ -113,3 +114,11 @@ def list_jobs(
     for job in jobs:
         job["target_results"] = storage.list_job_targets(str(job["job_id"]))
     return jobs
+
+
+def list_reconciling_jobs(limit: int = 100) -> list[dict[str, Any]]:
+    return storage.list_jobs(
+        limit=limit,
+        offset=0,
+        job_status=JobStatus.reconciling.value,
+    )

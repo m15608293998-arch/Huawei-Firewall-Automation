@@ -31,6 +31,10 @@ class RoleStaticTests(unittest.TestCase):
         self.assertEqual(config["trade_access_api"]["firewall_targets"], ["TEST-FW"])
         self.assertEqual(config["trade_access_api"]["firewall_parallel_workers"], 3)
         self.assertEqual(config["trade_access_api"]["firewall_child_max_attempts"], 2)
+        self.assertEqual(
+            config["trade_access_api"]["firewall_reconcile_retry_seconds"],
+            30,
+        )
         self.assertTrue(config["enable_application_config"])
         self.assertTrue(config["commit_security_engine"])
         self.assertTrue(config["save_config"])
@@ -70,6 +74,10 @@ class RoleStaticTests(unittest.TestCase):
         )
         self.assertEqual(config["trade_access_api"]["firewall_parallel_workers"], 3)
         self.assertEqual(config["trade_access_api"]["firewall_child_max_attempts"], 2)
+        self.assertEqual(
+            config["trade_access_api"]["firewall_reconcile_retry_seconds"],
+            30,
+        )
         self.assertEqual(config["rule_port_limit"], 4)
         self.assertEqual(config["application_rule_limit"], 8)
         self.assertTrue(config["enable_application_config"])

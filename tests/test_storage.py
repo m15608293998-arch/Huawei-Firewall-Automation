@@ -58,6 +58,7 @@ class StorageMigrationTests(unittest.TestCase):
             self.assertIn("firewall_targets", job_columns)
             self.assertIn("desired_state", job_columns)
             self.assertIn("state_version", job_columns)
+            self.assertIn("next_attempt_at", job_columns)
             self.assertIn("job_firewall_targets", tables)
             self.assertIn("desired_access_states", tables)
 
@@ -139,13 +140,18 @@ class StorageQueueTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def create_job(self, job_id: str, created_at: str) -> None:
+    def create_job(
+        self,
+        job_id: str,
+        created_at: str,
+        target_ip: str = "192.168.5.224",
+    ) -> None:
         self.storage.create_job(
             {
                 "job_id": job_id,
                 "status": "pending",
                 "action": "allow",
-                "target_ip": "192.168.5.224",
+                "target_ip": target_ip,
                 "mask": 32,
                 "ports": [12001],
                 "description": None,
@@ -223,6 +229,45 @@ class StorageQueueTests(unittest.TestCase):
         claimed_jobs = [job for job in claims if job is not None]
         self.assertEqual(len(claimed_jobs), 1)
         self.assertEqual(claimed_jobs[0]["job_id"], "job-1")
+
+    def test_reconciling_job_wait_does_not_block_other_ip_but_blocks_same_ip(self) -> None:
+        self.create_job("job-retry", "2026-06-05T00:00:00+00:00")
+        self.storage.update_job(
+            "job-retry",
+            {
+                "status": "reconciling",
+                "next_attempt_at": "2026-06-05T00:02:00+00:00",
+            },
+        )
+        self.create_job("job-same-ip", "2026-06-05T00:00:01+00:00")
+        self.create_job(
+            "job-other-ip",
+            "2026-06-05T00:00:02+00:00",
+            target_ip="192.168.5.225",
+        )
+
+        claimed = self.storage.claim_next_runnable_job(
+            "2026-06-05T00:01:00+00:00"
+        )
+
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["job_id"], "job-other-ip")
+        self.storage.update_job(
+            "job-other-ip",
+            {
+                "status": "successful",
+                "finished_at": "2026-06-05T00:01:10+00:00",
+            },
+        )
+        self.assertIsNone(
+            self.storage.claim_next_runnable_job("2026-06-05T00:01:30+00:00")
+        )
+
+        retry = self.storage.claim_next_runnable_job(
+            "2026-06-05T00:02:00+00:00"
+        )
+        self.assertIsNotNone(retry)
+        self.assertEqual(retry["job_id"], "job-retry")
 
     def test_parent_children_and_desired_state_round_trip(self) -> None:
         targets = ["PG-FW", "PG-FW-1", "IDC-FW"]

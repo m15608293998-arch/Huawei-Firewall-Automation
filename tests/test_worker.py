@@ -123,12 +123,15 @@ class WorkerTests(unittest.TestCase):
         self.storage = JobStorage(Path(self.temp_dir.name) / "jobs.sqlite3")
         self.original_parallel_workers = settings.firewall_parallel_workers
         self.original_max_attempts = settings.firewall_child_max_attempts
+        self.original_retry_seconds = settings.firewall_reconcile_retry_seconds
         settings.firewall_parallel_workers = 3
         settings.firewall_child_max_attempts = 2
+        settings.firewall_reconcile_retry_seconds = 30
 
     def tearDown(self) -> None:
         settings.firewall_parallel_workers = self.original_parallel_workers
         settings.firewall_child_max_attempts = self.original_max_attempts
+        settings.firewall_reconcile_retry_seconds = self.original_retry_seconds
         self.temp_dir.cleanup()
 
     def create_job(
@@ -137,6 +140,8 @@ class WorkerTests(unittest.TestCase):
         firewall_targets=("TEST-FW",),
         action: str = "allow",
         ports=None,
+        target_ip: str = "192.168.5.224",
+        created_at: str = "2026-06-05T00:00:00+00:00",
     ) -> None:
         target_codes = list(firewall_targets)
         self.storage.create_job(
@@ -144,7 +149,7 @@ class WorkerTests(unittest.TestCase):
                 "job_id": job_id,
                 "status": "pending",
                 "action": action,
-                "target_ip": "192.168.5.224",
+                "target_ip": target_ip,
                 "mask": 32,
                 "ports": [12001] if ports is None else ports,
                 "description": None,
@@ -157,7 +162,7 @@ class WorkerTests(unittest.TestCase):
                 "runner_status": None,
                 "runner_rc": None,
                 "error_message": None,
-                "created_at": "2026-06-05T00:00:00+00:00",
+                "created_at": created_at,
                 "started_at": None,
                 "finished_at": None,
                 "artifact_dir": "/tmp/artifacts/{0}".format(job_id),
@@ -165,6 +170,7 @@ class WorkerTests(unittest.TestCase):
                 "firewall_targets": target_codes,
                 "desired_state": None,
                 "state_version": None,
+                "next_attempt_at": None,
             },
             target_codes,
         )
@@ -222,7 +228,7 @@ class WorkerTests(unittest.TestCase):
             {"verified"},
         )
 
-    def test_partial_target_failure_requires_manual_intervention(self) -> None:
+    def test_partial_target_failure_is_rescheduled_until_all_targets_verify(self) -> None:
         codes = ("PG-FW", "PG-FW-1", "IDC-FW")
         self.create_job(firewall_targets=codes)
         runner = FakeRunner(
@@ -236,9 +242,11 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(JobWorker(self.storage, runner).run_once())
 
         job = self.storage.get_job("job-1")
-        self.assertEqual(job["status"], "manual_intervention_required")
-        self.assertEqual(job["runner_status"], "partially_successful")
+        self.assertEqual(job["status"], "reconciling")
+        self.assertEqual(job["runner_status"], "partially_successful_retry_scheduled")
         self.assertIn("IDC-FW", job["error_message"])
+        self.assertIsNotNone(job["next_attempt_at"])
+        self.assertIsNone(job["finished_at"])
         targets = {
             target["firewall_code"]: target
             for target in self.storage.list_job_targets("job-1")
@@ -247,6 +255,30 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(targets["PG-FW-1"]["status"], "verified")
         self.assertEqual(targets["IDC-FW"]["status"], "failed")
         self.assertEqual(targets["IDC-FW"]["attempt_count"], 2)
+
+        runner.failed_codes.clear()
+        self.storage.update_job(
+            "job-1",
+            {"next_attempt_at": "2000-01-01T00:00:00+00:00"},
+        )
+        self.assertTrue(JobWorker(self.storage, runner).run_once())
+
+        repaired = self.storage.get_job("job-1")
+        self.assertEqual(repaired["status"], "successful")
+        self.assertIsNone(repaired["next_attempt_at"])
+        repaired_targets = {
+            target["firewall_code"]: target
+            for target in self.storage.list_job_targets("job-1")
+        }
+        self.assertEqual(
+            {target["status"] for target in repaired_targets.values()},
+            {"verified"},
+        )
+        self.assertEqual(repaired_targets["IDC-FW"]["attempt_count"], 3)
+        mutation_codes = [code for _, code in runner.jobs]
+        self.assertEqual(mutation_codes.count("PG-FW"), 1)
+        self.assertEqual(mutation_codes.count("PG-FW-1"), 1)
+        self.assertEqual(mutation_codes.count("IDC-FW"), 3)
 
     def test_preflight_failure_stops_before_any_mutation(self) -> None:
         codes = ("PG-FW", "IDC-FW")
@@ -259,9 +291,34 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(JobWorker(self.storage, runner).run_once())
 
         job = self.storage.get_job("job-1")
-        self.assertEqual(job["status"], "failed")
-        self.assertEqual(job["runner_status"], "precheck_failed")
+        self.assertEqual(job["status"], "reconciling")
+        self.assertEqual(job["runner_status"], "precheck_retry_scheduled")
+        self.assertIsNotNone(job["next_attempt_at"])
         self.assertEqual(runner.jobs, [])
+
+    def test_reconciliation_wait_allows_a_different_ip_parent_to_run(self) -> None:
+        codes = ("PG-FW", "PG-FW-1", "IDC-FW")
+        self.create_job(job_id="job-retry", firewall_targets=codes)
+        runner = FakeRunner(
+            states={code: {"ip_present": False, "ports": []} for code in codes},
+            failed_codes={"IDC-FW"},
+        )
+        worker = JobWorker(self.storage, runner)
+
+        self.assertTrue(worker.run_once())
+        self.assertEqual(self.storage.get_job("job-retry")["status"], "reconciling")
+        self.create_job(
+            job_id="job-other-ip",
+            firewall_targets=codes,
+            action="deny",
+            ports=[],
+            target_ip="192.168.5.225",
+            created_at="2026-06-05T00:00:01+00:00",
+        )
+
+        self.assertTrue(worker.run_once())
+        self.assertEqual(self.storage.get_job("job-other-ip")["status"], "successful")
+        self.assertEqual(self.storage.get_job("job-retry")["status"], "reconciling")
 
     def test_preflight_rejects_drift_without_a_desired_state_baseline(self) -> None:
         codes = ("PG-FW", "IDC-FW")
