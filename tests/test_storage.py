@@ -211,6 +211,73 @@ class StorageQueueTests(unittest.TestCase):
         self.assertEqual([job["job_id"] for job in first_page], ["job-3", "job-2"])
         self.assertEqual([job["job_id"] for job in second_page], ["job-1"])
 
+    def test_job_reads_can_include_parent_and_child_snapshot(self) -> None:
+        self.create_job("job-1", "2026-06-05T00:00:00+00:00")
+        self.storage.ensure_job_targets(
+            "job-1",
+            ("PG-FW", "IDC-FW"),
+            "/tmp/jobs/job-1",
+        )
+        self.storage.update_job_target(
+            "job-1",
+            "PG-FW",
+            {"status": "verifying", "attempt_count": 1},
+        )
+
+        detail = self.storage.get_job("job-1", include_targets=True)
+        listed = self.storage.list_jobs(include_targets=True)[0]
+
+        self.assertEqual(
+            [target["firewall_code"] for target in detail["target_results"]],
+            ["IDC-FW", "PG-FW"],
+        )
+        self.assertEqual(
+            [target["firewall_code"] for target in listed["target_results"]],
+            ["IDC-FW", "PG-FW"],
+        )
+
+    def test_parent_advances_to_verifying_only_when_all_children_are_ready(self) -> None:
+        self.create_job("job-1", "2026-06-05T00:00:00+00:00")
+        self.storage.ensure_job_targets(
+            "job-1",
+            ("PG-FW", "IDC-FW"),
+            "/tmp/jobs/job-1",
+        )
+        self.storage.update_job("job-1", {"status": "applying"})
+        self.storage.update_job_target("job-1", "PG-FW", {"status": "verifying"})
+
+        self.assertFalse(self.storage.mark_job_verifying_if_targets_ready("job-1"))
+        self.assertEqual(self.storage.get_job("job-1")["status"], "applying")
+
+        self.storage.update_job_target("job-1", "IDC-FW", {"status": "verified"})
+        self.assertTrue(self.storage.mark_job_verifying_if_targets_ready("job-1"))
+        parent = self.storage.get_job("job-1")
+        self.assertEqual(parent["status"], "verifying")
+        self.assertEqual(parent["runner_status"], "verifying")
+
+    def test_start_target_attempt_updates_parent_and_child_together(self) -> None:
+        self.create_job("job-1", "2026-06-05T00:00:00+00:00")
+        self.storage.ensure_job_targets("job-1", ("PG-FW",), "/tmp/jobs/job-1")
+        self.storage.update_job(
+            "job-1",
+            {"status": "verifying", "runner_status": "verifying"},
+        )
+        self.storage.update_job_target("job-1", "PG-FW", {"status": "verifying"})
+
+        self.storage.start_job_target_attempt(
+            "job-1",
+            "PG-FW",
+            "reconciling",
+            2,
+            "2026-06-05T00:01:00+00:00",
+        )
+
+        job = self.storage.get_job("job-1", include_targets=True)
+        self.assertEqual(job["status"], "applying")
+        self.assertEqual(job["runner_status"], "applying")
+        self.assertEqual(job["target_results"][0]["status"], "reconciling")
+        self.assertEqual(job["target_results"][0]["attempt_count"], 2)
+
     def test_two_storage_instances_cannot_claim_same_job(self) -> None:
         self.create_job("job-1", "2026-06-05T00:00:00+00:00")
         first_storage = JobStorage(self.database_path)

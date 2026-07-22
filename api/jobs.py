@@ -59,13 +59,12 @@ def create_job(
 
 
 def get_job_or_404(job_id: str) -> dict[str, Any]:
-    job = storage.get_job(job_id)
+    job = storage.get_job(job_id, include_targets=True)
     if job is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found.",
         )
-    job["target_results"] = storage.list_job_targets(job_id)
     return job
 
 
@@ -110,9 +109,8 @@ def list_jobs(
         offset=(page - 1) * limit,
         job_status=job_status,
         principal_id=principal_id,
+        include_targets=True,
     )
-    for job in jobs:
-        job["target_results"] = storage.list_job_targets(str(job["job_id"]))
     return jobs
 
 

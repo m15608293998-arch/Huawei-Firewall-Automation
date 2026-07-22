@@ -531,6 +531,7 @@
       action: "allow_ip",
       pollingTimer: null,
       pollingJobId: null,
+      selectedJobId: null,
       accessProfile: null,
       submitting: false,
       jobsPage: 1,
@@ -1243,6 +1244,7 @@
         displayResponse,
       );
       document.querySelector("#jobId").value = jobId;
+      state.selectedJobId = jobId;
       renderJobTargetResults(data);
       return data;
     }
@@ -1254,7 +1256,7 @@
       return request(`/api/v1/trade-access/jobs/events/${encodeURIComponent(jobId)}`);
     }
 
-    async function listJobs(displayResponse = true) {
+    async function listJobs(displayResponse = true, synchronizedJob = null) {
       if (!hasJobReadPermission()) throw new Error("当前账号没有任务查询权限");
       const status = document.querySelector("#jobStatus").value;
       const pageSize = Math.min(499, Math.max(1, Number(document.querySelector("#jobLimit").value) || 20));
@@ -1271,11 +1273,18 @@
       );
       if (jobs.length === 0 && state.jobsPage > 1) {
         state.jobsPage -= 1;
-        return listJobs(displayResponse);
+        return listJobs(displayResponse, synchronizedJob);
       }
       state.jobsHasNextPage = jobs.length > pageSize;
-      const visibleJobs = jobs.slice(0, pageSize);
+      let visibleJobs = jobs.slice(0, pageSize);
+      if (synchronizedJob) {
+        visibleJobs = visibleJobs.map((job) => (
+          job.job_id === synchronizedJob.job_id ? synchronizedJob : job
+        ));
+      }
       renderJobs(visibleJobs);
+      const selectedJob = visibleJobs.find((job) => job.job_id === state.selectedJobId);
+      if (selectedJob) renderJobTargetResults(selectedJob);
       updateJobsPaginationMeta(visibleJobs.length, pageSize);
       updateJobReadAvailability();
       return visibleJobs;
@@ -1308,7 +1317,9 @@
         });
         row.addEventListener("click", () => {
           document.querySelector("#jobId").value = job.job_id;
-          getJob(job.job_id).catch(() => {});
+          getJob(job.job_id)
+            .then(followJob)
+            .catch(() => {});
         });
         elements.jobsBody.append(row);
       });
@@ -1564,12 +1575,12 @@
       if (!state.pollingJobId) return;
       try {
         const job = await getJob(state.pollingJobId, false);
-        await listJobs(false);
+        await listJobs(false, job);
         if (terminalStatuses.has(job.status)) {
           stopPolling();
           return;
         }
-        elements.pollingState.textContent = `自动刷新 · ${job.status}`;
+        elements.pollingState.textContent = `自动刷新 · ${job.status} · ${targetProgress(job).text}`;
       } catch {
         stopPolling();
         return;
@@ -1582,6 +1593,16 @@
       state.pollingJobId = jobId;
       elements.pollingState.textContent = "自动刷新 · pending";
       state.pollingTimer = window.setTimeout(pollJob, 1200);
+    }
+
+    function followJob(job) {
+      state.selectedJobId = job.job_id;
+      if (terminalStatuses.has(job.status)) {
+        stopPolling();
+        return job;
+      }
+      startPolling(job.job_id);
+      return job;
     }
 
     function setAction(action) {
@@ -1671,7 +1692,7 @@
       ["targetIp", "ports", "description", "requestId"].forEach((id) => { document.querySelector(`#${id}`).value = ""; });
       document.querySelector("#mask").value = "32";
     });
-    document.querySelector("#getJob").addEventListener("click", () => getJob().catch(showLocalError));
+    document.querySelector("#getJob").addEventListener("click", () => getJob().then(followJob).catch(showLocalError));
     document.querySelector("#getEvents").addEventListener("click", () => getEvents().catch(showLocalError));
     document.querySelector("#listJobs").addEventListener("click", () => listJobs().catch(showLocalError));
     document.querySelector("#queryIpSnapshot").addEventListener("click", (event) => querySnapshot("ips", event.currentTarget));

@@ -17,6 +17,8 @@ class FakeRunner:
         no_op_codes=None,
         snapshot_failed_codes=None,
         mutation_barrier=None,
+        verification_started=None,
+        verification_release=None,
     ):
         self.states = {
             code: {
@@ -29,6 +31,8 @@ class FakeRunner:
         self.no_op_codes = set(no_op_codes or [])
         self.snapshot_failed_codes = set(snapshot_failed_codes or [])
         self.mutation_barrier = mutation_barrier
+        self.verification_started = verification_started
+        self.verification_release = verification_release
         self.jobs = []
         self.snapshot_calls = []
         self.active_mutations = 0
@@ -98,6 +102,7 @@ class FakeRunner:
         code = str(firewall_code)
         with self._lock:
             self.snapshot_calls.append((snapshot_mode, code))
+            snapshot_call_count = len(self.snapshot_calls)
             if code in self.snapshot_failed_codes:
                 return SnapshotRunnerResult(
                     status="failed",
@@ -111,6 +116,11 @@ class FakeRunner:
                     {"ip_present": False, "ports": []},
                 )
             )
+
+        if snapshot_call_count > 1 and self.verification_started is not None:
+            self.verification_started.set()
+            if self.verification_release is not None:
+                self.verification_release.wait(timeout=2)
 
         ip_items = []
         port_items = []
@@ -236,6 +246,32 @@ class WorkerTests(unittest.TestCase):
             {target["status"] for target in self.storage.list_job_targets("job-1")},
             {"verified"},
         )
+
+    def test_parent_reports_verifying_while_single_child_postcheck_runs(self) -> None:
+        self.create_job()
+        verification_started = threading.Event()
+        verification_release = threading.Event()
+        runner = FakeRunner(
+            states={"TEST-FW": {"ip_present": False, "ports": []}},
+            verification_started=verification_started,
+            verification_release=verification_release,
+        )
+        worker = JobWorker(self.storage, runner)
+        worker_thread = threading.Thread(target=worker.run_once)
+        worker_thread.start()
+        try:
+            self.assertTrue(verification_started.wait(timeout=2))
+            parent = self.storage.get_job("job-1")
+            child = self.storage.list_job_targets("job-1")[0]
+            self.assertEqual(parent["status"], "verifying")
+            self.assertEqual(parent["runner_status"], "verifying")
+            self.assertEqual(child["status"], "verifying")
+        finally:
+            verification_release.set()
+            worker_thread.join(timeout=2)
+
+        self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(self.storage.get_job("job-1")["status"], "successful")
 
     def test_partial_target_failure_is_rescheduled_until_all_targets_verify(self) -> None:
         codes = ("PG-FW", "PG-FW-1", "IDC-FW")

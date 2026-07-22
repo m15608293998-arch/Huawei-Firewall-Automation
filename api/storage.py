@@ -302,15 +302,33 @@ class JobStorage:
                 )
                 conn.commit()
 
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
+    def get_job(
+        self,
+        job_id: str,
+        include_targets: bool = False,
+    ) -> dict[str, Any] | None:
+        target_rows: list[sqlite3.Row] = []
         with self._connect() as conn:
+            if include_targets:
+                conn.execute("begin")
             row = conn.execute(
                 "select {0} from jobs where job_id = ?".format(", ".join(JOB_COLUMNS)),
                 (job_id,),
             ).fetchone()
+            if row is not None and include_targets:
+                target_rows = conn.execute(
+                    "select {0} from job_firewall_targets where job_id = ? "
+                    "order by firewall_code".format(", ".join(TARGET_COLUMNS)),
+                    (job_id,),
+                ).fetchall()
         if row is None:
             return None
-        return self._deserialize_job(row)
+        job = self._deserialize_job(row)
+        if include_targets:
+            job["target_results"] = [
+                self._deserialize_target(target_row) for target_row in target_rows
+            ]
+        return job
 
     def ensure_job_targets(
         self,
@@ -350,6 +368,7 @@ class JobStorage:
         offset: int = 0,
         job_status: str | None = None,
         principal_id: str | None = None,
+        include_targets: bool = False,
     ) -> list[dict[str, Any]]:
         conditions = []
         values: list[Any] = []
@@ -366,7 +385,10 @@ class JobStorage:
         values.extend([limit, offset])
 
         # 条件只来自白名单参数，值仍全部走占位符绑定。
+        target_rows_by_job: dict[str, list[sqlite3.Row]] = {}
         with self._connect() as conn:
+            if include_targets:
+                conn.execute("begin")
             rows = conn.execute(
                 "select {0} from jobs{1} order by created_at desc, job_id desc limit ? offset ?".format(
                     ", ".join(JOB_COLUMNS),
@@ -374,7 +396,30 @@ class JobStorage:
                 ),
                 values,
             ).fetchall()
-        return [self._deserialize_job(row) for row in rows]
+            if include_targets and rows:
+                job_ids = [str(row["job_id"]) for row in rows]
+                placeholders = ", ".join("?" for _ in job_ids)
+                target_rows = conn.execute(
+                    "select {0} from job_firewall_targets where job_id in ({1}) "
+                    "order by job_id, firewall_code".format(
+                        ", ".join(TARGET_COLUMNS),
+                        placeholders,
+                    ),
+                    job_ids,
+                ).fetchall()
+                for target_row in target_rows:
+                    target_rows_by_job.setdefault(
+                        str(target_row["job_id"]),
+                        [],
+                    ).append(target_row)
+        jobs = [self._deserialize_job(row) for row in rows]
+        if include_targets:
+            for job in jobs:
+                job["target_results"] = [
+                    self._deserialize_target(target_row)
+                    for target_row in target_rows_by_job.get(str(job["job_id"]), [])
+                ]
+        return jobs
 
     def claim_next_pending_job(self, started_at: str) -> dict[str, Any] | None:
         """Atomically claim the oldest pending job."""
@@ -562,6 +607,56 @@ class JobStorage:
                     values,
                 )
                 conn.commit()
+
+    def start_job_target_attempt(
+        self,
+        job_id: str,
+        firewall_code: str,
+        status: str,
+        attempt_count: int,
+        started_at: str,
+    ) -> None:
+        """Move the parent and one child into mutation state atomically."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("begin immediate")
+                conn.execute(
+                    "update jobs set status = 'applying', runner_status = 'applying' "
+                    "where job_id = ?",
+                    (job_id,),
+                )
+                conn.execute(
+                    "update job_firewall_targets "
+                    "set status = ?, attempt_count = ?, started_at = ?, "
+                    "error_message = null "
+                    "where job_id = ? and firewall_code = ?",
+                    (status, attempt_count, started_at, job_id, firewall_code),
+                )
+                conn.commit()
+
+    def mark_job_verifying_if_targets_ready(self, job_id: str) -> bool:
+        """Advance the parent only when every child is verifying or verified."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("begin immediate")
+                row = conn.execute(
+                    "select count(*) as total, "
+                    "sum(case when status in ('verifying', 'verified') then 1 else 0 end) "
+                    "as ready from job_firewall_targets where job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                total = int(row["total"] or 0)
+                ready = int(row["ready"] or 0)
+                changed = False
+                if total > 0 and ready == total:
+                    cursor = conn.execute(
+                        "update jobs set status = 'verifying', runner_status = 'verifying' "
+                        "where job_id = ? and status in ('applying', 'verifying')",
+                        (job_id,),
+                    )
+                    changed = cursor.rowcount == 1
+                conn.commit()
+        return changed
 
     def get_desired_access_state(self, target_ip: str) -> dict[str, Any] | None:
         with self._connect() as conn:

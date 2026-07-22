@@ -98,6 +98,7 @@ class JobWorker:
                 job_id,
                 {
                     "status": JobStatus.applying.value,
+                    "runner_status": "applying",
                     "desired_state": desired_state,
                     "state_version": desired_state["version"],
                 },
@@ -399,15 +400,12 @@ class JobWorker:
         previous_attempts = int(previous.get("attempt_count") or 0)
         for attempt_offset in range(1, settings.firewall_child_max_attempts + 1):
             attempt = previous_attempts + attempt_offset
-            self.storage.update_job_target(
+            self.storage.start_job_target_attempt(
                 job_id,
                 firewall_code,
-                {
-                    "status": "applying" if attempt == 1 else "reconciling",
-                    "attempt_count": attempt,
-                    "started_at": utc_now_iso(),
-                    "error_message": None,
-                },
+                "applying" if attempt == 1 else "reconciling",
+                attempt,
+                utc_now_iso(),
             )
             result: RunnerResult = self.runner.run_trade_access(job, firewall_code)
             last_error = result.error_message
@@ -427,6 +425,7 @@ class JobWorker:
                     "error_message": last_error,
                 },
             )
+            self.storage.mark_job_verifying_if_targets_ready(job_id)
             try:
                 observed_state, _ = self._query_target_state(job, firewall_code)
             except Exception as exc:
