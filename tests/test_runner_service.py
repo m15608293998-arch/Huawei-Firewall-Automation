@@ -221,6 +221,10 @@ class RunnerServiceTests(unittest.TestCase):
             try:
                 with patch.dict(sys.modules, {"ansible_runner": fake_runner}):
                     result = AnsibleRunnerService().run_firewall_snapshot("ips")
+                self.assertFalse(
+                    Path(captured_calls[0]["extravars"]["local_tmp_dir"]).exists()
+                )
+                self.assertEqual(list(settings.job_tmp_root.iterdir()), [])
             finally:
                 settings.runner_private_data_dir = original_private_data_dir
                 settings.job_tmp_root = original_job_tmp_root
@@ -237,6 +241,35 @@ class RunnerServiceTests(unittest.TestCase):
         self.assertEqual(captured_calls[0]["extravars"]["firewall_code"], "TEST-FW")
         self.assertIn("firewall_ips_snapshot.json", captured_calls[0]["extravars"]["snapshot_output_path"])
         self.assertTrue(captured_calls[0]["suppress_env_files"])
+
+    def test_snapshot_temporary_directory_is_removed_after_runner_failure(self) -> None:
+        captured_calls = []
+
+        def fake_run(**kwargs):
+            captured_calls.append(kwargs)
+            self.assertTrue(Path(kwargs["extravars"]["local_tmp_dir"]).is_dir())
+            return types.SimpleNamespace(status="failed", rc=2)
+
+        fake_runner = types.SimpleNamespace(run=fake_run)
+        original_private_data_dir = settings.runner_private_data_dir
+        original_job_tmp_root = settings.job_tmp_root
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings.runner_private_data_dir = Path(temp_dir) / "runner"
+            settings.job_tmp_root = Path(temp_dir) / "jobs"
+            try:
+                with patch.dict(sys.modules, {"ansible_runner": fake_runner}):
+                    result = AnsibleRunnerService().run_firewall_snapshot("state")
+                self.assertFalse(
+                    Path(captured_calls[0]["extravars"]["local_tmp_dir"]).exists()
+                )
+                self.assertEqual(list(settings.job_tmp_root.iterdir()), [])
+            finally:
+                settings.runner_private_data_dir = original_private_data_dir
+                settings.job_tmp_root = original_job_tmp_root
+
+        self.assertEqual(result.rc, 2)
+        self.assertEqual(len(captured_calls), 1)
 
     def test_explicit_firewall_code_gets_isolated_runner_directory(self) -> None:
         captured_calls = []

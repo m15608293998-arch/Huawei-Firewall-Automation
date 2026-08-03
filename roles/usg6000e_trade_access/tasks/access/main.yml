@@ -40,6 +40,8 @@
       - firewall_device is defined
       - firewall_device.device_host is defined
       - firewall_device.device_user is defined
+      - (firewall_device.device_port | default(22) | int) >= 1
+      - (firewall_device.device_port | default(22) | int) <= 65535
       - firewall_ssh_auth_type in ['publickey', 'password']
       - >-
         (
@@ -96,6 +98,8 @@
           role_path ~ '/files/run_usg_cli.py',
           '--host',
           firewall_device.device_host,
+          '--port',
+          firewall_device.device_port | default(22) | string,
           '--user',
           firewall_device.device_user,
         ] + (

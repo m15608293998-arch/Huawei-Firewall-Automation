@@ -50,6 +50,18 @@ CLI_ERROR_MARKERS = (
 )
 
 
+def parse_ssh_port(value):
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("SSH port must be an integer.") from exc
+
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("SSH port must be between 1 and 65535.")
+
+    return port
+
+
 def read_commands(cli_file):
     commands = []
     cli_path = pathlib.Path(cli_file).expanduser()
@@ -123,6 +135,7 @@ def build_ssh_cmd(args):
     ssh_cmd = (
         "ssh -tt "
         "-F /dev/null "
+        f"-p {args.port} "
         f"{auth_args}"
         "-o ControlMaster=auto "
         f"-o ControlPath={control_path} "
@@ -315,6 +328,7 @@ def main():
         description="Run Huawei USG CLI commands through SSH."
     )
     parser.add_argument("--host", required=True)
+    parser.add_argument("--port", type=parse_ssh_port, default=22)
     parser.add_argument("--user", required=True)
     auth_group = parser.add_mutually_exclusive_group(required=True)
     auth_group.add_argument("--identity-file")

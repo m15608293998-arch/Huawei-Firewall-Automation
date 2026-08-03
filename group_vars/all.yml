@@ -15,6 +15,7 @@ firewall_profiles:
   TEST-FW:
     firewall_device:
       device_host: "<TEST_FIREWALL_MGMT_IP>"
+      device_port: 22
       device_user: "<TEST_FIREWALL_USER>"
       auth_type: "password"
       device_password: "<TEST_FIREWALL_PASSWORD>"
@@ -73,6 +74,7 @@ local_tmp_dir: "/tmp/usg6000e_trade_access"
 #   PG-FW:
 #     firewall_device:
 #       device_host: "<PG_FW_MGMT_IP>"
+#       device_port: 22
 #       device_user: "<PG_FW_USER>"
 #       auth_type: "password"
 #       device_password: "<PG_FW_PASSWORD>"
@@ -100,6 +102,7 @@ local_tmp_dir: "/tmp/usg6000e_trade_access"
 #   PG-FW-1:
 #     firewall_device:
 #       device_host: "<PG_FW_1_MGMT_IP>"
+#       device_port: 22
 #       device_user: "<PG_FW_1_USER>"
 #       auth_type: "password"
 #       device_password: "<PG_FW_1_PASSWORD>"
@@ -121,6 +124,7 @@ local_tmp_dir: "/tmp/usg6000e_trade_access"
 #   IDC-FW:
 #     firewall_device:
 #       device_host: "<IDC_FW_MGMT_IP>"
+#       device_port: 22
 #       device_user: "<IDC_FW_USER>"
 #       auth_type: "password"
 #       device_password: "<IDC_FW_PASSWORD>"

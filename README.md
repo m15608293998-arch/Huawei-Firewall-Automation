@@ -156,6 +156,7 @@ firewall_profiles:
   TEST-FW:
     firewall_device:
       device_host: "<FIREWALL_MGMT_IP>"
+      device_port: 22
       device_user: "<FIREWALL_USER>"
       auth_type: "password"
       device_password: "<FIREWALL_PASSWORD>"
@@ -181,7 +182,8 @@ firewall_profiles:
 
 `trade_access_api` 会被 API 和 worker 直接读取；同名的
 `TRADE_ACCESS_API_FIREWALL_*` 环境变量只作为兼容覆盖项。设备管理 IP、用户名和
-密码都直接填写在对应 profile 的 `firewall_device` 中。
+端口、用户名和密码都直接填写在对应 profile 的 `firewall_device` 中；
+`device_port` 省略时默认为 `22`。
 
 也可以将配置档中的设备认证改为 SSH 私钥：
 
@@ -190,6 +192,7 @@ firewall_profiles:
   TEST-FW:
     firewall_device:
       device_host: "<FIREWALL_MGMT_IP>"
+      device_port: 22
       device_user: "<FIREWALL_USER>"
       auth_type: "publickey"
       identity_file: "/absolute/path/to/firewall_private_key"

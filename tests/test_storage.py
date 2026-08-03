@@ -11,6 +11,16 @@ from api.storage import JobStorage
 
 
 class StorageMigrationTests(unittest.TestCase):
+    def test_connection_context_closes_connection_after_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = JobStorage(Path(temp_dir) / "closed.sqlite3")
+
+            with storage._connect() as conn:
+                self.assertEqual(conn.execute("select 1").fetchone()[0], 1)
+
+            with self.assertRaises(sqlite3.ProgrammingError):
+                conn.execute("select 1")
+
     def test_legacy_job_schema_receives_keycloak_principal_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "legacy.sqlite3"

@@ -257,77 +257,84 @@ class AnsibleRunnerService:
             snapshot_mode,
             uuid.uuid4(),
         )
-        local_tmp_dir = settings.job_tmp_root / snapshot_id
-        local_tmp_dir.mkdir(parents=True, exist_ok=True)
-        snapshot_output_path = local_tmp_dir / "firewall_{0}_snapshot.json".format(
-            snapshot_mode
-        )
-
-        extravars = {
-            "firewall_workflow_mode": "snapshot",
-            "local_tmp_dir": str(local_tmp_dir),
-            "local_python_interpreter": sys.executable,
-            "snapshot_mode": snapshot_mode,
-            "snapshot_output_path": str(snapshot_output_path),
-            "firewall_code": target_code,
-        }
-
         artifact_dir = str(artifact_root / snapshot_id)
-        try:
-            with self._exclusive_runner_lock(firewall_runner_dir):
-                with self._isolated_private_data_dir(
-                    firewall_runner_dir,
-                    snapshot_id,
-                ) as private_data_dir:
-                    result = ansible_runner.run(
-                        private_data_dir=str(private_data_dir),
-                        artifact_dir=str(artifact_root),
-                        project_dir=str(project_root),
-                        playbook=playbook,
-                        ident=snapshot_id,
-                        extravars=extravars,
-                        envvars={
-                            "ANSIBLE_CONFIG": str(project_root / "ansible.cfg"),
-                        },
-                        suppress_env_files=True,
-                        rotate_artifacts=20,
-                        quiet=True,
-                    )
-        except Exception as exc:
-            return SnapshotRunnerResult(
-                status="failed",
-                rc=1,
-                artifact_dir=artifact_dir,
-                error_message=str(exc),
+        settings.job_tmp_root.mkdir(parents=True, exist_ok=True)
+        # Snapshot files are only an exchange boundary between Ansible and this
+        # process.  The parsed payload is returned from memory, while runner
+        # artifacts remain separately available under artifact_root.
+        with tempfile.TemporaryDirectory(
+            prefix="{0}-".format(snapshot_id),
+            dir=str(settings.job_tmp_root),
+        ) as temp_dir:
+            local_tmp_dir = Path(temp_dir)
+            snapshot_output_path = local_tmp_dir / "firewall_{0}_snapshot.json".format(
+                snapshot_mode
             )
 
-        status = getattr(result, "status", "unknown")
-        rc = int(getattr(result, "rc", 1) or 0)
-        if rc != 0:
+            extravars = {
+                "firewall_workflow_mode": "snapshot",
+                "local_tmp_dir": str(local_tmp_dir),
+                "local_python_interpreter": sys.executable,
+                "snapshot_mode": snapshot_mode,
+                "snapshot_output_path": str(snapshot_output_path),
+                "firewall_code": target_code,
+            }
+
+            try:
+                with self._exclusive_runner_lock(firewall_runner_dir):
+                    with self._isolated_private_data_dir(
+                        firewall_runner_dir,
+                        snapshot_id,
+                    ) as private_data_dir:
+                        result = ansible_runner.run(
+                            private_data_dir=str(private_data_dir),
+                            artifact_dir=str(artifact_root),
+                            project_dir=str(project_root),
+                            playbook=playbook,
+                            ident=snapshot_id,
+                            extravars=extravars,
+                            envvars={
+                                "ANSIBLE_CONFIG": str(project_root / "ansible.cfg"),
+                            },
+                            suppress_env_files=True,
+                            rotate_artifacts=20,
+                            quiet=True,
+                        )
+            except Exception as exc:
+                return SnapshotRunnerResult(
+                    status="failed",
+                    rc=1,
+                    artifact_dir=artifact_dir,
+                    error_message=str(exc),
+                )
+
+            status = getattr(result, "status", "unknown")
+            rc = int(getattr(result, "rc", 1) or 0)
+            if rc != 0:
+                return SnapshotRunnerResult(
+                    status=status,
+                    rc=rc,
+                    artifact_dir=artifact_dir,
+                    error_message="Firewall snapshot playbook failed.",
+                )
+
+            try:
+                with snapshot_output_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except Exception as exc:
+                return SnapshotRunnerResult(
+                    status="failed",
+                    rc=1,
+                    artifact_dir=artifact_dir,
+                    error_message="Failed to read firewall snapshot output: {0}".format(exc),
+                )
+
             return SnapshotRunnerResult(
                 status=status,
                 rc=rc,
                 artifact_dir=artifact_dir,
-                error_message="Firewall snapshot playbook failed.",
+                payload=payload,
             )
-
-        try:
-            with snapshot_output_path.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except Exception as exc:
-            return SnapshotRunnerResult(
-                status="failed",
-                rc=1,
-                artifact_dir=artifact_dir,
-                error_message="Failed to read firewall snapshot output: {0}".format(exc),
-            )
-
-        return SnapshotRunnerResult(
-            status=status,
-            rc=rc,
-            artifact_dir=artifact_dir,
-            payload=payload,
-        )
 
     def run_reconciled_snapshot(
         self,

@@ -66,6 +66,7 @@ class RoleStaticTests(unittest.TestCase):
             {"TraderServers-DirectAccess-IPs"},
         )
         self.assertEqual(test_profile["application_vsystem"], "private")
+        self.assertEqual(test_profile["firewall_device"]["device_port"], 22)
         self.assertEqual(
             test_profile["user_defined_application"]["name_prefix"],
             "UD_TServe_",
@@ -226,6 +227,7 @@ class RoleStaticTests(unittest.TestCase):
         self.assertIn("is match('^UD_')", main_yml)
         self.assertIn("firewall_device.auth_type", main_yml)
         self.assertIn("--password-env-var", main_yml)
+        self.assertIn("firewall_device.device_port | default(22)", main_yml)
         self.assertIn("switch vsys {{ application_vsystem }}", main_yml)
         self.assertIn("engine configuration commit", main_yml)
         self.assertIn("firewall_mutated: false", main_yml)

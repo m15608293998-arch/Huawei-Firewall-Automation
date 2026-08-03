@@ -1,3 +1,4 @@
+import argparse
 import importlib.util
 import unittest
 from pathlib import Path
@@ -39,6 +40,7 @@ class SequencedChild(FakeChild):
 def make_args(**kwargs):
     defaults = {
         "host": "192.168.6.54",
+        "port": 22,
         "user": "admin",
         "identity_file": "/tmp/firewall_id",
         "password_env_var": None,
@@ -52,6 +54,7 @@ class EngineCommitTests(unittest.TestCase):
         ssh_cmd = RUNNER.build_ssh_cmd(make_args())
 
         self.assertIn("-i /tmp/firewall_id", ssh_cmd)
+        self.assertIn("-p 22", ssh_cmd)
         self.assertIn("-o PreferredAuthentications=publickey", ssh_cmd)
         self.assertIn("-o PasswordAuthentication=no", ssh_cmd)
 
@@ -64,6 +67,17 @@ class EngineCommitTests(unittest.TestCase):
         self.assertIn("-o PubkeyAuthentication=no", ssh_cmd)
         self.assertIn("-o PasswordAuthentication=yes", ssh_cmd)
         self.assertNotIn("-i /tmp/firewall_id", ssh_cmd)
+
+    def test_build_ssh_cmd_uses_configured_nonstandard_port(self) -> None:
+        ssh_cmd = RUNNER.build_ssh_cmd(make_args(port=8022))
+
+        self.assertIn("-p 8022", ssh_cmd)
+
+    def test_parse_ssh_port_rejects_out_of_range_values(self) -> None:
+        for value in ("0", "65536", "not-a-port"):
+            with self.subTest(value=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    RUNNER.parse_ssh_port(value)
 
     def test_load_password_from_env_reads_expected_variable(self) -> None:
         with patch.dict("os.environ", {"USG6000E_DEVICE_PASSWORD": "secret"}, clear=False):

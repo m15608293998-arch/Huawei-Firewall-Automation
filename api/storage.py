@@ -2,6 +2,8 @@ try:
     import sqlite3
 except ModuleNotFoundError:
     import pysqlite3 as sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
 import threading
 from pathlib import Path
@@ -1134,11 +1136,19 @@ class JobStorage:
             [(subject_id, ip_address, updated_at) for ip_address in allowed_ips],
         )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(str(self.database_path), timeout=5)
-        conn.row_factory = sqlite3.Row
-        conn.execute("pragma busy_timeout = 5000")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("pragma busy_timeout = 5000")
+            # sqlite3.Connection's own context manager commits or rolls back,
+            # but it does not close the connection.  Keep those transaction
+            # semantics while making connection ownership explicit here.
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     @staticmethod
     def _deserialize_job(row: sqlite3.Row) -> dict[str, Any]:
