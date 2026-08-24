@@ -424,6 +424,32 @@ def build_port_snapshot(
         ),
     }
 
+
+def build_state_snapshot(
+    address_sources: list[dict[str, str]],
+    application_inventory_text: str,
+    application_details_text: str,
+    application_group_text: str,
+    application_prefix: str,
+    application_vsystem: str,
+    application_group: str,
+) -> dict[str, Any]:
+    """Return IP and port views from one device query for task verification."""
+    address_state = build_address_state(address_sources)
+    return {
+        "generated_at": generated_at_iso(),
+        "ip_items": build_ip_items(address_state),
+        "port_items": build_port_items(
+            address_state,
+            application_inventory_text,
+            application_details_text,
+            application_group_text,
+            application_prefix,
+            application_vsystem,
+            application_group,
+        ),
+    }
+
 def build_snapshot(
     address_sources: list[dict[str, str]],
     application_inventory_text: str,
@@ -448,7 +474,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["discover", "snapshot", "ips", "ports"],
+        choices=["discover", "snapshot", "ips", "ports", "state"],
         default="snapshot",
     )
     parser.add_argument("--address-sources-json")
@@ -474,7 +500,12 @@ def main() -> int:
     else:
         if not args.address_sources_json:
             raise SystemExit("--address-sources-json is required in snapshot or ports mode")
-        builder = build_port_snapshot if args.mode == "ports" else build_snapshot
+        if args.mode == "ports":
+            builder = build_port_snapshot
+        elif args.mode == "state":
+            builder = build_state_snapshot
+        else:
+            builder = build_snapshot
         payload = builder(
             json.loads(args.address_sources_json),
             read_text(args.application_inventory_file),

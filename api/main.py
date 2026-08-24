@@ -6,7 +6,6 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-import api.jobs as jobs_module
 from api.config import settings
 from api.auth import (
     Principal,
@@ -31,9 +30,11 @@ from api.jobs import (
     get_job_events,
     get_job_or_404,
     list_jobs,
+    list_reconciling_jobs,
 )
 from api.schemas import (
     CurrentAccessResponse,
+    FirewallConsistencyCheckResponse,
     FirewallIpSnapshotResponse,
     FirewallPortSnapshotResponse,
     FirewallSnapshotResponse,
@@ -113,18 +114,6 @@ def admin_ui():
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
-
-
-@app.get("/readyz")
-def readyz():
-    try:
-        jobs_module.storage.check_health()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Job database is unavailable.",
-        ) from exc
-    return {"status": "ready"}
 
 
 @app.get(
@@ -447,6 +436,53 @@ def create_trade_access_deny_job(
 
 
 @app.get(
+    "/api/v1/trade-access/firewall/check",
+    response_model=FirewallConsistencyCheckResponse,
+)
+def check_firewall_consistency(
+    principal: Principal = Depends(require_firewall_snapshot_read),
+):
+    del principal
+    result = runner_service.run_firewall_consistency_check()
+    if result.rc != 0 or result.payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "message": result.error_message or "Firewall consistency check failed.",
+                "check": result.payload,
+            },
+        )
+    # Drift is the expected diagnostic result of this endpoint, so it remains
+    # HTTP 200 and is expressed by overall_status plus per-node repair hints.
+    return result.payload
+
+
+def _reject_snapshot_during_reconciliation() -> None:
+    reconciling_jobs = list_reconciling_jobs()
+    if not reconciling_jobs:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "message": (
+                "Firewall snapshot query is disabled while one or more parent "
+                "jobs are reconciling. Use the firewall check endpoint for "
+                "per-node diagnostics."
+            ),
+            "blocking_jobs": [
+                {
+                    "job_id": job["job_id"],
+                    "target_ip": job["target_ip"],
+                    "next_attempt_at": job.get("next_attempt_at"),
+                }
+                for job in reconciling_jobs
+            ],
+            "check_endpoint": "/api/v1/trade-access/firewall/check",
+        },
+    )
+
+
+@app.get(
     "/api/v1/trade-access/firewall/snapshot",
     response_model=FirewallSnapshotResponse,
 )
@@ -454,9 +490,21 @@ def get_firewall_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    result = runner_service.run_firewall_snapshot("snapshot")
+    _reject_snapshot_during_reconciliation()
+    result = runner_service.run_reconciled_snapshot("snapshot")
+    if result.rc == 2:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": result.error_message,
+                "reconciliation": result.payload,
+            },
+        )
     if result.rc != 0 or result.payload is None:
-        detail = result.error_message or "Firewall snapshot query failed."
+        detail = {
+            "message": result.error_message or "Firewall snapshot query failed.",
+            "reconciliation": result.payload,
+        }
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=detail,
@@ -472,9 +520,21 @@ def get_firewall_ip_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    result = runner_service.run_firewall_snapshot("ips")
+    _reject_snapshot_during_reconciliation()
+    result = runner_service.run_reconciled_snapshot("ips")
+    if result.rc == 2:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": result.error_message,
+                "reconciliation": result.payload,
+            },
+        )
     if result.rc != 0 or result.payload is None:
-        detail = result.error_message or "Firewall IP snapshot query failed."
+        detail = {
+            "message": result.error_message or "Firewall IP snapshot query failed.",
+            "reconciliation": result.payload,
+        }
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=detail,
@@ -490,9 +550,21 @@ def get_firewall_port_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    result = runner_service.run_firewall_snapshot("ports")
+    _reject_snapshot_during_reconciliation()
+    result = runner_service.run_reconciled_snapshot("ports")
+    if result.rc == 2:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": result.error_message,
+                "reconciliation": result.payload,
+            },
+        )
     if result.rc != 0 or result.payload is None:
-        detail = result.error_message or "Firewall port snapshot query failed."
+        detail = {
+            "message": result.error_message or "Firewall port snapshot query failed.",
+            "reconciliation": result.payload,
+        }
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=detail,
@@ -506,7 +578,7 @@ def get_firewall_port_snapshot(
 )
 def list_trade_access_jobs(
     limit: int = Query(default=100, ge=1, le=500),
-    page: int = Query(default=1, ge=1, le=1_000_000),
+    page: int = Query(default=1, ge=1),
     job_status: JobStatus | None = Query(default=None, alias="status"),
     principal: Principal = Depends(require_firewall_job_read),
 ):
@@ -538,11 +610,12 @@ def get_trade_access_job(
 )
 def get_trade_access_job_events(
     job_id: str,
+    detail: str = Query(default="summary", pattern="^(summary|full)$"),
     principal: Principal = Depends(require_firewall_job_read),
 ):
     return {
         "job_id": job_id,
-        "events": get_job_events(job_id, principal),
+        "events": get_job_events(job_id, principal, detailed=detail == "full"),
     }
 
 
@@ -552,7 +625,7 @@ def get_trade_access_job_events(
 )
 def list_all_trade_access_jobs(
     limit: int = Query(default=100, ge=1, le=500),
-    page: int = Query(default=1, ge=1, le=1_000_000),
+    page: int = Query(default=1, ge=1),
     job_status: JobStatus | None = Query(default=None, alias="status"),
     principal: Principal = Depends(require_firewall_job_audit),
 ):
@@ -583,10 +656,11 @@ def get_any_trade_access_job(
 )
 def get_any_trade_access_job_events(
     job_id: str,
+    detail: str = Query(default="summary", pattern="^(summary|full)$"),
     principal: Principal = Depends(require_firewall_job_audit),
 ):
     del principal
     return {
         "job_id": job_id,
-        "events": get_admin_job_events(job_id),
+        "events": get_admin_job_events(job_id, detailed=detail == "full"),
     }

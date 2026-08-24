@@ -1,7 +1,8 @@
 # Trade Access API Layer Design
 
 > Historical design: the combined `X-API-Key` adapter described below has been
-> removed. See `docs/Keycloak标准认证鉴权实施说明.md` for the current admin OIDC and user SK design.
+> removed. See [`接口设计与维护说明.md`](接口设计与维护说明.md) for the current
+> API contract, authentication boundary, job queue and Ansible execution chain.
 
 ## 1. Architecture
 
@@ -112,7 +113,8 @@ The permission table is keyed by Keycloak `client_id`. It stores no secret.
   "target_ip": "192.168.66.22",
   "mask": 32,
   "ports": [12001, 12002],
-  "description": "temporary trade server access"
+  "description": "temporary trade server access",
+  "client_request_id": "REQ-20260608-001"
 }
 ```
 

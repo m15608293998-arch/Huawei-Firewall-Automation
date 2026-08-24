@@ -74,12 +74,27 @@
     .snapshot table { min-width:520px; }
     .snapshot tbody tr { cursor:default; }
     .snapshot-meta { color:var(--muted); font-size:12px; }
+    .consistency-report { border-top:1px solid var(--line); padding:22px; }
+    .consistency-overview { display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px; margin-bottom:18px; }
+    .consistency-status { display:inline-flex; align-items:center; min-height:28px; border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; }
+    .consistency-status.consistent { background:#e8f7f0; color:var(--success); }
+    .consistency-status.drifted { background:#fff5d9; color:#9a6700; }
+    .consistency-status.incomplete { background:#feeceb; color:var(--danger); }
+    .consistency-summary { color:#4b5563; font-size:13px; }
+    .check-section + .check-section { margin-top:20px; }
+    .check-section-title { margin:0 0 9px; color:#363b44; font-size:13px; font-weight:700; }
+    .consistency-report table { min-width:920px; }
+    .check-list { color:#4b5563; font-size:12px; line-height:1.7; white-space:pre-line; }
+    .status-badge { display:inline-block; border-radius:6px; padding:3px 8px; font-size:12px; font-weight:650; }
+    .status-badge.successful { background:#e8f7f0; color:var(--success); }
+    .status-badge.failed { background:#feeceb; color:var(--danger); }
+    .check-warning { margin-top:18px; padding:11px 13px; border-radius:8px; background:#fff8e6; color:#7a5200; font-size:12px; }
     .table-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 18px 18px; border-top:1px solid var(--line); }
     td.mono { font:12px "SFMono-Regular",Consolas,monospace; }
     .empty { padding:44px 24px; color:var(--muted); text-align:center; }
     .hidden { display:none !important; }
     @media (max-width:900px) { .layout { grid-template-columns:1fr; } }
-    @media (max-width:620px) { .header-inner,main { width:min(100% - 24px,1120px); } .header-inner { align-items:flex-start; flex-direction:column; justify-content:center; padding:14px 0; } .identity { width:100%; flex-wrap:wrap; } .row,.permissions,.search-row { grid-template-columns:1fr; } .form-footer { align-items:stretch; flex-direction:column; } button.command { width:100%; } th,td { padding:13px 14px; } }
+    @media (max-width:620px) { .header-inner,main { width:min(100% - 24px,1120px); } .header-inner { align-items:flex-start; flex-direction:column; justify-content:center; padding:14px 0; } .identity { width:100%; flex-wrap:wrap; } .row,.permissions,.search-row { grid-template-columns:1fr; } .form-footer { align-items:stretch; flex-direction:column; } button.command { width:100%; } .snapshot-actions { width:100%; } .snapshot-actions button { flex:1 1 100%; } .consistency-report { padding:18px 14px; } th,td { padding:13px 14px; } }
   </style>
 </head>
 <body>
@@ -105,17 +120,33 @@
       <section class="panel wide snapshot">
         <div class="panel-header">
           <div class="panel-heading"><h2>防火墙快照</h2><p class="panel-description">查询当前防火墙已生效的业务 IP 和端口清单</p></div>
-          <div class="snapshot-actions"><button id="queryIpSnapshot" class="command secondary" type="button">查询 IP 清单</button><button id="queryPortSnapshot" class="command secondary" type="button">查询端口清单</button></div>
+          <div class="snapshot-actions"><button id="queryIpSnapshot" class="command secondary" type="button">查询 IP 清单</button><button id="queryPortSnapshot" class="command secondary" type="button">查询端口清单</button><button id="queryFirewallCheck" class="command primary" type="button">检查节点一致性</button></div>
         </div>
         <div class="table-wrap"><table><thead><tr><th>IP</th><th>端口</th></tr></thead><tbody id="snapshotRows"></tbody></table><div id="emptySnapshot" class="empty">管理员登录后可查询防火墙快照</div></div>
         <div class="table-footer"><span id="snapshotMeta" class="snapshot-meta">尚未查询</span></div>
+        <div id="consistencyReport" class="consistency-report hidden" aria-live="polite">
+          <div class="consistency-overview"><span id="consistencyStatus" class="consistency-status"></span><span id="consistencySummary" class="consistency-summary"></span></div>
+          <section class="check-section">
+            <h3 class="check-section-title">节点查询与差异</h3>
+            <div class="table-wrap"><table><thead><tr><th>防火墙节点</th><th>查询状态</th><th>IP / 端口数量</th><th>缺失配置</th><th>多余配置</th><th>查询错误</th></tr></thead><tbody id="consistencyNodeRows"></tbody></table></div>
+          </section>
+          <section id="consistencyActionsSection" class="check-section hidden">
+            <h3 class="check-section-title">人工纠错建议（不会自动执行）</h3>
+            <div class="table-wrap"><table><thead><tr><th>目标节点</th><th>建议操作</th><th>对象</th><th>多数节点依据</th></tr></thead><tbody id="consistencyActionRows"></tbody></table></div>
+          </section>
+          <section id="consistencyAmbiguousSection" class="check-section hidden">
+            <h3 class="check-section-title">无法按多数节点判定，需人工确认</h3>
+            <div class="table-wrap"><table><thead><tr><th>对象</th><th>存在于</th><th>缺失于</th></tr></thead><tbody id="consistencyAmbiguousRows"></tbody></table></div>
+          </section>
+          <div id="consistencyWarning" class="check-warning"></div>
+        </div>
       </section>
     </section>
   </main>
   <script src="/static/oidc.js"></script>
   <script>
     const permissionDefinitions = [["firewall.ip.allow","user"],["firewall.ports.allow","user"],["firewall.ports.deny","user"],["firewall.ip.deny","user"],["firewall.snapshot.read","user"],["firewall.job.read","user"],["firewall.job.audit","admin"],["identity.user.manage","admin"]];
-    const state = { users: [], authenticated: false, selectedUser: null, snapshotLoading: false };
+    const state = { users: [], authenticated: false, selectedUser: null, snapshotLoading: false, consistencyCheckLoading: false };
     const $ = (selector) => document.querySelector(selector);
     const beijingDateTimeFormatter = new Intl.DateTimeFormat("zh-CN", { timeZone:"Asia/Shanghai", year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit", hourCycle:"h23" });
     function formatBeijingTime(value) { if(!value) return "-"; const date=new Date(value); if(Number.isNaN(date.getTime())) return value; const parts=Object.fromEntries(beijingDateTimeFormatter.formatToParts(date).map((part)=>[part.type,part.value])); return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`; }
@@ -127,7 +158,7 @@
     function saveFeedback(value,type="") { $("#saveFeedback").textContent=value; $("#saveFeedback").className=`save-feedback ${type}`; }
     async function checkHealth() { try { const response=await fetch("/healthz",{cache:"no-store"}); if(!response.ok) throw new Error(`HTTP ${response.status}`); const result=await response.json(); if(result.status!=="ok") throw new Error("Service unhealthy"); $("#serviceDot").className="dot ok"; $("#serviceText").textContent="服务正常"; } catch { $("#serviceDot").className="dot fail"; $("#serviceText").textContent="服务异常"; } }
     function applyProfile(force=false) { const profile=$("#userProfile").value; document.querySelectorAll("[data-permission]").forEach((input)=>{ const forbidden=profile==="user"&&input.dataset.level==="admin"; input.disabled=forbidden; if(forbidden) input.checked=false; else if(force) input.checked=true; }); }
-    async function api(path,options={}) { const headers=new Headers(options.headers||{}); if(options.body) headers.set("Content-Type","application/json"); const response=await tradeAccessOidc.authenticatedFetch(path,{...options,headers}); const text=await response.text(); let data; try{data=text?JSON.parse(text):null;}catch{data=text;} if(!response.ok){const detail=data&&data.detail?data.detail:`HTTP ${response.status}`; throw new Error(typeof detail==="string"?detail:JSON.stringify(detail));} return data; }
+    async function api(path,options={}) { const headers=new Headers(options.headers||{}); if(options.body) headers.set("Content-Type","application/json"); const response=await tradeAccessOidc.authenticatedFetch(path,{...options,headers}); const text=await response.text(); let data; try{data=text?JSON.parse(text):null;}catch{data=text;} if(!response.ok){const detail=data&&data.detail?data.detail:`HTTP ${response.status}`; const error=new Error(typeof detail==="string"?detail:JSON.stringify(detail)); error.status=response.status; error.payload=data; throw error;} return data; }
     function editUser(user) { const managed=state.users.find((item)=>item.subject_id===user.subject_id)||null; state.selectedUser=managed||user; $("#userSubject").value=user.subject_id; $("#username").value=user.username; $("#userDisplayName").value=user.display_name||""; $("#userProfile").value=user.profile||"user"; $("#userEnabled").value=String(user.enabled!==false); setPermissions(user.permissions||["firewall.ip.allow","firewall.ports.allow","firewall.ports.deny","firewall.ip.deny","firewall.snapshot.read","firewall.job.read"]); applyProfile(false); message(`正在配置 ${user.username}`); saveFeedback(""); }
     function userAuthorizationPayload() { return {username:$("#username").value,display_name:$("#userDisplayName").value.trim()||null,profile:$("#userProfile").value,enabled:$("#userEnabled").value==="true",permissions:permissions(),allowed_ips:[]}; }
     function renderUsers() { $("#userRows").replaceChildren(); $("#emptyUsers").classList.toggle("hidden",state.users.length>0); state.users.forEach((user)=>{ const row=document.createElement("tr"); [user.username,user.profile,user.enabled?"启用":"停用",formatBeijingTime(user.updated_at)].forEach((value,index)=>{const cell=document.createElement("td"); cell.textContent=value; if(index===0) cell.className="mono"; row.append(cell);}); row.addEventListener("click",()=>editUser(user)); $("#userRows").append(row); }); }
@@ -135,13 +166,43 @@
     async function searchUsers() { const query=$("#userSearch").value.trim(); if(!query) throw new Error("请输入搜索条件"); const users=await api(`/api/v1/admin/users/search?q=${encodeURIComponent(query)}`); const box=$("#searchResults"); box.replaceChildren(); box.classList.toggle("hidden",users.length===0); users.forEach((user)=>{const button=document.createElement("button"); button.className="search-item"; button.type="button"; button.textContent=user.username; const detail=document.createElement("small"); detail.textContent=[user.display_name,user.email,user.subject_id].filter(Boolean).join(" · "); button.append(detail); button.addEventListener("click",()=>{const managed=state.users.find((item)=>item.subject_id===user.subject_id); editUser(managed||{...user,profile:"user",permissions:["firewall.ip.allow","firewall.ports.allow","firewall.ports.deny","firewall.ip.deny","firewall.snapshot.read","firewall.job.read"],allowed_ips:[]}); box.classList.add("hidden");}); box.append(button);}); }
     async function saveUser() { const subjectId=$("#userSubject").value; if(!subjectId) throw new Error("请先选择 Keycloak 用户"); const result=await api(`/api/v1/admin/users/${encodeURIComponent(subjectId)}`,{method:"PUT",body:JSON.stringify(userAuthorizationPayload())}); await loadUsers(); editUser(state.users.find((item)=>item.subject_id===result.subject_id)||result); message(`已保存 ${result.username} 的授权，下次请求立即生效`,"ok"); }
     async function runSaveUser(button) { const originalText=button.textContent; try { button.disabled=true; button.textContent="保存中..."; saveFeedback("正在保存用户授权...","saving"); await saveUser(); button.textContent="已保存"; saveFeedback("保存成功，授权已立即生效","ok"); await new Promise((resolve)=>window.setTimeout(resolve,1200)); } catch(error) { message(error.message,"error"); saveFeedback(`保存失败：${error.message}`,"error"); } finally { button.disabled=false; button.textContent=originalText; } }
-    function setSnapshotButtonsDisabled(disabled) { $("#queryIpSnapshot").disabled=disabled; $("#queryPortSnapshot").disabled=disabled; }
+    function setSnapshotButtonsDisabled(disabled) { $("#queryIpSnapshot").disabled=disabled; $("#queryPortSnapshot").disabled=disabled; $("#queryFirewallCheck").disabled=disabled; }
     function renderSnapshot(snapshot,mode) { const items=snapshot.items||[]; $("#snapshotRows").replaceChildren(); $("#emptySnapshot").classList.toggle("hidden",items.length>0); $("#emptySnapshot").textContent=items.length>0?"":"暂无快照数据"; $("#snapshotMeta").textContent=`${mode==="ips"?"IP":"端口"} 对账清单 · ${formatBeijingTime(snapshot.generated_at)} · ${items.length} 条`; items.forEach((item)=>{ const row=document.createElement("tr"); const values=[{value:item.ip,mono:true},{value:mode==="ips"?"-":item.port}]; values.forEach(({value,mono})=>{ const cell=document.createElement("td"); cell.textContent=value; if(mono) cell.className="mono"; row.append(cell); }); $("#snapshotRows").append(row); }); }
-    async function querySnapshot(mode,button) { if(state.snapshotLoading) return; const originalText=button.textContent; try { state.snapshotLoading=true; setSnapshotButtonsDisabled(true); button.textContent="查询中..."; $("#emptySnapshot").classList.remove("hidden"); $("#emptySnapshot").textContent="正在查询防火墙快照，请稍候"; const snapshot=await api(`/api/v1/trade-access/firewall/snapshot/${mode}`); renderSnapshot(snapshot,mode); message(`${mode==="ips"?"IP":"端口"} 清单查询完成，共 ${snapshot.items.length} 条`,"ok"); } catch(error) { $("#emptySnapshot").classList.remove("hidden"); $("#emptySnapshot").textContent=error.message; message(error.message,"error"); } finally { state.snapshotLoading=false; button.textContent=originalText; setSnapshotButtonsDisabled(!state.authenticated); } }
+    function appendCheckCell(row,value,className="") { const cell=document.createElement("td"); cell.textContent=value; if(className) cell.className=className; row.append(cell); return cell; }
+    function appendCheckStatus(cell,successful) { const badge=document.createElement("span"); badge.className=`status-badge ${successful?"successful":"failed"}`; badge.textContent=successful?"查询成功":"查询失败"; cell.append(badge); }
+    function formatNodeDifference(node,direction) { const ips=node[`ip_${direction}`]||[]; const ports=node[`port_${direction}`]||[]; return [...ips.map((item)=>`IP：${item.ip}`),...ports.map((item)=>`端口：${item.ip}:${item.port}`)].join("\n")||"无"; }
+    function checkStatusLabel(status) { return {consistent:"节点数据一致",drifted:"节点数据不一致",incomplete:"查询不完整"}[status]||status||"未知状态"; }
+    function actionLabel(action) { return {add_ip:"补充 IP",remove_ip:"删除 IP",add_port:"补充端口",remove_port:"删除端口"}[action]||action; }
+    function actionObject(action) { return action.port==null?action.ip:`${action.ip}:${action.port}`; }
+    function actionBasis(action) { return `存在：${(action.present_on_firewalls||[]).join("、")||"无"}；缺失：${(action.absent_on_firewalls||[]).join("、")||"无"}`; }
+    function renderConsistencyCheck(check) {
+      const status=["consistent","drifted","incomplete"].includes(check.overall_status)?check.overall_status:"incomplete";
+      const summary=check.summary||{};
+      $("#consistencyStatus").className=`consistency-status ${status}`;
+      $("#consistencyStatus").textContent=checkStatusLabel(status);
+      $("#consistencySummary").textContent=[`已查询 ${summary.successful_firewall_count||0}/${summary.configured_firewall_count||(check.firewall_codes||[]).length} 台`,`IP 差异 ${summary.ip_drift_item_count||0}`,`端口差异 ${summary.port_drift_item_count||0}`,`纠错建议 ${summary.suggested_action_count||0}`,`需人工判定 ${summary.ambiguous_item_count||0}`,`检查时间 ${formatBeijingTime(check.checked_at)}`].join(" · ");
+      const codes=check.firewall_codes||Object.keys(check.firewalls||{});
+      $("#consistencyNodeRows").replaceChildren();
+      codes.forEach((code)=>{ const node=(check.firewalls||{})[code]||{}; const row=document.createElement("tr"); appendCheckCell(row,code,"mono"); const statusCell=document.createElement("td"); appendCheckStatus(statusCell,node.query_status==="successful"); row.append(statusCell); appendCheckCell(row,`${node.ip_count||0} / ${node.port_count||0}`); appendCheckCell(row,formatNodeDifference(node,"missing"),"check-list"); appendCheckCell(row,formatNodeDifference(node,"extra"),"check-list"); appendCheckCell(row,node.error_message||"-"); $("#consistencyNodeRows").append(row); });
+      const actions=codes.flatMap((code)=>((check.firewalls||{})[code]||{}).suggested_actions||[]);
+      $("#consistencyActionRows").replaceChildren();
+      actions.forEach((action)=>{ const row=document.createElement("tr"); appendCheckCell(row,action.firewall_code,"mono"); appendCheckCell(row,actionLabel(action.action)); appendCheckCell(row,actionObject(action),"mono"); appendCheckCell(row,actionBasis(action)); $("#consistencyActionRows").append(row); });
+      $("#consistencyActionsSection").classList.toggle("hidden",actions.length===0);
+      const differences=check.differences||{};
+      const ambiguous=[...(differences.ips||[]).filter((item)=>item.reference_state==="ambiguous").map((item)=>({...item,object:item.ip})),...(differences.ports||[]).filter((item)=>item.reference_state==="ambiguous").map((item)=>({...item,object:`${item.ip}:${item.port}`}))];
+      $("#consistencyAmbiguousRows").replaceChildren();
+      ambiguous.forEach((item)=>{ const row=document.createElement("tr"); appendCheckCell(row,item.object,"mono"); appendCheckCell(row,(item.present_on_firewalls||[]).join("、")||"无"); appendCheckCell(row,(item.absent_on_firewalls||[]).join("、")||"无"); $("#consistencyAmbiguousRows").append(row); });
+      $("#consistencyAmbiguousSection").classList.toggle("hidden",ambiguous.length===0);
+      $("#consistencyWarning").textContent=status==="incomplete"?"部分防火墙查询失败，本次不会生成纠错建议。请先恢复失败节点连接，再重新检查。":"纠错建议依据全部配置节点的严格多数结果，仅供人工核实，不会自动执行；操作前请确认真实业务期望状态。";
+      $("#consistencyReport").classList.remove("hidden");
+    }
+    function consistencyCheckFromError(error) { return error&&error.payload&&error.payload.detail&&error.payload.detail.check?error.payload.detail.check:null; }
+    async function queryFirewallConsistency(button) { if(state.consistencyCheckLoading||state.snapshotLoading) return; const originalText=button.textContent; try { state.consistencyCheckLoading=true; setSnapshotButtonsDisabled(true); button.textContent="检查中..."; const check=await api("/api/v1/trade-access/firewall/check"); renderConsistencyCheck(check); message("防火墙节点一致性检查完成",check.overall_status==="consistent"?"ok":"error"); } catch(error) { const check=consistencyCheckFromError(error); if(check) renderConsistencyCheck(check); message(check?"部分防火墙查询失败，请查看节点错误":error.message,"error"); } finally { state.consistencyCheckLoading=false; button.textContent=originalText; setSnapshotButtonsDisabled(!state.authenticated); } }
+    async function querySnapshot(mode,button) { if(state.snapshotLoading||state.consistencyCheckLoading) return; const originalText=button.textContent; try { state.snapshotLoading=true; setSnapshotButtonsDisabled(true); button.textContent="查询中..."; $("#emptySnapshot").classList.remove("hidden"); $("#emptySnapshot").textContent="正在查询防火墙快照，请稍候"; const snapshot=await api(`/api/v1/trade-access/firewall/snapshot/${mode}`); renderSnapshot(snapshot,mode); message(`${mode==="ips"?"IP":"端口"} 清单查询完成，共 ${snapshot.items.length} 条`,"ok"); } catch(error) { const detail=error.payload&&error.payload.detail; const detailMessage=detail&&(detail.blocking_jobs||[]).length?`存在 ${detail.blocking_jobs.length} 个未收敛父任务，普通全量查询已暂停；请使用“检查节点一致性”查看差异。`:(detail&&detail.message?detail.message:error.message); $("#emptySnapshot").classList.remove("hidden"); $("#emptySnapshot").textContent=detailMessage; message(detailMessage,"error"); } finally { state.snapshotLoading=false; button.textContent=originalText; setSnapshotButtonsDisabled(!state.authenticated); } }
     async function connect() { const me=await api("/api/v1/trade-access/me"); if(!me.is_admin||!me.permissions.includes("identity.user.manage")) throw new Error("当前用户没有用户管理权限"); state.authenticated=true; $("#identityText").textContent=me.subject; $("#identityText").classList.remove("hidden"); $("#login").classList.add("hidden"); $("#logout").classList.remove("hidden"); setSnapshotButtonsDisabled(false); $("#emptySnapshot").textContent="点击上方按钮查询防火墙快照"; const status=await api("/api/v1/admin/users/status"); if(!status.keycloak_provisioning_configured) throw new Error("服务端未配置 Provisioning Client"); await loadUsers(); }
     async function run(action,target) { try{target.disabled=true; await action();}catch(error){message(error.message,"error");}finally{target.disabled=false;} }
     buildPermissionControls(); applyProfile(true);
-    $("#login").addEventListener("click",()=>tradeAccessOidc.loginFresh()); $("#logout").addEventListener("click",()=>tradeAccessOidc.switchAccount()); $("#userProfile").addEventListener("change",()=>applyProfile(true)); $("#searchUsers").addEventListener("click",(event)=>run(searchUsers,event.currentTarget)); $("#saveUser").addEventListener("click",(event)=>runSaveUser(event.currentTarget)); $("#refreshUsers").addEventListener("click",(event)=>run(loadUsers,event.currentTarget)); $("#queryIpSnapshot").addEventListener("click",(event)=>querySnapshot("ips",event.currentTarget)); $("#queryPortSnapshot").addEventListener("click",(event)=>querySnapshot("ports",event.currentTarget)); setSnapshotButtonsDisabled(true);
+    $("#login").addEventListener("click",()=>tradeAccessOidc.loginFresh()); $("#logout").addEventListener("click",()=>tradeAccessOidc.switchAccount()); $("#userProfile").addEventListener("change",()=>applyProfile(true)); $("#searchUsers").addEventListener("click",(event)=>run(searchUsers,event.currentTarget)); $("#saveUser").addEventListener("click",(event)=>runSaveUser(event.currentTarget)); $("#refreshUsers").addEventListener("click",(event)=>run(loadUsers,event.currentTarget)); $("#queryIpSnapshot").addEventListener("click",(event)=>querySnapshot("ips",event.currentTarget)); $("#queryPortSnapshot").addEventListener("click",(event)=>querySnapshot("ports",event.currentTarget)); $("#queryFirewallCheck").addEventListener("click",(event)=>queryFirewallConsistency(event.currentTarget)); setSnapshotButtonsDisabled(true);
     checkHealth(); window.setInterval(checkHealth,30000);
     tradeAccessOidc.initialize().then(()=>{if(tradeAccessOidc.isAuthenticated()) return connect(); return null;}).catch((error)=>{message(error.message,"error"); if(tradeAccessOidc.isAuthenticated()){ $("#identityText").textContent="已登录非管理员账号"; $("#identityText").classList.remove("hidden"); $("#login").classList.add("hidden"); $("#logout").classList.remove("hidden"); }});
   </script>

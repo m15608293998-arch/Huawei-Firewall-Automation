@@ -1,44 +1,44 @@
 ---
-# 华为 USG6000E 测试节点管理地址
-# firewall_device:
-#   device_host: "192.168.6.54"
-#   device_user: "slpeng"
-#   auth_type: "publickey"
-#   identity_file: "/home/ansiblerun/.ssh/usg6000e_slpeng"
-firewall_device:
-    device_host: "192.168.6.54"
-    device_user: "slpeng"
-    auth_type: "password"
-    device_password: "slpeng!@#123"
- 
-address_vsystems:
-  - name: "public"
-    address_set_name: "TraderServers-DirectAccess-IPs"
-    switch_required: false
+# 当前生效：单节点测试环境。
+trade_access_api:
+  firewall_targets:
+    - "TEST-FW"
+  firewall_parallel_workers: 3
+  # 每个防火墙子任务在整个父任务生命周期内累计最多执行 2 次。
+  firewall_child_max_attempts: 2
+  # 第一次可恢复配置失败后，父任务内部短暂退避，再只重试失败节点。
+  firewall_reconcile_retry_seconds: 3
 
-  - name: "Internet"
-    address_set_name: "TraderServers-DirectAccess-IPs"
-    switch_required: true
+default_firewall_code: "TEST-FW"
 
-  - name: "private"
-    address_set_name: "TraderServers-DirectAccess-IPs"
-    switch_required: true
+firewall_profiles:
+  TEST-FW:
+    firewall_device:
+      device_host: "<TEST_FIREWALL_MGMT_IP>"
+      device_port: 22
+      device_user: "<TEST_FIREWALL_USER>"
+      auth_type: "password"
+      device_password: "<TEST_FIREWALL_PASSWORD>"
+    address_vsystems:
+      - name: "public"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: false
+      - name: "Internet"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+      - name: "private"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+    application_vsystem: "private"
+    user_defined_application:
+      name_prefix: "UD_TServe_"
+      category: "General"
+      subcategory: "General_TCP"
+      data_model: "client-server"
+      label: "Business-Applications"
+      application_group_name: "UDG_TradeServers"
 
-# User-Defined Application 只在 private 里配置
-application_vsystem: "private"
-
-# 自定义应用配置
-user_defined_application:
-  name_prefix: "UD_TServe_"
-  category: "General"
-  subcategory: "General_TCP"
-  data_model: "client-server"
-  label: "Business-Applications"
-  application_group_name: "UDG_TradeServers"
-
-# 需要放行的业务端口
-# 每条 rule 最多 4 个端口，每个 Application 最多 8 条 rule（32 个端口）
-# 超出后自动使用 UD_TServe_<IP>_2、UD_TServe_<IP>_3 等后续对象
+# 每条 Rule 最多 4 个端口，每个 Application 最多 8 条 Rule。
 application_ports:
   - 12001
   - 12002
@@ -46,10 +46,110 @@ application_ports:
   - 12004
 rule_port_limit: 4
 application_rule_limit: 8
-
-# 测试阶段先 false，确认没问题后再改 true
 enable_application_config: true
 commit_security_engine: true
 save_config: true
-# Ansible 控制节点本地临时目录
 local_tmp_dir: "/tmp/usg6000e_trade_access"
+
+# =============================================================================
+# 生产环境完整模板（当前全部为注释，不会生效）。
+# 生产启用时：先备份本文件，再用下面 BEGIN/END 之间的内容替换上面的测试配置，
+# 填写三台设备的真实管理 IP、账号、密码后，重启 API 和 worker。
+# 这里故意完整展开，不使用 YAML 的 & 锚点和 * 别名。
+# BEGIN_PRODUCTION_CONFIG
+# trade_access_api:
+#   firewall_targets:
+#     - "PG-FW"
+#     - "PG-FW-1"
+#     - "IDC-FW"
+#   firewall_parallel_workers: 3
+#   # 每个防火墙子任务在整个父任务生命周期内累计最多执行 2 次。
+#   firewall_child_max_attempts: 2
+#   # 第一次可恢复配置失败后，父任务内部短暂退避，再只重试失败节点。
+#   firewall_reconcile_retry_seconds: 3
+#
+# default_firewall_code: "PG-FW"
+#
+# firewall_profiles:
+#   PG-FW:
+#     firewall_device:
+#       device_host: "<PG_FW_MGMT_IP>"
+#       device_port: 22
+#       device_user: "<PG_FW_USER>"
+#       auth_type: "password"
+#       device_password: "<PG_FW_PASSWORD>"
+#     # IP 操作空间：public、private、Internet。
+#     address_vsystems:
+#       - name: "public"
+#         address_set_name: "TraderServers-DirectAccess-IPs"
+#         switch_required: false
+#       - name: "private"
+#         address_set_name: "TraderServers-DirectAccess-IPs"
+#         switch_required: true
+#       - name: "Internet"
+#         address_set_name: "TraderServers-DirectAccess-IPs"
+#         switch_required: true
+#     # Application/Application Group 只在 private 操作。
+#     application_vsystem: "private"
+#     user_defined_application:
+#       name_prefix: "UD_TServe_"
+#       category: "General"
+#       subcategory: "General_TCP"
+#       data_model: "client-server"
+#       label: "Business-Applications"
+#       application_group_name: "UDG_TradeServers"
+#
+#   PG-FW-1:
+#     firewall_device:
+#       device_host: "<PG_FW_1_MGMT_IP>"
+#       device_port: 22
+#       device_user: "<PG_FW_1_USER>"
+#       auth_type: "password"
+#       device_password: "<PG_FW_1_PASSWORD>"
+#     # IP 操作空间：public。
+#     address_vsystems:
+#       - name: "public"
+#         address_set_name: "TraderServers-DirectAccess-IPs"
+#         switch_required: false
+#     # Application/Application Group 只在 public 操作。
+#     application_vsystem: "public"
+#     user_defined_application:
+#       name_prefix: "UD_TServe_"
+#       category: "General"
+#       subcategory: "General_TCP"
+#       data_model: "client-server"
+#       label: "Business-Applications"
+#       application_group_name: "UDG_TradeServers"
+#
+#   IDC-FW:
+#     firewall_device:
+#       device_host: "<IDC_FW_MGMT_IP>"
+#       device_port: 22
+#       device_user: "<IDC_FW_USER>"
+#       auth_type: "password"
+#       device_password: "<IDC_FW_PASSWORD>"
+#     # IP 操作空间：private、Internet。
+#     address_vsystems:
+#       - name: "private"
+#         address_set_name: "TraderServers-DirectAccess-IPs"
+#         switch_required: true
+#       - name: "Internet"
+#         address_set_name: "TraderServers-DirectAccess-IPs"
+#         switch_required: true
+#     # Application/Application Group 只在 private 操作。
+#     application_vsystem: "private"
+#     user_defined_application:
+#       name_prefix: "UD_TServe_"
+#       category: "General"
+#       subcategory: "General_TCP"
+#       data_model: "client-server"
+#       label: "Business-Applications"
+#       application_group_name: "UDG_TradeServers"
+#
+# rule_port_limit: 4
+# application_rule_limit: 8
+# enable_application_config: true
+# commit_security_engine: true
+# save_config: true
+# local_tmp_dir: "/tmp/usg6000e_trade_access"
+# END_PRODUCTION_CONFIG

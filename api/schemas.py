@@ -2,14 +2,7 @@ import ipaddress
 import re
 from enum import Enum
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    StrictInt,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from api.time_utils import to_china_time_iso
 
@@ -26,8 +19,13 @@ class AccessAction(str, Enum):
 class JobStatus(str, Enum):
     pending = "pending"
     running = "running"
+    prechecking = "prechecking"
+    applying = "applying"
+    verifying = "verifying"
+    reconciling = "reconciling"
     successful = "successful"
     failed = "failed"
+    manual_intervention_required = "manual_intervention_required"
     canceled = "canceled"
 
 
@@ -35,8 +33,9 @@ class TradeAccessRequestBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target_ip: str
-    mask: StrictInt = Field(default=32, ge=0, le=32)
+    mask: int = Field(default=32, ge=0, le=32)
     description: str | None = Field(default=None, max_length=160)
+    client_request_id: str | None = Field(default=None, max_length=128)
 
     @field_validator("target_ip")
     @classmethod
@@ -56,6 +55,17 @@ class TradeAccessRequestBase(BaseModel):
             raise ValueError("description must not contain newline or control characters")
         return value.strip()
 
+    @field_validator("client_request_id")
+    @classmethod
+    def validate_client_request_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not re.match(r"^[A-Za-z0-9_.:-]+$", value):
+            raise ValueError(
+                "client_request_id may only contain letters, numbers, dot, underscore, colon, or hyphen"
+            )
+        return value
+
     @model_validator(mode="after")
     def validate_target_network(self):
         try:
@@ -71,7 +81,7 @@ class TradeAccessRequestBase(BaseModel):
 
 
 class TradeAccessPortsRequest(TradeAccessRequestBase):
-    ports: list[StrictInt] = Field(min_length=1, max_length=256)
+    ports: list[int] = Field(min_length=1, max_length=256)
 
     @field_validator("ports")
     @classmethod
@@ -131,6 +141,29 @@ class JobCreateResponse(BaseModel):
     action: AccessAction
     target_ip: str
     ports: list[int] | None = None
+    client_request_id: str | None = None
+    firewall_targets: list[str] = Field(default_factory=list)
+
+
+class FirewallTargetResponse(BaseModel):
+    firewall_code: str
+    status: str
+    attempt_count: int = 0
+    runner_status: str | None = None
+    runner_rc: int | None = None
+    error_message: str | None = None
+    before_state: dict[str, object] | None = None
+    desired_state: dict[str, object] | None = None
+    observed_state: dict[str, object] | None = None
+    artifact_dir: str | None = None
+    local_tmp_dir: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+    @field_validator("started_at", "finished_at", mode="before")
+    @classmethod
+    def serialize_target_time(cls, value: str | None) -> str | None:
+        return to_china_time_iso(value)
 
 
 class JobDetailResponse(BaseModel):
@@ -141,6 +174,7 @@ class JobDetailResponse(BaseModel):
     mask: int
     ports: list[int] = Field(default_factory=list)
     description: str | None = None
+    client_request_id: str | None = None
     principal_subject: str | None = None
     principal_id: str | None = None
     principal_client_id: str | None = None
@@ -156,8 +190,19 @@ class JobDetailResponse(BaseModel):
     finished_at: str | None = None
     artifact_dir: str | None = None
     local_tmp_dir: str | None = None
+    firewall_targets: list[str] = Field(default_factory=list)
+    desired_state: dict[str, object] | None = None
+    state_version: int | None = None
+    next_attempt_at: str | None = None
+    target_results: list[FirewallTargetResponse] = Field(default_factory=list)
 
-    @field_validator("created_at", "started_at", "finished_at", mode="before")
+    @field_validator(
+        "created_at",
+        "started_at",
+        "finished_at",
+        "next_attempt_at",
+        mode="before",
+    )
     @classmethod
     def serialize_job_time_as_china_standard_time(
         cls,
@@ -167,9 +212,11 @@ class JobDetailResponse(BaseModel):
 
 
 class JobEvent(BaseModel):
+    firewall_code: str | None = None
     counter: int | None = None
     event: str | None = None
     task: str | None = None
+    message: str | None = None
     created: str | None = None
 
 
@@ -190,16 +237,87 @@ class FirewallPortSnapshotItem(BaseModel):
 class FirewallSnapshotResponse(BaseModel):
     generated_at: str
     items: list[FirewallPortSnapshotItem]
+    consistency_status: str = "consistent"
+    firewall_codes: list[str] = Field(default_factory=list)
+    firewalls: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
 class FirewallIpSnapshotResponse(BaseModel):
     generated_at: str
     items: list[FirewallIpSnapshotItem]
+    consistency_status: str = "consistent"
+    firewall_codes: list[str] = Field(default_factory=list)
+    firewalls: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
 class FirewallPortSnapshotResponse(BaseModel):
     generated_at: str
     items: list[FirewallPortSnapshotItem]
+    consistency_status: str = "consistent"
+    firewall_codes: list[str] = Field(default_factory=list)
+    firewalls: dict[str, dict[str, object]] = Field(default_factory=dict)
+
+
+class FirewallCheckAction(BaseModel):
+    firewall_code: str
+    action: str
+    ip: str
+    port: int | None = None
+    present_on_firewalls: list[str] = Field(default_factory=list)
+    absent_on_firewalls: list[str] = Field(default_factory=list)
+    reason: str
+
+
+class FirewallCheckIpDifference(BaseModel):
+    ip: str
+    present_on_firewalls: list[str] = Field(default_factory=list)
+    absent_on_firewalls: list[str] = Field(default_factory=list)
+    reference_state: str
+
+
+class FirewallCheckPortDifference(FirewallCheckIpDifference):
+    port: int
+
+
+class FirewallCheckDifferences(BaseModel):
+    ips: list[FirewallCheckIpDifference] = Field(default_factory=list)
+    ports: list[FirewallCheckPortDifference] = Field(default_factory=list)
+
+
+class FirewallCheckNodeResponse(BaseModel):
+    query_status: str
+    generated_at: str | None = None
+    artifact_dir: str
+    ip_count: int = 0
+    port_count: int = 0
+    error_message: str | None = None
+    ip_missing: list[FirewallIpSnapshotItem] = Field(default_factory=list)
+    ip_extra: list[FirewallIpSnapshotItem] = Field(default_factory=list)
+    port_missing: list[FirewallPortSnapshotItem] = Field(default_factory=list)
+    port_extra: list[FirewallPortSnapshotItem] = Field(default_factory=list)
+    suggested_actions: list[FirewallCheckAction] = Field(default_factory=list)
+
+
+class FirewallCheckSummary(BaseModel):
+    configured_firewall_count: int
+    successful_firewall_count: int
+    ip_consistent: bool | None
+    port_consistent: bool | None
+    ip_drift_item_count: int
+    port_drift_item_count: int
+    suggested_action_count: int
+    ambiguous_item_count: int
+
+
+class FirewallConsistencyCheckResponse(BaseModel):
+    checked_at: str
+    overall_status: str
+    reference_strategy: str
+    firewall_codes: list[str] = Field(default_factory=list)
+    summary: FirewallCheckSummary
+    firewalls: dict[str, FirewallCheckNodeResponse] = Field(default_factory=dict)
+    differences: FirewallCheckDifferences
+    warning: str
 
 
 class CurrentAccessResponse(BaseModel):

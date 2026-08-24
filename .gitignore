@@ -3,8 +3,10 @@ __pycache__/
 *.swp
 .*.swp
 *.sqlite3
+*.xlsx
 .pytest_cache/
 .venv/
 venv/
 .ansible/
 .runtime/
+config/production/trade-access.env

@@ -1,0 +1,48 @@
+---
+- name: Resolve requested firewall profile code
+  ansible.builtin.set_fact:
+    resolved_firewall_code: "{{ firewall_code | default(default_firewall_code | default('TEST-FW')) }}"
+
+- name: Validate requested firewall profile
+  ansible.builtin.assert:
+    that:
+      - firewall_profiles is defined
+      - resolved_firewall_code in (firewall_profiles | default({}))
+    fail_msg: >-
+      Firewall profile {{ resolved_firewall_code }} is not configured. Define it
+      under firewall_profiles before enabling it in
+      trade_access_api.firewall_targets (or its environment override).
+
+- name: Resolve firewall profile topology
+  ansible.builtin.set_fact:
+    firewall_device: "{{ firewall_profiles[resolved_firewall_code].firewall_device }}"
+    address_vsystems: "{{ firewall_profiles[resolved_firewall_code].address_vsystems }}"
+    application_vsystem: "{{ firewall_profiles[resolved_firewall_code].application_vsystem }}"
+    user_defined_application: "{{ firewall_profiles[resolved_firewall_code].user_defined_application }}"
+
+- name: Validate firewall profile topology
+  ansible.builtin.assert:
+    that:
+      - address_vsystems | length > 0
+      - application_vsystem | string | length > 0
+      - application_vsystem in (address_vsystems | map(attribute='name') | list)
+      - user_defined_application.name_prefix is defined
+      - user_defined_application.application_group_name is defined
+      - >-
+        address_vsystems
+        | selectattr('name', 'undefined')
+        | list
+        | length == 0
+      - >-
+        address_vsystems
+        | selectattr('address_set_name', 'undefined')
+        | list
+        | length == 0
+      - >-
+        address_vsystems
+        | selectattr('switch_required', 'undefined')
+        | list
+        | length == 0
+    fail_msg: >-
+      Firewall profile {{ resolved_firewall_code }} must define at least one
+      address_vsystem plus one application_vsystem and application naming config.

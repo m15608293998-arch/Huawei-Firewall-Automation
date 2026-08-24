@@ -8,6 +8,10 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def utc_after_iso(seconds: int | float) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
 def to_china_time_iso(value: str | None) -> str | None:
     if value is None:
         return None

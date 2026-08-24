@@ -45,7 +45,7 @@ Keycloak 负责：身份认证、Token 签发、用户/客户端/组/粗粒度�
 -> Keycloak Client Role 做粗粒度身份分类
 -> SQLite 本地权限和 allowed_ips 做细粒度授权
 -> 写入异步 Job
--> Worker 串行执行 Ansible Runner
+-> Worker 按 FIFO 执行父任务，父任务内按防火墙并行执行 Ansible Runner
 -> Ansible 修改华为防火墙
 -> API 返回任务状态和事件审计
 ```
@@ -1265,6 +1265,7 @@ FastAPI + 业务数据库：细粒度授权和业务策略。
 - 确认生产使用 HTTPS。
 - 确认 runtime 配置文件权限为 `0600`。
 - 给 Provisioning Client 做最小权限收敛。
+- 增加 `client_request_id` 幂等性设计草案。
 
 验收：
 
@@ -1335,6 +1336,7 @@ FastAPI + 业务数据库：细粒度授权和业务策略。
 
 - 引入 PostgreSQL 替代 SQLite。
 - Worker 增加 lease、heartbeat、running job 恢复。
+- `client_request_id` 增加唯一约束和幂等响应。
 - 增加限流和配额。
 - 增加审批流。
 - 增加 Client 删除、停用、软删除流程。
@@ -1343,6 +1345,7 @@ FastAPI + 业务数据库：细粒度授权和业务策略。
 验收：
 
 - Worker 异常退出后 running job 有明确恢复策略。
+- 重复提交不会产生重复 Job。
 - 权限变更、禁用、轮换均有审计。
 
 ### 阶段 5：下线 legacy `X-API-Key`
@@ -1375,6 +1378,7 @@ FastAPI + 业务数据库：细粒度授权和业务策略。
 | 管理员凭据滥用 | 管理员 X-API-Key | 管理员登录、MFA、用户审计 |
 | Token 泄露 | Bearer Token 可被重放 | HTTPS、短有效期、敏感操作二次校验 |
 | Worker 崩溃 | running job 无恢复 | lease、heartbeat、启动恢复 |
+| 重复请求 | `client_request_id` 未幂等 | 增加唯一约束和幂等响应 |
 | 过宽 Keycloak 管理权限 | Provisioning Client 权限大 | 最小权限、专用 Realm、审计 |
 | 业务资源越权 | 只检查角色不检查资源 | 服务端强制 `resource_grants` 校验 |
 

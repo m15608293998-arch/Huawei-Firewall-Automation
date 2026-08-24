@@ -167,6 +167,7 @@
 - name: Mark firewall changed after application port changes
   ansible.builtin.set_fact:
     firewall_mutated: true
+    application_mutated: true
   when: application_plan.change_needed | bool
 
 - name: Render exact application validation query

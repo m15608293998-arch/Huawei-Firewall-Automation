@@ -141,6 +141,39 @@ class TradeSnapshotParserTests(unittest.TestCase):
         )
         self.assertEqual(port_payload["items"][0]["port"], 12001)
 
+    def test_state_snapshot_contains_both_views_for_task_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            address = self.write_file(
+                root,
+                "public.out",
+                "address 1 192.168.66.22 mask 32\n",
+            )
+            full_config = (
+                "user-defined-application name UD_TServe_192.168.66.22\n"
+                " rule name 1\n"
+                "  ip-address 192.168.66.22 32\n"
+                "  port 12001\n"
+                "application-group name UDG_TradeServers\n"
+                " add application UD_TServe_192.168.66.22\n"
+            )
+
+            payload = snapshot_parser.build_state_snapshot(
+                [{"vsystem": "public", "path": address}],
+                full_config,
+                "",
+                full_config,
+                "UD_TServe_",
+                "public",
+                "UDG_TradeServers",
+            )
+
+        self.assertEqual(payload["ip_items"], [{"ip": "192.168.66.22"}])
+        self.assertEqual(
+            payload["port_items"],
+            [{"ip": "192.168.66.22", "port": 12001}],
+        )
+
     def test_combined_address_cli_output_is_split_by_cli_file_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

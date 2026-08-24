@@ -1,11 +1,14 @@
 # 华为防火墙自动化 API 部署说明
 
+接口、鉴权、任务队列和 Ansible 执行链的维护说明见
+[`docs/接口设计与维护说明.md`](docs/接口设计与维护说明.md)。
+
 本项目启动两个进程：
 
 - FastAPI：提供 `/admin-ui`、`/test-ui` 和业务 API。
 - Worker：从本地 SQLite 队列读取任务，调用 Ansible Runner 执行防火墙变更。
 
-业务变更接口会先返回 `202 Accepted` 和 `job_id`，再由 Worker 串行执行。防火墙快照接口会同步调用 Ansible Runner，直接返回设备当前的有效 IP 或 IP:Port 结果。
+业务变更接口会先返回 `202 Accepted` 和 `job_id`。父任务内的防火墙子任务并行执行并逐台校验；失败节点按轮次继续修复，等待重试时不会阻塞其他 IP 的变更。全量快照会并行查询所有启用防火墙，但存在未收敛父任务时暂停查询，改用一致性检查查看差异。
 
 ## 1. 准备环境
 
@@ -32,8 +35,8 @@ sudo apt install -y git openssh-client openssl
 拉取代码：
 
 ```bash
-git clone git@github.com:m15608293998-arch/Huawei-Firewall-Automation.git
-cd Huawei-Firewall-Automation
+git clone git@github.com:m15608293998-arch/FireWalld-AutoMation.git
+cd FireWalld-AutoMation
 ```
 
 安装 Python 依赖：
@@ -136,54 +139,87 @@ realm-management:manage-users
 vi group_vars/all.yml
 ```
 
-账号密码登录：
+测试环境保持一个 `TEST-FW` 配置档即可。账号密码登录示例：
 
 ```yaml
-firewall_device:
-  device_host: "<FIREWALL_MGMT_IP>"
-  device_user: "<FIREWALL_USER>"
-  auth_type: "password"
-  device_password: "<FIREWALL_PASSWORD>"
+trade_access_api:
+  firewall_targets:
+    - "TEST-FW"
+  firewall_parallel_workers: 3
+  # 整个父任务生命周期内，每个防火墙子任务累计最多执行 2 次。
+  firewall_child_max_attempts: 2
+  # 第一次可恢复配置失败后，在父任务内短暂退避再只重试失败节点。
+  firewall_reconcile_retry_seconds: 3
+
+default_firewall_code: "TEST-FW"
+firewall_profiles:
+  TEST-FW:
+    firewall_device:
+      device_host: "<FIREWALL_MGMT_IP>"
+      device_port: 22
+      device_user: "<FIREWALL_USER>"
+      auth_type: "password"
+      device_password: "<FIREWALL_PASSWORD>"
+    address_vsystems:
+      - name: "public"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: false
+      - name: "Internet"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+      - name: "private"
+        address_set_name: "TraderServers-DirectAccess-IPs"
+        switch_required: true
+    application_vsystem: "private"
+    user_defined_application:
+      name_prefix: "UD_TServe_"
+      category: "General"
+      subcategory: "General_TCP"
+      data_model: "client-server"
+      label: "Business-Applications"
+      application_group_name: "UDG_TradeServers"
 ```
 
-或者使用 SSH 私钥登录：
+`trade_access_api` 会被 API 和 worker 直接读取；同名的
+`TRADE_ACCESS_API_FIREWALL_*` 环境变量只作为兼容覆盖项。设备管理 IP、用户名和
+端口、用户名和密码都直接填写在对应 profile 的 `firewall_device` 中；
+`device_port` 省略时默认为 `22`。
+
+也可以将配置档中的设备认证改为 SSH 私钥：
 
 ```yaml
-firewall_device:
-  device_host: "<FIREWALL_MGMT_IP>"
-  device_user: "<FIREWALL_USER>"
-  auth_type: "publickey"
-  identity_file: "/absolute/path/to/firewall_private_key"
+firewall_profiles:
+  TEST-FW:
+    firewall_device:
+      device_host: "<FIREWALL_MGMT_IP>"
+      device_port: 22
+      device_user: "<FIREWALL_USER>"
+      auth_type: "publickey"
+      identity_file: "/absolute/path/to/firewall_private_key"
 ```
 
 私钥必须对运行 API 的账号可读，建议权限设为 `0600`。密码和私钥配置二选一。
+同一个 `group_vars/all.yml` 文件末尾已经注释保存了完整生产配置：
 
-继续确认这些业务配置：
+```text
+BEGIN_PRODUCTION_CONFIG ... END_PRODUCTION_CONFIG
+```
+
+生产启用时删除或注释上面的 TEST-FW 配置，将该生产区块整体取消注释，并直接填写
+PG-FW、PG-FW-1、IDC-FW 各自的 `device_host`、`device_user` 和
+`device_password`。生产区块完整展开，不使用 `&/*`，也不使用环境变量引用。
+
+生产拓扑为：
+
+| 防火墙 | IP 空间 | Application 空间 |
+| --- | --- | --- |
+| `PG-FW` | `public`、`private`、`Internet` | `private` |
+| `PG-FW-1` | `public` | `public` |
+| `IDC-FW` | `private`、`Internet` | `private` |
+
+公共容量配置继续保留在 `group_vars/all.yml`：
 
 ```yaml
-address_vsystems:
-  - name: "public"
-    address_set_name: "TraderServers-DirectAccess-IPs"
-    switch_required: false
-
-  - name: "Internet"
-    address_set_name: "TraderServers-DirectAccess-IPs"
-    switch_required: true
-
-  - name: "private"
-    address_set_name: "TraderServers-DirectAccess-IPs"
-    switch_required: true
-
-application_vsystem: "private"
-
-user_defined_application:
-  name_prefix: "UD_TServe_"
-  category: "General"
-  subcategory: "General_TCP"
-  data_model: "client-server"
-  label: "Business-Applications"
-  application_group_name: "UDG_TradeServers"
-
 rule_port_limit: 4
 application_rule_limit: 8
 enable_application_config: true
@@ -191,11 +227,9 @@ commit_security_engine: true
 save_config: true
 ```
 
-三个空间使用同名 Address Set `TraderServers-DirectAccess-IPs`。Application
-按 `UD_TServe_<IP>` 命名，每条 Rule 最多 4 个端口、每个 Application 最多
-8 条 Rule；超过 32 个端口后依次创建 `_2`、`_3` 等对象，并统一加入
-`UDG_TradeServers`。华为设备强制要求用户自定义 Application 名以 `UD_`
-开头，Playbook 会在连接设备前校验该约束。
+每条 Rule 最多 4 个端口、每个 Application 最多 8 条 Rule；超过 32 个端口后
+依次创建 `_2`、`_3` 等对象。华为设备强制要求用户自定义 Application 名以
+`UD_` 开头，Playbook 会在连接设备前校验。
 
 ## 4. 配置 API 环境变量
 
@@ -214,8 +248,9 @@ TRADE_ACCESS_API_AUTH_ENABLED=true
 TRADE_ACCESS_API_DATABASE_PATH=.runtime/api/jobs.sqlite3
 TRADE_ACCESS_API_RUNNER_PRIVATE_DATA_DIR=.runtime/runner
 TRADE_ACCESS_API_JOB_TMP_ROOT=.runtime/jobs
-TRADE_ACCESS_API_RUNNER_TIMEOUT_SECONDS=900
-TRADE_ACCESS_API_SNAPSHOT_RUNNER_TIMEOUT_SECONDS=300
+
+# 防火墙目标、并发数、单轮重试次数和跨轮修复间隔统一配置在 group_vars/all.yml 的
+# trade_access_api 中，不需要在这里重复配置。
 
 TRADE_ACCESS_API_KEYCLOAK_SERVER_URL=http://<KEYCLOAK_HOST>:8080
 TRADE_ACCESS_API_KEYCLOAK_REALM=trade-access
@@ -319,18 +354,13 @@ http://<API_HOST>:8000/test-ui
 健康检查：
 
 ```bash
-# API 进程存活
 curl http://127.0.0.1:8000/healthz
-
-# API 和任务数据库已就绪
-curl http://127.0.0.1:8000/readyz
 ```
 
 返回：
 
 ```json
 {"status":"ok"}
-{"status":"ready"}
 ```
 
 ## 7. 调用 API
@@ -358,7 +388,8 @@ curl -X POST \
     "target_ip": "203.0.113.10",
     "mask": 32,
     "ports": [12001, 12002],
-    "description": "trade-server-203.0.113.10"
+    "description": "trade-server-203.0.113.10",
+    "client_request_id": "change-20260714-001"
   }' \
   http://127.0.0.1:8000/api/v1/trade-access/allow
 ```
@@ -374,7 +405,9 @@ curl -X POST \
 | `POST /api/v1/trade-access/deny/ip` | 确认该 IP 已无应用端口后，再移出所有业务地址集 | 否 |
 | `POST /api/v1/trade-access/deny` | 删除该 IP 的全部应用端口，再移出所有业务地址集 | 否 |
 
-端口必须在 `1` 到 `65535` 之间，单次最多提交 256 个。变更接口返回 `job_id` 后，查询任务和 Ansible 事件：
+接口路径不区分防火墙。一次请求会创建 `firewall_targets` 中所有设备的子任务，
+并在同一个父任务内并行执行。端口必须在 `1` 到 `65535` 之间，单次最多提交
+256 个。变更接口返回 `job_id` 后，查询任务和 Ansible 事件：
 
 ```bash
 curl \
@@ -384,15 +417,31 @@ curl \
 curl \
   -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
   http://127.0.0.1:8000/api/v1/trade-access/jobs/events/<JOB_ID>
+
+# 仅在深度排障时读取完整 Ansible 原始事件
+curl \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  'http://127.0.0.1:8000/api/v1/trade-access/jobs/events/<JOB_ID>?detail=full'
 ```
 
-普通用户只能读取自己的任务；管理员可在 `/admin-ui` 查看全部任务。
+任务详情的 `desired_state` 是该 IP 的完整业务期望状态，`target_results` 是逐台
+防火墙的变更前、期望和实测结果。只有全部子任务实时校验一致，父任务才是
+`successful`。已有期望基线的任务和所有重试均跳过预检；普通 runner 失败时不做
+中间完整查询，父任务内部短暂退避后只重试失败节点。所有节点执行结束后统一做一轮
+最终验证；当前父任务终止前，后来的任务不会插入这次修复过程。
+事件接口默认返回关键业务步骤摘要，`detail=full` 才返回全部 Ansible 事件。普通用户
+只能读取自己的任务，管理员可读取全部任务。
 
-## 8. 查询防火墙快照
+## 8. 查询与一致性检查
 
-快照来自防火墙实时 CLI 查询，不读取 SQLite 任务库：
+快照来自所有启用防火墙的实时 CLI 查询，不读取 SQLite 任务库：
 
 ```bash
+# 一次查询每台防火墙的 IP 和端口，并生成逐台人工纠错建议
+curl \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  http://127.0.0.1:8000/api/v1/trade-access/firewall/check
+
 # 同时存在于 address_vsystems 所有业务地址集中的有效 /32 IP
 curl \
   -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
@@ -404,61 +453,16 @@ curl \
   http://127.0.0.1:8000/api/v1/trade-access/firewall/snapshot/ports
 ```
 
-IP 快照返回：
+`check` 在三台一致或存在漂移时均返回 HTTP `200`，通过 `overall_status` 区分
+`consistent` 和 `drifted`。响应包含 IP/端口差异、每台设备的缺失/多余项，以及
+按严格多数节点计算的 `suggested_actions`；建议仅供人工核实，不会自动执行。任一
+设备查询失败时返回 HTTP `503`、`overall_status=incomplete`，且不生成纠错动作。
 
-```json
-{
-  "generated_at": "2026-07-14T10:00:00+00:00",
-  "items": [
-    {"ip": "203.0.113.10"}
-  ]
-}
-```
+存在 `reconciling` 父任务时，普通全量快照接口返回 HTTP `409`，避免把已知不一致
+状态当作可用清单；`check` 仍可执行，用于查看失败节点和人工纠错建议。测试页和管理
+页均提供“检查节点一致性”按钮，测试页任务详情还会展示逐台子任务状态。
 
-端口快照返回：
-
-```json
-{
-  "generated_at": "2026-07-14T10:00:00+00:00",
-  "items": [
-    {"ip": "203.0.113.10", "port": 12001}
-  ]
-}
-```
-
-`GET /api/v1/trade-access/firewall/snapshot` 是兼容接口，当前与 `/snapshot/ports` 返回相同类型的 IP:Port 结果。
-
-## 9. 运行测试
-
-项目测试使用 Python 标准库 `unittest`：
-
-```bash
-source .venv/bin/activate
-python -m unittest discover -s tests
-```
-
-## 10. 后台运行
-
-简单后台运行：
-
-```bash
-nohup .venv/bin/python scripts/run_services.py \
-  --env-file .runtime/trade-access.env \
-  --host 0.0.0.0 \
-  --port 8000 \
-  > .runtime/trade-access.log 2>&1 &
-echo $! > .runtime/trade-access.pid
-```
-
-查看日志：
-
-```bash
-tail -f .runtime/trade-access.log
-```
-
-停止：
-
-```bash
-kill "$(cat .runtime/trade-access.pid)"
-rm -f .runtime/trade-access.pid
-```
+三台逻辑结果完全一致时返回 HTTP `200` 和干净的 `items`；结果漂移返回 HTTP
+`409` 及逐台差异；任一设备查询失败返回 HTTP `503`，不会把部分结果当成全量
+结果。完整恢复和一致性边界见
+[`docs/多防火墙并行编排与一致性说明.md`](docs/多防火墙并行编排与一致性说明.md)。
