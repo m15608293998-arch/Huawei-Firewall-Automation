@@ -347,7 +347,7 @@ curl -sS -X POST \
   -H "Authorization: Bearer $TRADE_ACCESS_SK" \
   -H 'Content-Type: application/json' \
   -d '{
-    "target_ip": "192.168.5.224",
+    "target_ip": "203.0.113.10",
     "mask": 32,
     "ports": [12001, 12002, 12003],
     "description": "temporary trade access",
@@ -363,7 +363,7 @@ curl -sS -X POST \
   -H "Authorization: Bearer $TRADE_ACCESS_SK" \
   -H 'Content-Type: application/json' \
   -d '{
-    "target_ip": "192.168.5.224",
+    "target_ip": "203.0.113.10",
     "mask": 32,
     "description": "remove trade access",
     "client_request_id": "REQ-DENY-001"
@@ -470,6 +470,10 @@ API 进程重启不会删除已持久化任务。worker 会重新认领异常中
 
 Allow 采用追加合并语义：
 
+进入追加流程前，API、Runner 和 Ansible Role 都会检查目标地址。命中
+`10.0.0.0/8`、`172.16.0.0/12` 或 `192.168.0.0/16` 时拒绝执行，不连接防火墙。
+删除流程保留对这些地址的支持，用于撤销历史错误配置。
+
 ```text
 最终端口 = 已有端口集合 ∪ 本次请求端口集合
 ```
@@ -486,9 +490,9 @@ Allow 采用追加合并语义：
 6. 超过 32 个端口时自动创建：
 
 ```text
-UD_TServe_192.168.5.224
-UD_TServe_192.168.5.224_2
-UD_TServe_192.168.5.224_3
+UD_TServe_203.0.113.10
+UD_TServe_203.0.113.10_2
+UD_TServe_203.0.113.10_3
 ```
 
 7. 在一次 SSH 会话中执行增量变更，并将 Application 加入

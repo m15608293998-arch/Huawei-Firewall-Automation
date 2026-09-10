@@ -52,6 +52,7 @@ from api.schemas import (
     OidcBrowserConfigResponse,
     TradeAccessAllowRequest,
     TradeAccessDenyRequest,
+    TradeAccessIpAllowRequest,
     TradeAccessIpRequest,
     TradeAccessJobCreate,
     TradeAccessPortAllowRequest,
@@ -371,7 +372,7 @@ def create_trade_access_allow_job(
     status_code=202,
 )
 def create_trade_access_ip_allow_job(
-    request: TradeAccessIpRequest,
+    request: TradeAccessIpAllowRequest,
     principal: Principal = Depends(require_firewall_ip_allow),
 ):
     job_request = TradeAccessJobCreate(action="allow_ip", **request.model_dump())

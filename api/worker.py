@@ -10,7 +10,16 @@ from contextlib import contextmanager
 from typing import Any
 
 from api.config import settings
-from api.runner_service import AnsibleRunnerService, RunnerResult, SnapshotRunnerResult, runner_service
+from api.ip_policy import (
+    DIRECT_ACCESS_ALLOW_ACTIONS,
+    validate_direct_access_target,
+)
+from api.runner_service import (
+    AnsibleRunnerService,
+    RunnerResult,
+    SnapshotRunnerResult,
+    runner_service,
+)
 from api.schemas import JobStatus
 from api.storage import JobStorage
 from api.time_utils import utc_after_iso, utc_now_iso
@@ -87,6 +96,40 @@ class JobWorker:
                 target_codes,
                 str(job["local_tmp_dir"]),
             )
+            if str(job.get("action")) in DIRECT_ACCESS_ALLOW_ACTIONS:
+                try:
+                    validate_direct_access_target(
+                        str(job.get("target_ip", "")),
+                        int(job.get("mask", 32)),
+                    )
+                except (TypeError, ValueError) as exc:
+                    error_message = str(exc)
+                    finished_at = utc_now_iso()
+                    for code in target_codes:
+                        self.storage.update_job_target(
+                            job_id,
+                            code,
+                            {
+                                "status": JobStatus.failed.value,
+                                "runner_status": "policy_rejected",
+                                "runner_rc": 2,
+                                "error_message": error_message,
+                                "finished_at": finished_at,
+                            },
+                        )
+                    self.storage.update_job(
+                        job_id,
+                        {
+                            "status": JobStatus.failed.value,
+                            "runner_status": "policy_rejected",
+                            "runner_rc": 2,
+                            "error_message": error_message,
+                            "finished_at": finished_at,
+                            "next_attempt_at": None,
+                        },
+                    )
+                    logger.warning("Rejected job %s: %s", job_id, error_message)
+                    return
             before_states: dict[str, dict[str, Any]] = {}
             if self._requires_baseline_query(job):
                 self.storage.update_job(

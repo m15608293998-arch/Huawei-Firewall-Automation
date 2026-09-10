@@ -11,6 +11,31 @@ from api.runner_service import AnsibleRunnerService, SnapshotRunnerResult
 
 
 class RunnerServiceTests(unittest.TestCase):
+    def test_rfc1918_allow_job_fails_before_ansible_runner_starts(self) -> None:
+        service = AnsibleRunnerService()
+        private_targets = (
+            ("allow", "10.20.30.40", [12001]),
+            ("allow_ip", "172.20.30.40", []),
+            ("allow_ports", "192.168.30.40", [12001]),
+        )
+
+        for action, target_ip, ports in private_targets:
+            with self.subTest(action=action, target_ip=target_ip):
+                result = service.run_trade_access(
+                    {
+                        "job_id": "private-{0}".format(action),
+                        "action": action,
+                        "target_ip": target_ip,
+                        "mask": 32,
+                        "ports": ports,
+                        "artifact_dir": "/tmp/not-created",
+                    }
+                )
+
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.rc, 2)
+                self.assertIn("RFC1918 private IPv4", result.error_message or "")
+
     def test_job_events_are_business_summary_by_default(self) -> None:
         payloads = [
             {
@@ -108,7 +133,7 @@ class RunnerServiceTests(unittest.TestCase):
                         {
                             "job_id": "allow-job",
                             "action": "allow",
-                            "target_ip": "192.168.5.224",
+                            "target_ip": "203.0.113.10",
                             "mask": 32,
                             "ports": [12001, 12002],
                             "principal_subject": "employee-a",
@@ -182,7 +207,7 @@ class RunnerServiceTests(unittest.TestCase):
                         {
                             "job_id": "capacity-job",
                             "action": "allow_ports",
-                            "target_ip": "192.168.5.224",
+                            "target_ip": "203.0.113.10",
                             "mask": 32,
                             "ports": [12001],
                             "principal_subject": "employee-a",
@@ -289,7 +314,7 @@ class RunnerServiceTests(unittest.TestCase):
                         {
                             "job_id": "multi-job",
                             "action": "allow_ip",
-                            "target_ip": "192.168.5.224",
+                            "target_ip": "203.0.113.10",
                             "mask": 32,
                             "ports": [],
                             "principal_subject": "employee-a",
@@ -360,7 +385,7 @@ class RunnerServiceTests(unittest.TestCase):
                         {
                             "job_id": "allow-after-snapshot",
                             "action": "allow_ip",
-                            "target_ip": "192.168.5.224",
+                            "target_ip": "203.0.113.10",
                             "mask": 32,
                             "ports": [],
                             "principal_subject": "employee-a",

@@ -187,7 +187,7 @@ echo
 curl -sS \
   -H "Authorization: Bearer $TRADE_ACCESS_SK" \
   -H 'Content-Type: application/json' \
-  -d '{"target_ip":"192.168.5.224","mask":32,"ports":[12001,12002]}' \
+  -d '{"target_ip":"203.0.113.10","mask":32,"ports":[12001,12002]}' \
   http://192.168.6.38:8000/api/v1/trade-access/allow
 ```
 

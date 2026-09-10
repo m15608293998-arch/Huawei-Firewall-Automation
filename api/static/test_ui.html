@@ -256,7 +256,7 @@
           <div class="row" style="margin-top: 14px;">
             <div id="adminTargetField" class="field">
               <label for="targetIp">目标 IP</label>
-              <input id="targetIp" inputmode="decimal" placeholder="192.168.66.22">
+              <input id="targetIp" inputmode="decimal" placeholder="203.0.113.10">
             </div>
             <div class="field">
               <label for="mask">掩码</label>
@@ -505,7 +505,7 @@
         needsPorts: false,
         submitText: "提交放行 IP",
         buttonClass: "primary",
-        description: "只放行目标 IP，不配置端口。",
+        description: "只放行目标 IP，不配置端口；RFC1918 私网地址会被拒绝。",
       },
       allow_ports: {
         endpoint: "/api/v1/trade-access/allow/ports",
@@ -513,7 +513,7 @@
         needsPorts: true,
         submitText: "提交新增端口",
         buttonClass: "primary",
-        description: "在已放行 IP 的基础上新增端口，不会覆盖或删除已有端口。",
+        description: "在已放行公网 IP 的基础上新增端口，不会覆盖或删除已有端口。",
       },
       deny_ports: {
         endpoint: "/api/v1/trade-access/deny/ports",
@@ -1250,9 +1250,22 @@
       return ports;
     }
 
+    function isRfc1918PrivateIpv4(value) {
+      const octets = value.split(".").map(Number);
+      if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet))) {
+        return false;
+      }
+      return octets[0] === 10
+        || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+        || (octets[0] === 192 && octets[1] === 168);
+    }
+
     function buildPayload() {
       const targetIp = document.querySelector("#targetIp").value.trim();
       if (!targetIp) throw new Error("请输入目标 IP");
+      if (["allow_ip", "allow_ports"].includes(state.action) && isRfc1918PrivateIpv4(targetIp)) {
+        throw new Error("DirectAccess 放行不接受 RFC1918 私网地址（10/8、172.16/12、192.168/16）");
+      }
       const payload = {
         target_ip: targetIp,
         mask: 32,

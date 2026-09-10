@@ -152,9 +152,9 @@ class FakeRunner:
         ip_items = []
         port_items = []
         if state["ip_present"]:
-            ip_items.append({"ip": "192.168.5.224"})
+            ip_items.append({"ip": "203.0.113.10"})
         for port in state["ports"]:
-            port_items.append({"ip": "192.168.5.224", "port": port})
+            port_items.append({"ip": "203.0.113.10", "port": port})
         return SnapshotRunnerResult(
             status="successful",
             rc=0,
@@ -195,7 +195,7 @@ class WorkerTests(unittest.TestCase):
         firewall_targets=("TEST-FW",),
         action: str = "allow",
         ports=None,
-        target_ip: str = "192.168.5.224",
+        target_ip: str = "203.0.113.10",
         created_at: str = "2026-06-05T00:00:00+00:00",
     ) -> None:
         target_codes = list(firewall_targets)
@@ -229,6 +229,25 @@ class WorkerTests(unittest.TestCase):
             },
             target_codes,
         )
+
+    def test_rfc1918_allow_is_rejected_before_firewall_access(self) -> None:
+        self.create_job(target_ip="192.168.30.40")
+        runner = FakeRunner(
+            states={"TEST-FW": {"ip_present": False, "ports": []}},
+        )
+
+        self.assertTrue(self.make_worker(runner).run_once())
+
+        job = self.storage.get_job("job-1")
+        target = self.storage.list_job_targets("job-1")[0]
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["runner_status"], "policy_rejected")
+        self.assertEqual(job["runner_rc"], 2)
+        self.assertIn("RFC1918 private IPv4", job["error_message"])
+        self.assertEqual(target["status"], "failed")
+        self.assertEqual(target["runner_status"], "policy_rejected")
+        self.assertEqual(runner.snapshot_calls, [])
+        self.assertEqual(runner.jobs, [])
 
     def test_successful_job_records_verified_child_and_desired_state(self) -> None:
         self.create_job()
@@ -373,7 +392,7 @@ class WorkerTests(unittest.TestCase):
     def test_retry_with_existing_baseline_runs_one_final_snapshot_only(self) -> None:
         self.create_job()
         self.storage.save_desired_access_state(
-            target_ip="192.168.5.224",
+            target_ip="203.0.113.10",
             ip_present=False,
             ports=[],
             source_job_id="baseline-import",
@@ -396,7 +415,7 @@ class WorkerTests(unittest.TestCase):
     def test_final_state_can_verify_after_both_runner_attempts_fail_late(self) -> None:
         self.create_job(action="allow_ip", ports=[])
         self.storage.save_desired_access_state(
-            target_ip="192.168.5.224",
+            target_ip="203.0.113.10",
             ip_present=False,
             ports=[],
             source_job_id="baseline-import",
@@ -496,7 +515,7 @@ class WorkerTests(unittest.TestCase):
             firewall_targets=codes,
             action="deny",
             ports=[],
-            target_ip="192.168.5.225",
+            target_ip="203.0.113.11",
             created_at="2026-06-05T00:00:01+00:00",
         )
         runner = FakeRunner(
@@ -554,7 +573,7 @@ class WorkerTests(unittest.TestCase):
         codes = ("PG-FW", "PG-FW-1", "IDC-FW")
         self.create_job(firewall_targets=codes)
         desired = self.storage.save_desired_access_state(
-            target_ip="192.168.5.224",
+            target_ip="203.0.113.10",
             ip_present=True,
             ports=[12001],
             source_job_id="job-1",
@@ -608,7 +627,7 @@ class WorkerTests(unittest.TestCase):
             ["IDC-FW"],
         )
         self.assertEqual(
-            self.storage.get_desired_access_state("192.168.5.224")["version"],
+            self.storage.get_desired_access_state("203.0.113.10")["version"],
             1,
         )
         targets = {

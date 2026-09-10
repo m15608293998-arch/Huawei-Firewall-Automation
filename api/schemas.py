@@ -4,6 +4,10 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from api.ip_policy import (
+    DIRECT_ACCESS_ALLOW_ACTIONS,
+    validate_direct_access_target,
+)
 from api.time_utils import to_china_time_iso
 
 
@@ -93,14 +97,24 @@ class TradeAccessPortsRequest(TradeAccessRequestBase):
 
 
 class TradeAccessAllowRequest(TradeAccessPortsRequest):
-    pass
+    @model_validator(mode="after")
+    def validate_direct_access_target_ip(self):
+        validate_direct_access_target(self.target_ip, self.mask)
+        return self
+
+
+class TradeAccessIpAllowRequest(TradeAccessRequestBase):
+    @model_validator(mode="after")
+    def validate_direct_access_target_ip(self):
+        validate_direct_access_target(self.target_ip, self.mask)
+        return self
 
 
 class TradeAccessIpRequest(TradeAccessRequestBase):
     pass
 
 
-class TradeAccessPortAllowRequest(TradeAccessPortsRequest):
+class TradeAccessPortAllowRequest(TradeAccessAllowRequest):
     pass
 
 
@@ -132,6 +146,8 @@ class TradeAccessJobCreate(TradeAccessRequestBase):
             raise ValueError("ports is required and must not be empty for this action")
         if self.action in no_port_actions and self.ports is not None:
             raise ValueError("ports must be omitted for this action")
+        if self.action.value in DIRECT_ACCESS_ALLOW_ACTIONS:
+            validate_direct_access_target(self.target_ip, self.mask)
         return self
 
 

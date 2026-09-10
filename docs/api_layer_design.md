@@ -110,7 +110,7 @@ The permission table is keyed by Keycloak `client_id`. It stores no secret.
 
 ```json
 {
-  "target_ip": "192.168.66.22",
+  "target_ip": "203.0.113.10",
   "mask": 32,
   "ports": [12001, 12002],
   "description": "temporary trade server access",
@@ -124,7 +124,11 @@ Rules:
 - `deny` rejects `ports` and removes all access for the target.
 - The selected endpoint determines `allow` or `deny`; callers do not submit an
   `action` field.
-- Callers may submit any valid IPv4 single address with mask `32`.
+- Allow operations accept a valid IPv4 single address with mask `32` only when
+  it is outside the RFC1918 ranges `10.0.0.0/8`, `172.16.0.0/12`, and
+  `192.168.0.0/16`.
+- Deny operations continue to accept RFC1918 targets so historical invalid
+  DirectAccess entries can be removed.
 - Network targets are rejected for trade-access operations.
 - `requester` and `requester_id` are never accepted from request JSON.
 - `requester` is derived from the authenticated Keycloak principal.

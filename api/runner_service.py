@@ -11,6 +11,10 @@ from typing import Any
 import fcntl
 
 from api.config import settings
+from api.ip_policy import (
+    DIRECT_ACCESS_ALLOW_ACTIONS,
+    validate_direct_access_target,
+)
 from api.time_utils import utc_now_iso
 
 
@@ -133,6 +137,19 @@ class AnsibleRunnerService:
         firewall_code: str | None = None,
     ) -> RunnerResult:
         target_code = self._firewall_code(firewall_code)
+        if str(job.get("action")) in DIRECT_ACCESS_ALLOW_ACTIONS:
+            try:
+                validate_direct_access_target(
+                    str(job.get("target_ip", "")),
+                    int(job.get("mask", 32)),
+                )
+            except (TypeError, ValueError) as exc:
+                return RunnerResult(
+                    status="failed",
+                    rc=2,
+                    artifact_dir=str(job.get("artifact_dir") or ""),
+                    error_message=str(exc),
+                )
         try:
             import ansible_runner
         except ImportError as exc:

@@ -302,6 +302,25 @@ class RoleStaticTests(unittest.TestCase):
         self.assertIn("access/deny_ports.yml", access_yml)
         self.assertIn("access/deny_ip.yml", access_yml)
 
+    def test_rfc1918_allow_target_is_rejected_before_firewall_access(self) -> None:
+        access_yml = (
+            PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/access/main.yml"
+        ).read_text()
+
+        rejection_task = "Reject RFC1918 private IPv4 target for DirectAccess allow"
+        self.assertIn(rejection_task, access_yml)
+        self.assertIn("^10\\.", access_yml)
+        self.assertIn("^172\\.(1[6-9]|2[0-9]|3[01])\\.", access_yml)
+        self.assertIn("^192\\.168\\.", access_yml)
+        self.assertIn(
+            "when: access_request.action in ['allow', 'allow_ip', 'allow_ports']",
+            access_yml,
+        )
+        self.assertLess(
+            access_yml.index(rejection_task),
+            access_yml.index("Resolve firewall SSH auth type"),
+        )
+
     def test_ip_deny_requires_ports_to_be_removed_first(self) -> None:
         deny_ip_yml = (
             PROJECT_ROOT / "roles/usg6000e_trade_access/tasks/access/deny_ip.yml"

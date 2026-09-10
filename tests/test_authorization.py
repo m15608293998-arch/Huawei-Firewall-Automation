@@ -365,12 +365,12 @@ class AuthorizationTests(unittest.TestCase):
             require_identity_user_manage(admin_without_permission)
         self.assertEqual(caught.exception.status_code, 403)
 
-    def test_user_may_submit_any_valid_single_ip(self) -> None:
+    def test_user_may_submit_any_non_rfc1918_single_ip(self) -> None:
         authorize_trade_access_request(
             user_principal(),
             TradeAccessJobCreate(
                 action="allow",
-                target_ip="192.168.66.22",
+                target_ip="203.0.113.10",
                 ports=[22, 65535],
             ),
         )
@@ -379,7 +379,7 @@ class AuthorizationTests(unittest.TestCase):
             user_principal(),
             TradeAccessJobCreate(
                 action="allow",
-                target_ip="192.168.66.23",
+                target_ip="203.0.113.11",
                 ports=[443],
             ),
         )
@@ -400,7 +400,7 @@ class AuthorizationTests(unittest.TestCase):
             TradeAccessAllowRequest.model_validate(
                 {
                     "action": "deny",
-                    "target_ip": "192.168.66.22",
+                    "target_ip": "203.0.113.10",
                     "ports": [12001],
                 }
             )

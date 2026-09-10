@@ -1,7 +1,7 @@
 access_request:
   action: deny
-  target_ip: 192.168.66.22
+  target_ip: 203.0.113.10
   mask: 32
   requester: ansible-test
-  request_id: REQ-DENY-1921686622
-  description: 撤销 192.168.66.22 临时外网访问
+  request_id: REQ-DENY-203000113010
+  description: 撤销 203.0.113.10 临时外网访问

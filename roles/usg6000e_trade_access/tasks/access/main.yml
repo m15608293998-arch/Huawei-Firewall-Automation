@@ -12,6 +12,17 @@
       access_request must include action allow/allow_ip/allow_ports/deny/deny_ports/deny_ip,
       target_ip, requester and request_id.
 
+- name: Reject RFC1918 private IPv4 target for DirectAccess allow
+  ansible.builtin.assert:
+    that:
+      - (access_request.target_ip | string) is not match('^10\.')
+      - (access_request.target_ip | string) is not match('^172\.(1[6-9]|2[0-9]|3[01])\.')
+      - (access_request.target_ip | string) is not match('^192\.168\.')
+    fail_msg: >-
+      DirectAccess allow operations reject RFC1918 private IPv4 targets
+      (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16).
+  when: access_request.action in ['allow', 'allow_ip', 'allow_ports']
+
 - name: Validate Huawei application naming configuration
   ansible.builtin.assert:
     that:

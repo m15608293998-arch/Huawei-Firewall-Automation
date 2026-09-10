@@ -40,6 +40,7 @@ from api.schemas import (
     JobDetailResponse,
     TradeAccessAllowRequest,
     TradeAccessDenyRequest,
+    TradeAccessIpAllowRequest,
     TradeAccessIpRequest,
     TradeAccessPortAllowRequest,
     TradeAccessPortDenyRequest,
@@ -78,7 +79,7 @@ class ApiTests(unittest.TestCase):
     def create_job(self, owner: Principal | None = None):
         return create_trade_access_allow_job(
             request=TradeAccessAllowRequest(
-                target_ip="192.168.5.224",
+                target_ip="203.0.113.10",
                 ports=[12001, 12005],
             ),
             principal=owner or self.user,
@@ -103,15 +104,15 @@ class ApiTests(unittest.TestCase):
             get_trade_access_job(job_id=job["job_id"], principal=self.other_user)
         self.assertEqual(caught.exception.status_code, 404)
 
-    def test_user_can_submit_valid_ip_and_ports_without_sk_attributes(self) -> None:
+    def test_user_can_submit_non_rfc1918_ip_and_ports_without_sk_attributes(self) -> None:
         job = create_trade_access_allow_job(
             request=TradeAccessAllowRequest(
-                target_ip="192.168.66.22",
+                target_ip="203.0.113.11",
                 ports=[22, 443, 12001],
             ),
             principal=self.user,
         )
-        self.assertEqual(job["target_ip"], "192.168.66.22")
+        self.assertEqual(job["target_ip"], "203.0.113.11")
         self.assertEqual(job["ports"], [22, 443, 12001])
 
     def test_offline_api_key_id_is_recorded_in_job_audit(self) -> None:
@@ -138,12 +139,12 @@ class ApiTests(unittest.TestCase):
 
     def test_split_firewall_endpoints_set_action_and_permission_code(self) -> None:
         ip_allow_job = create_trade_access_ip_allow_job(
-            request=TradeAccessIpRequest(target_ip="192.168.66.22"),
+            request=TradeAccessIpAllowRequest(target_ip="203.0.113.11"),
             principal=self.user,
         )
         ports_allow_job = create_trade_access_ports_allow_job(
             request=TradeAccessPortAllowRequest(
-                target_ip="192.168.66.22",
+                target_ip="203.0.113.11",
                 ports=[12001, 12002],
             ),
             principal=self.user,
