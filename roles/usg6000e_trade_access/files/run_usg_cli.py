@@ -50,6 +50,26 @@ CLI_ERROR_MARKERS = (
 )
 
 
+def remaining_timeout(child, timeout):
+    deadline = getattr(child, "execution_deadline", None)
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("CLI execution deadline exceeded.")
+    return min(timeout, remaining)
+
+
+def sleep_with_deadline(child, seconds):
+    time.sleep(remaining_timeout(child, seconds))
+
+
+def send_with_deadline(child, value):
+    sleep_with_deadline(child, CLI_SEND_DELAY)
+    remaining_timeout(child, 1)
+    child.send(value)
+
+
 def parse_ssh_port(value):
     try:
         port = int(value)
@@ -91,7 +111,7 @@ def expect_prompt_or_more(child, timeout):
         # 每次命令都读到设备提示符为止，中途分页或确认直接自动处理。
         index = child.expect(
             [PROMPT_PATTERN, MORE_PATTERN, CONFIRM_PATTERN],
-            timeout=timeout,
+            timeout=remaining_timeout(child, timeout),
         )
         output.append(child.before)
         output.append(child.after)
@@ -100,13 +120,13 @@ def expect_prompt_or_more(child, timeout):
             return "".join(output)
 
         if index == 1:
-            child.send(" ")
-            time.sleep(0.2)
+            send_with_deadline(child, " ")
+            sleep_with_deadline(child, 0.2)
             continue
 
         if index == 2:
-            child.send("y\r")
-            time.sleep(0.5)
+            send_with_deadline(child, "y\r")
+            sleep_with_deadline(child, 0.5)
             continue
 
 
@@ -178,7 +198,7 @@ def establish_ssh_session(child, timeout, password=None):
                 PASSWORD_PROMPT_PATTERN,
                 AUTH_FAILURE_PATTERN,
             ],
-            timeout=timeout,
+            timeout=remaining_timeout(child, timeout),
         )
         output.append(child.before)
         output.append(child.after)
@@ -187,13 +207,13 @@ def establish_ssh_session(child, timeout, password=None):
             return "".join(output)
 
         if index == 1:
-            child.send(" ")
-            time.sleep(0.2)
+            send_with_deadline(child, " ")
+            sleep_with_deadline(child, 0.2)
             continue
 
         if index == 2:
-            child.send("y\r")
-            time.sleep(0.5)
+            send_with_deadline(child, "y\r")
+            sleep_with_deadline(child, 0.5)
             continue
 
         if index == 3:
@@ -204,9 +224,9 @@ def establish_ssh_session(child, timeout, password=None):
                 )
             if password_sent:
                 raise RuntimeError("SSH password prompt repeated; authentication failed.")
-            child.send(password + "\r")
+            send_with_deadline(child, password + "\r")
             password_sent = True
-            time.sleep(0.5)
+            sleep_with_deadline(child, 0.5)
             continue
 
         raise RuntimeError("SSH authentication failed: " + child.after.strip())
@@ -271,7 +291,7 @@ def wait_for_engine_commit_completion(
 
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
-        time.sleep(poll_interval)
+        sleep_with_deadline(child, poll_interval)
         remaining = max(1, int(deadline - time.monotonic()))
         # Huawei 编译可能异步进行，用同一条 commit 命令轮询最终状态。
         poll_output = run_command_with_busy_retry(
@@ -310,7 +330,7 @@ def run_command_with_busy_retry(
     output = []
 
     for attempt in range(max_retries + 1):
-        child.send(cmd + "\r")
+        send_with_deadline(child, cmd + "\r")
         command_output = expect_prompt_or_more(child, timeout)
         output.append(command_output)
 
@@ -325,7 +345,7 @@ def run_command_with_busy_retry(
             f"\nINFO: Firewall is busy; retrying command in {retry_delay} seconds "
             f"({attempt + 1}/{max_retries}).\n"
         )
-        time.sleep(retry_delay)
+        sleep_with_deadline(child, retry_delay)
 
     raise RuntimeError(
         f"Firewall remained busy after {max_retries + 1} attempts while running: {cmd}"
@@ -355,7 +375,16 @@ def main():
     )
 
     parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--total-timeout", type=float, default=900)
     args = parser.parse_args()
+    if args.timeout <= 0 or args.total_timeout <= 0:
+        parser.error("CLI timeouts must be positive.")
+    deadline = time.monotonic() + args.total_timeout
+    if os.environ.get("USG6000E_RUN_DEADLINE"):
+        deadline = min(deadline, time.monotonic() + float(os.environ["USG6000E_RUN_DEADLINE"]) - time.time())
+    if deadline <= time.monotonic():
+        print("ERROR: CLI execution deadline exceeded before SSH started.", file=sys.stderr)
+        sys.exit(4)
 
     if args.cli_file:
         cli_files = [args.cli_file]
@@ -379,7 +408,8 @@ def main():
         echo=False,
     )
 
-    child.delaybeforesend = CLI_SEND_DELAY
+    child.delaybeforesend = None
+    child.execution_deadline = deadline
     child.setwinsize(200, 200)
 
     output = []
@@ -389,8 +419,8 @@ def main():
         output.append(establish_ssh_session(child, args.timeout, password=password))
 
         # 登录后先发空回车，让设备 CLI 完成初始化
-        time.sleep(1)
-        child.send("\r")
+        sleep_with_deadline(child, 1)
+        send_with_deadline(child, "\r")
         output.append(expect_prompt_or_more(child, args.timeout))
 
         for source_file, cmd in commands:
@@ -421,7 +451,7 @@ def main():
             output.append("\n")
             output.append(command_output)
 
-            time.sleep(CLI_COMMAND_SETTLE_DELAY)
+            sleep_with_deadline(child, CLI_COMMAND_SETTLE_DELAY)
 
         print("".join(output))
         child.close(force=True)

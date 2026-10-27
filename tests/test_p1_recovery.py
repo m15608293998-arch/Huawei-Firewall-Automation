@@ -59,7 +59,7 @@ class RawStateTests(unittest.TestCase):
 
     def state(self, payload):
         class Runner:
-            def run_firewall_snapshot(self, *args):
+            def run_firewall_snapshot(self, *args, **kwargs):
                 return SnapshotRunnerResult("successful", 0, "", payload)
 
         return JobWorker(None, Runner())._query_target_state({"target_ip": IP}, "FW")[0]

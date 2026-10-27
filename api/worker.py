@@ -1,5 +1,4 @@
 import argparse
-import fcntl
 import logging
 import re
 import signal
@@ -8,9 +7,11 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from api.config import settings
+from api.execution import ExecutionTimeout, exclusive_file_lock
 from api.ip_policy import (
     DIRECT_ACCESS_ALLOW_ACTIONS,
     validate_direct_access_target,
@@ -53,23 +54,35 @@ class JobWorker:
         # One parent execution is serialized so an all-node query never observes
         # the middle of a three-firewall mutation.  A recoverable child failure
         # is retried inside this boundary before another parent can overtake it.
-        with self._parent_orchestration_lock():
-            job = self.storage.claim_next_runnable_job(utc_now_iso())
-            if job is None:
-                return False
-            self._execute_job(job)
+        try:
+            with self._parent_orchestration_lock():
+                job = self.storage.claim_next_runnable_job(
+                    utc_now_iso(), job_timeout_seconds=settings.job_timeout_seconds,
+                )
+                if job is None:
+                    return False
+                self._execute_job(job)
+        except ExecutionTimeout:
+            return False
         return True
 
     @contextmanager
     def _parent_orchestration_lock(self):
         lock_path = self.storage.database_path.parent / "firewall_parent.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with exclusive_file_lock(lock_path, settings.runner_lock_timeout_seconds):
+            yield
+
+    @staticmethod
+    def _remaining_job_seconds(job: dict[str, Any]) -> float:
+        if not job.get("deadline_at"):
+            return settings.job_timeout_seconds
+        return (datetime.fromisoformat(job["deadline_at"]) - datetime.now(timezone.utc)).total_seconds()
+
+    def _require_job_time(self, job: dict[str, Any]) -> float:
+        remaining = self._remaining_job_seconds(job)
+        if remaining <= 0:
+            raise ExecutionTimeout("Job execution deadline exceeded; firewall changes may be partial. Inspect target results before retrying.")
+        return remaining
 
     def run_forever(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
@@ -92,6 +105,7 @@ class JobWorker:
         )
 
         try:
+            self._require_job_time(job)
             self.storage.ensure_job_targets(
                 job_id,
                 target_codes,
@@ -133,6 +147,13 @@ class JobWorker:
                     return
             before_states: dict[str, dict[str, Any]] = {}
             if self._requires_baseline_query(job):
+                if int(job.get("precheck_attempt_count") or 0) >= settings.precheck_max_attempts:
+                    self._schedule_preflight_retry(job, {"precheck": "Precheck attempt limit reached."})
+                    return
+                attempt = self.storage.start_job_precheck(job_id)
+                if attempt is None:
+                    return
+                job = {**job, "precheck_attempt_count": attempt}
                 self.storage.update_job(
                     job_id,
                     {
@@ -149,6 +170,9 @@ class JobWorker:
                     self._schedule_preflight_retry(job, preflight_errors)
                     return
 
+            self._require_job_time(job)
+            if not self.storage.begin_job_application(job_id):
+                return
             desired_state = self._resolve_desired_state(job, before_states)
             job = {**job, "desired_state": desired_state}
             self.storage.update_job(
@@ -207,6 +231,7 @@ class JobWorker:
                     return
                 break
 
+            self._require_job_time(job)
             self.storage.update_job(
                 job_id,
                 {
@@ -228,7 +253,7 @@ class JobWorker:
                 job_id,
                 {
                     "status": JobStatus.failed.value,
-                    "runner_status": "failed",
+                    "runner_status": "timed_out" if isinstance(exc, ExecutionTimeout) else "failed",
                     "runner_rc": 1,
                     "error_message": str(exc),
                     "finished_at": utc_now_iso(),
@@ -297,11 +322,17 @@ class JobWorker:
         job: dict[str, Any],
         errors: dict[str, str],
     ) -> None:
+        self._require_job_time(job)
+        exhausted = int(job.get("precheck_attempt_count") or 0) >= settings.precheck_max_attempts
+        delay = min(
+            settings.firewall_reconcile_retry_seconds * 2 ** max(0, int(job.get("precheck_attempt_count") or 1) - 1),
+            60, self._remaining_job_seconds(job),
+        )
         self.storage.update_job(
             str(job["job_id"]),
             {
-                "status": JobStatus.reconciling.value,
-                "runner_status": "precheck_retry_scheduled",
+                "status": JobStatus.failed.value if exhausted else JobStatus.reconciling.value,
+                "runner_status": "precheck_attempt_limit_reached" if exhausted else "precheck_retry_scheduled",
                 "runner_rc": 1,
                 "error_message": "Firewall precheck failed: {0}".format(
                     "; ".join(
@@ -309,10 +340,8 @@ class JobWorker:
                         for code, message in sorted(errors.items())
                     )
                 ),
-                "finished_at": None,
-                "next_attempt_at": utc_after_iso(
-                    settings.firewall_reconcile_retry_seconds
-                ),
+                "finished_at": utc_now_iso() if exhausted else None,
+                "next_attempt_at": None if exhausted else utc_after_iso(delay),
             },
         )
 
@@ -322,6 +351,7 @@ class JobWorker:
         completed: list[str],
         failed: list[str],
     ) -> bool:
+        self._require_job_time(job)
         job_id = str(job["job_id"])
         targets = {
             str(target["firewall_code"]): target
@@ -414,7 +444,8 @@ class JobWorker:
             ",".join(sorted(failed)),
             retry_delay,
         )
-        self.retry_waiter(retry_delay)
+        self.retry_waiter(min(retry_delay, self._require_job_time(job)))
+        self._require_job_time(job)
         return True
 
     def _build_desired_state(
@@ -587,6 +618,7 @@ class JobWorker:
             return False
 
         attempt = previous_attempts + 1
+        remaining = self._require_job_time(job)
         self.storage.start_job_target_attempt(
             job_id,
             firewall_code,
@@ -597,7 +629,7 @@ class JobWorker:
         # Re-run commit/save even on a no-op plan: an interrupted previous run
         # may already have changed configuration without finalizing it.
         result: RunnerResult = self.runner.run_trade_access(
-            {**job, "force_finalize": True}, firewall_code,
+            {**job, "force_finalize": True, "execution_timeout_seconds": remaining}, firewall_code,
         )
         runner_failed = result.rc != 0 or result.status not in ("successful", "ok")
         last_error = result.error_message
@@ -771,7 +803,9 @@ class JobWorker:
         job: dict[str, Any],
         firewall_code: str,
     ) -> tuple[dict[str, Any], SnapshotRunnerResult]:
-        snapshot = self.runner.run_firewall_snapshot("state", firewall_code)
+        snapshot = self.runner.run_firewall_snapshot(
+            "state", firewall_code, timeout_seconds=self._require_job_time(job),
+        )
         if snapshot.rc != 0 or snapshot.payload is None:
             raise RuntimeError(snapshot.error_message or "Firewall state query failed.")
         payload = snapshot.payload

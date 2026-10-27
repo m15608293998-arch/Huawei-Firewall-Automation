@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -8,9 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import fcntl
-
 from api.config import settings
+from api.execution import ExecutionTimeout, exclusive_file_lock
 from api.ip_policy import (
     DIRECT_ACCESS_ALLOW_ACTIONS,
     validate_direct_access_target,
@@ -55,28 +55,36 @@ class SnapshotRunnerResult:
 
 class AnsibleRunnerService:
     @contextmanager
-    def _parent_orchestration_lock(self):
+    def _parent_orchestration_lock(self, timeout_seconds: float | None = None):
         # Shared with JobWorker so an all-firewall snapshot cannot observe a
         # transient state halfway through a multi-firewall parent mutation.
         lock_path = settings.database_path.parent / "firewall_parent.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        timeout = min(settings.runner_lock_timeout_seconds, timeout_seconds if timeout_seconds is not None else settings.runner_lock_timeout_seconds)
+        with exclusive_file_lock(lock_path, timeout):
+            yield
 
     @contextmanager
-    def _exclusive_runner_lock(self, private_data_dir: Path):
+    def _exclusive_runner_lock(self, private_data_dir: Path, timeout_seconds: float):
         private_data_dir.mkdir(parents=True, exist_ok=True)
         lock_path = private_data_dir / "firewall_runner.lock"
-        with lock_path.open("a", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with exclusive_file_lock(lock_path, min(settings.runner_lock_timeout_seconds, timeout_seconds)):
+            yield
+
+    @staticmethod
+    def _runner_options(deadline: float) -> dict[str, Any]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ExecutionTimeout("Runner execution deadline exceeded.")
+        return {
+            # Use settings rather than timeout= so subsecond budgets are not
+            # truncated to zero (which disables the runner timeout).
+            "settings": {"job_timeout": remaining, "pexpect_timeout": min(0.2, remaining)},
+            "cancel_callback": lambda: time.monotonic() >= deadline,
+            "envvars": {
+                "ANSIBLE_CONFIG": str(settings.project_root / "ansible.cfg"),
+                "USG6000E_RUN_DEADLINE": str(time.time() + remaining),
+            },
+        }
 
     @staticmethod
     def _firewall_code(firewall_code: str | None) -> str:
@@ -161,6 +169,10 @@ class AnsibleRunnerService:
             )
 
         project_root = settings.project_root
+        deadline = time.monotonic() + min(
+            settings.runner_timeout_seconds,
+            float(job.get("execution_timeout_seconds", settings.runner_timeout_seconds)),
+        )
         playbook = str(project_root / settings.playbook_path)
         firewall_runner_dir = self._private_data_dir(target_code)
         firewall_runner_dir.mkdir(parents=True, exist_ok=True)
@@ -206,7 +218,7 @@ class AnsibleRunnerService:
         extravars["force_finalize"] = bool(job.get("force_finalize", False))
 
         try:
-            with self._exclusive_runner_lock(firewall_runner_dir):
+            with self._exclusive_runner_lock(firewall_runner_dir, deadline - time.monotonic()):
                 with self._isolated_private_data_dir(
                     firewall_runner_dir,
                     ident,
@@ -218,14 +230,14 @@ class AnsibleRunnerService:
                         playbook=playbook,
                         ident=ident,
                         extravars=extravars,
-                        envvars={
-                            "ANSIBLE_CONFIG": str(project_root / "ansible.cfg"),
-                        },
+                        **self._runner_options(deadline),
                         suppress_env_files=True,
                         rotate_artifacts=20,
                         quiet=True,
                         event_handler=capture_failure,
                     )
+        except ExecutionTimeout as exc:
+            return RunnerResult("timeout", 254, str(artifact_root / ident), str(exc))
         except Exception as exc:
             return RunnerResult(
                 status="failed",
@@ -236,6 +248,8 @@ class AnsibleRunnerService:
 
         status = getattr(result, "status", "unknown")
         rc = int(getattr(result, "rc", 1) or 0)
+        if time.monotonic() >= deadline or status == "timeout":
+            return RunnerResult("timeout", 254, str(artifact_root / ident), "Runner execution deadline exceeded; firewall changes may be partial.")
         return RunnerResult(
             status=status,
             rc=rc,
@@ -247,6 +261,7 @@ class AnsibleRunnerService:
         self,
         snapshot_mode: str = "snapshot",
         firewall_code: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> SnapshotRunnerResult:
         target_code = self._firewall_code(firewall_code)
         if snapshot_mode not in {"snapshot", "ips", "ports", "state"}:
@@ -267,6 +282,10 @@ class AnsibleRunnerService:
             )
 
         project_root = settings.project_root
+        deadline = time.monotonic() + min(
+            settings.snapshot_timeout_seconds,
+            timeout_seconds if timeout_seconds is not None else settings.snapshot_timeout_seconds,
+        )
         playbook = str(project_root / settings.playbook_path)
         firewall_runner_dir = self._private_data_dir(target_code)
         firewall_runner_dir.mkdir(parents=True, exist_ok=True)
@@ -301,7 +320,7 @@ class AnsibleRunnerService:
             }
 
             try:
-                with self._exclusive_runner_lock(firewall_runner_dir):
+                with self._exclusive_runner_lock(firewall_runner_dir, deadline - time.monotonic()):
                     with self._isolated_private_data_dir(
                         firewall_runner_dir,
                         snapshot_id,
@@ -313,13 +332,13 @@ class AnsibleRunnerService:
                             playbook=playbook,
                             ident=snapshot_id,
                             extravars=extravars,
-                            envvars={
-                                "ANSIBLE_CONFIG": str(project_root / "ansible.cfg"),
-                            },
+                            **self._runner_options(deadline),
                             suppress_env_files=True,
                             rotate_artifacts=20,
                             quiet=True,
                         )
+            except ExecutionTimeout as exc:
+                return SnapshotRunnerResult("timeout", 254, artifact_dir, error_message=str(exc))
             except Exception as exc:
                 return SnapshotRunnerResult(
                     status="failed",
@@ -330,6 +349,8 @@ class AnsibleRunnerService:
 
             status = getattr(result, "status", "unknown")
             rc = int(getattr(result, "rc", 1) or 0)
+            if time.monotonic() >= deadline or status == "timeout":
+                return SnapshotRunnerResult("timeout", 254, artifact_dir, error_message="Firewall snapshot deadline exceeded.")
             if rc != 0:
                 return SnapshotRunnerResult(
                     status=status,
@@ -356,21 +377,44 @@ class AnsibleRunnerService:
                 payload=payload,
             )
 
+    def _query_snapshots_parallel(
+        self, mode: str, codes: tuple[str, ...], timeout_seconds: float | None,
+    ) -> dict[str, SnapshotRunnerResult]:
+        deadline = time.monotonic() + (timeout_seconds if timeout_seconds is not None else settings.snapshot_timeout_seconds)
+        results: dict[str, SnapshotRunnerResult] = {}
+
+        def query(code):
+            return self.run_firewall_snapshot(mode, code, timeout_seconds=max(0, deadline - time.monotonic()))
+
+        with ThreadPoolExecutor(max_workers=min(len(codes), settings.firewall_parallel_workers)) as executor:
+            futures = {executor.submit(query, code): code for code in codes}
+            for future in as_completed(futures):
+                code = futures[future]
+                try:
+                    results[code] = future.result()
+                except Exception as exc:
+                    results[code] = SnapshotRunnerResult("failed", 1, "", error_message=str(exc))
+        return results
+
     def run_reconciled_snapshot(
         self,
         snapshot_mode: str,
         firewall_codes: tuple[str, ...] | list[str] | None = None,
     ) -> SnapshotRunnerResult:
-        with self._parent_orchestration_lock():
-            return self._run_reconciled_snapshot_unlocked(
-                snapshot_mode,
-                firewall_codes,
-            )
+        deadline = time.monotonic() + settings.snapshot_timeout_seconds
+        try:
+            with self._parent_orchestration_lock(deadline - time.monotonic()):
+                return self._run_reconciled_snapshot_unlocked(
+                    snapshot_mode, firewall_codes, deadline - time.monotonic(),
+                )
+        except ExecutionTimeout as exc:
+            return SnapshotRunnerResult("timeout", 254, "", error_message=str(exc))
 
     def _run_reconciled_snapshot_unlocked(
         self,
         snapshot_mode: str,
         firewall_codes: tuple[str, ...] | list[str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> SnapshotRunnerResult:
         if snapshot_mode not in {"snapshot", "ips", "ports"}:
             return SnapshotRunnerResult(
@@ -380,24 +424,7 @@ class AnsibleRunnerService:
                 error_message="Invalid reconciled firewall snapshot mode.",
             )
         codes = tuple(firewall_codes or settings.firewall_target_codes)
-        results: dict[str, SnapshotRunnerResult] = {}
-        worker_count = min(len(codes), settings.firewall_parallel_workers)
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(self.run_firewall_snapshot, snapshot_mode, code): code
-                for code in codes
-            }
-            for future in as_completed(futures):
-                code = futures[future]
-                try:
-                    results[code] = future.result()
-                except Exception as exc:
-                    results[code] = SnapshotRunnerResult(
-                        status="failed",
-                        rc=1,
-                        artifact_dir="",
-                        error_message=str(exc),
-                    )
+        results = self._query_snapshots_parallel(snapshot_mode, codes, timeout_seconds)
 
         failures = {
             code: result.error_message or "snapshot failed"
@@ -492,32 +519,22 @@ class AnsibleRunnerService:
         firewall_codes: tuple[str, ...] | list[str] | None = None,
     ) -> SnapshotRunnerResult:
         """Query IP and port state once per firewall and build a repair report."""
-        with self._parent_orchestration_lock():
-            return self._run_firewall_consistency_check_unlocked(firewall_codes)
+        deadline = time.monotonic() + settings.snapshot_timeout_seconds
+        try:
+            with self._parent_orchestration_lock(deadline - time.monotonic()):
+                return self._run_firewall_consistency_check_unlocked(
+                    firewall_codes, deadline - time.monotonic(),
+                )
+        except ExecutionTimeout as exc:
+            return SnapshotRunnerResult("timeout", 254, "", error_message=str(exc))
 
     def _run_firewall_consistency_check_unlocked(
         self,
         firewall_codes: tuple[str, ...] | list[str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> SnapshotRunnerResult:
         codes = tuple(firewall_codes or settings.firewall_target_codes)
-        results: dict[str, SnapshotRunnerResult] = {}
-        worker_count = min(len(codes), settings.firewall_parallel_workers)
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(self.run_firewall_snapshot, "state", code): code
-                for code in codes
-            }
-            for future in as_completed(futures):
-                code = futures[future]
-                try:
-                    results[code] = future.result()
-                except Exception as exc:
-                    results[code] = SnapshotRunnerResult(
-                        status="failed",
-                        rc=1,
-                        artifact_dir="",
-                        error_message=str(exc),
-                    )
+        results = self._query_snapshots_parallel("state", codes, timeout_seconds)
 
         ip_sets: dict[str, set[tuple[str, int]]] = {}
         port_sets: dict[str, set[tuple[str, int]]] = {}

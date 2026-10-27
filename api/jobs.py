@@ -8,7 +8,7 @@ from api.auth import Principal, authorize_job_read
 from api.config import settings
 from api.runner_service import runner_service
 from api.schemas import JobStatus, TradeAccessJobCreate
-from api.storage import JobStorage
+from api.storage import IdempotencyConflictError, JobStorage
 from api.time_utils import utc_now_iso
 
 
@@ -78,8 +78,27 @@ def create_job(
         "state_version": None,
         "next_attempt_at": None,
     }
-    storage.create_job(job, firewall_targets)
-    return job
+    try:
+        return storage.create_job(job, firewall_targets)
+    except IdempotencyConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+def cancel_job(job_id: str, principal: Principal, include_all: bool = False) -> dict[str, Any]:
+    job = get_job_or_404(job_id)
+    if not include_all:
+        authorize_job_read(principal, job)
+    if job["status"] == JobStatus.canceled.value:
+        return job
+    if not storage.cancel_job(job_id, utc_now_iso()):
+        latest = get_job_or_404(job_id)
+        if latest["status"] == JobStatus.canceled.value:
+            return latest
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only pending or prechecking jobs without configuration preparation can be canceled.",
+        )
+    return get_job_or_404(job_id)
 
 
 def get_job_or_404(job_id: str) -> dict[str, Any]:

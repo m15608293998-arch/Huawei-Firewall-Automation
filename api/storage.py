@@ -5,7 +5,9 @@ except ModuleNotFoundError:
 from collections.abc import Iterator
 from contextlib import contextmanager
 import json
+import hashlib
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,9 @@ JOB_COLUMNS = [
     "desired_state",
     "state_version",
     "next_attempt_at",
+    "deadline_at",
+    "precheck_attempt_count",
+    "request_fingerprint",
 ]
 
 TARGET_COLUMNS = [
@@ -58,6 +63,10 @@ TARGET_COLUMNS = [
 ]
 
 
+class IdempotencyConflictError(ValueError):
+    pass
+
+
 class JobStorage:
     def __init__(self, database_path: Path):
         self.database_path = Path(database_path)
@@ -68,6 +77,7 @@ class JobStorage:
     def initialize(self) -> None:
         with self._connect() as conn:
             conn.execute("pragma journal_mode = wal")
+            conn.execute("begin immediate")
             # SQLite 没有独立迁移工具，这里用 create + ensure_column 做轻量升级。
             conn.execute(
                 """
@@ -112,6 +122,17 @@ class JobStorage:
             self._ensure_column(conn, "jobs", "desired_state", "text")
             self._ensure_column(conn, "jobs", "state_version", "integer")
             self._ensure_column(conn, "jobs", "next_attempt_at", "text")
+            self._ensure_column(conn, "jobs", "deadline_at", "text")
+            self._ensure_column(conn, "jobs", "precheck_attempt_count", "integer not null default 0")
+            self._ensure_column(conn, "jobs", "request_fingerprint", "text")
+            conn.execute(
+                "create unique index if not exists jobs_idempotency_idx "
+                "on jobs (principal_id, client_request_id) where request_fingerprint is not null"
+            )
+            conn.execute(
+                "create index if not exists jobs_request_lookup_idx "
+                "on jobs (principal_id, client_request_id)"
+            )
             conn.execute(
                 "create index if not exists jobs_status_created_idx "
                 "on jobs (status, created_at)"
@@ -271,18 +292,36 @@ class JobStorage:
         self,
         job: dict[str, Any],
         firewall_targets: list[str] | tuple[str, ...] | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         columns = JOB_COLUMNS
         placeholders = ", ".join(["?"] * len(columns))
         column_sql = ", ".join(columns)
         target_codes = list(firewall_targets or job.get("firewall_targets") or [])
         job = dict(job)
         job["firewall_targets"] = target_codes
+        job["precheck_attempt_count"] = 0
+        job["request_fingerprint"] = (
+            self._request_fingerprint(job)
+            if job.get("client_request_id") and job.get("principal_id") else None
+        )
         values = [self._serialize_job_value(column, job.get(column)) for column in columns]
 
         with self._lock:
             with self._connect() as conn:
                 conn.execute("begin immediate")
+                if job["request_fingerprint"]:
+                    previous = conn.execute(
+                        "select * from jobs where principal_id = ? and client_request_id = ? limit 2",
+                        (job["principal_id"], job["client_request_id"]),
+                    ).fetchall()
+                    if len(previous) > 1:
+                        raise IdempotencyConflictError("This request ID belongs to multiple legacy jobs; use a new request ID.")
+                    if previous:
+                        existing = self._deserialize_job(previous[0])
+                        if self._request_fingerprint(existing) != job["request_fingerprint"]:
+                            raise IdempotencyConflictError("The request ID was already used with different request content.")
+                        conn.commit()
+                        return existing
                 conn.execute(
                     "insert into jobs ({0}) values ({1})".format(column_sql, placeholders),
                     values,
@@ -303,6 +342,14 @@ class JobStorage:
                     ],
                 )
                 conn.commit()
+        return job
+
+    @staticmethod
+    def _request_fingerprint(job: dict[str, Any]) -> str:
+        payload = {key: job.get(key) for key in ("action", "target_ip", "mask")}
+        payload["ports"] = sorted({int(port) for port in job.get("ports") or []})
+        payload["description"] = job.get("description") or None
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def get_job(
         self,
@@ -427,7 +474,9 @@ class JobStorage:
         """Atomically claim the oldest pending job."""
         return self._claim_next_job(started_at, (), include_reconciling=False)
 
-    def claim_next_runnable_job(self, started_at: str) -> dict[str, Any] | None:
+    def claim_next_runnable_job(
+        self, started_at: str, job_timeout_seconds: float | None = None,
+    ) -> dict[str, Any] | None:
         """Claim a pending job or resume one interrupted by a worker crash.
 
         The caller must hold the cross-process parent orchestration lock.  That
@@ -438,6 +487,7 @@ class JobStorage:
             started_at,
             resumable_statuses,
             include_reconciling=True,
+            job_timeout_seconds=job_timeout_seconds,
         )
 
     def _claim_next_job(
@@ -445,6 +495,7 @@ class JobStorage:
         started_at: str,
         resumable_statuses: tuple[str, ...],
         include_reconciling: bool,
+        job_timeout_seconds: float | None = None,
     ) -> dict[str, Any] | None:
         candidate_conditions = ["jobs.status = 'pending'"]
         query_values: list[str] = []
@@ -509,12 +560,16 @@ class JobStorage:
                     return None
 
                 job_id = row["job_id"]
-                update_values: tuple[Any, ...] = (started_at, job_id, *query_values)
+                deadline_at = row["deadline_at"]
+                if deadline_at is None and job_timeout_seconds is not None:
+                    deadline_at = (datetime.fromisoformat(started_at) + timedelta(seconds=job_timeout_seconds)).isoformat()
+                update_values: tuple[Any, ...] = (started_at, deadline_at, job_id, *query_values)
                 cursor = conn.execute(
                     """
                     update jobs
                     set status = 'running',
                         started_at = coalesce(started_at, ?),
+                        deadline_at = coalesce(deadline_at, ?),
                         next_attempt_at = null
                     where job_id = ?
                       and ({0})
@@ -531,7 +586,65 @@ class JobStorage:
         job["status"] = "running"
         job["started_at"] = job.get("started_at") or started_at
         job["next_attempt_at"] = None
+        job["deadline_at"] = deadline_at
         return job
+
+    def start_job_precheck(self, job_id: str) -> int | None:
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "update jobs set status = 'prechecking', runner_status = 'initializing_baseline', "
+                    "precheck_attempt_count = precheck_attempt_count + 1 "
+                    "where job_id = ? and status = 'running'",
+                    (job_id,),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                row = conn.execute("select precheck_attempt_count from jobs where job_id = ?", (job_id,)).fetchone()
+                conn.commit()
+                return int(row["precheck_attempt_count"])
+
+    def begin_job_application(self, job_id: str) -> bool:
+        # This atomic boundary races safely with cancellation: once reserved,
+        # the ledger and firewall may change and cancellation is no longer safe.
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "update jobs set status = 'applying', runner_status = 'applying' "
+                    "where job_id = ? and status in ('running', 'prechecking')",
+                    (job_id,),
+                )
+                conn.commit()
+                return cursor.rowcount == 1
+
+    def cancel_job(self, job_id: str, canceled_at: str) -> bool:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("begin immediate")
+                cursor = conn.execute(
+                    """
+                    update jobs set status = 'canceled', runner_status = 'canceled',
+                        finished_at = ?, next_attempt_at = null,
+                        error_message = 'Canceled before firewall configuration.'
+                    where job_id = ?
+                      and (status in ('pending', 'prechecking') or
+                           (status = 'reconciling' and runner_status = 'precheck_retry_scheduled'))
+                      and desired_state is null and state_version is null
+                      and not exists (select 1 from desired_access_states where source_job_id = jobs.job_id)
+                      and not exists (select 1 from job_firewall_targets
+                                      where job_id = jobs.job_id and attempt_count > 0)
+                    """,
+                    (canceled_at, job_id),
+                )
+                if cursor.rowcount != 1:
+                    return False
+                conn.execute(
+                    "update job_firewall_targets set status = 'canceled', runner_status = 'canceled', "
+                    "finished_at = ? where job_id = ?",
+                    (canceled_at, job_id),
+                )
+                conn.commit()
+                return True
 
     def update_job(self, job_id: str, fields: dict[str, Any]) -> None:
         if not fields:
@@ -550,7 +663,7 @@ class JobStorage:
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
-                    "update jobs set {0} where job_id = ?".format(assignments),
+                    "update jobs set {0} where job_id = ? and status != 'canceled'".format(assignments),
                     values,
                 )
                 conn.commit()
@@ -605,7 +718,9 @@ class JobStorage:
             with self._connect() as conn:
                 conn.execute(
                     "update job_firewall_targets set {0} "
-                    "where job_id = ? and firewall_code = ?".format(assignments),
+                    "where job_id = ? and firewall_code = ? "
+                    "and exists (select 1 from jobs where jobs.job_id = job_firewall_targets.job_id "
+                    "and jobs.status != 'canceled')".format(assignments),
                     values,
                 )
                 conn.commit()
