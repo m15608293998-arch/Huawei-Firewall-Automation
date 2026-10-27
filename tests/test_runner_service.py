@@ -426,7 +426,7 @@ class RunnerServiceTests(unittest.TestCase):
     def test_reconciled_snapshot_returns_clean_items_when_all_targets_match(self) -> None:
         service = AnsibleRunnerService()
 
-        def fake_snapshot(snapshot_mode, firewall_code=None):
+        def fake_snapshot(snapshot_mode, firewall_code=None, timeout_seconds=None):
             self.assertEqual(snapshot_mode, "ips")
             return SnapshotRunnerResult(
                 status="successful",
@@ -460,7 +460,7 @@ class RunnerServiceTests(unittest.TestCase):
             "IDC-FW": [],
         }
 
-        def fake_snapshot(snapshot_mode, firewall_code=None):
+        def fake_snapshot(snapshot_mode, firewall_code=None, timeout_seconds=None):
             return SnapshotRunnerResult(
                 status="successful",
                 rc=0,
@@ -488,7 +488,7 @@ class RunnerServiceTests(unittest.TestCase):
     def test_reconciled_snapshot_never_returns_partial_data_as_success(self) -> None:
         service = AnsibleRunnerService()
 
-        def fake_snapshot(snapshot_mode, firewall_code=None):
+        def fake_snapshot(snapshot_mode, firewall_code=None, timeout_seconds=None):
             if firewall_code == "IDC-FW":
                 return SnapshotRunnerResult(
                     status="failed",
@@ -538,7 +538,7 @@ class RunnerServiceTests(unittest.TestCase):
         }
         calls = []
 
-        def fake_snapshot(snapshot_mode, firewall_code=None):
+        def fake_snapshot(snapshot_mode, firewall_code=None, timeout_seconds=None):
             calls.append((snapshot_mode, firewall_code))
             return SnapshotRunnerResult(
                 status="successful",
@@ -588,7 +588,7 @@ class RunnerServiceTests(unittest.TestCase):
     def test_consistency_check_returns_consistent_for_single_test_firewall(self) -> None:
         service = AnsibleRunnerService()
 
-        def fake_snapshot(snapshot_mode, firewall_code=None):
+        def fake_snapshot(snapshot_mode, firewall_code=None, timeout_seconds=None):
             return SnapshotRunnerResult(
                 status="successful",
                 rc=0,
@@ -611,7 +611,7 @@ class RunnerServiceTests(unittest.TestCase):
     def test_consistency_check_does_not_suggest_actions_when_a_query_fails(self) -> None:
         service = AnsibleRunnerService()
 
-        def fake_snapshot(snapshot_mode, firewall_code=None):
+        def fake_snapshot(snapshot_mode, firewall_code=None, timeout_seconds=None):
             if firewall_code == "IDC-FW":
                 return SnapshotRunnerResult(
                     status="failed",
@@ -653,7 +653,7 @@ class RunnerServiceTests(unittest.TestCase):
     def test_consistency_check_marks_even_split_as_ambiguous(self) -> None:
         service = AnsibleRunnerService()
 
-        def fake_snapshot(snapshot_mode, firewall_code=None):
+        def fake_snapshot(snapshot_mode, firewall_code=None, timeout_seconds=None):
             has_item = firewall_code == "PG-FW"
             return SnapshotRunnerResult(
                 status="successful",

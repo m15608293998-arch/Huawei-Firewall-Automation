@@ -12,6 +12,8 @@ from api.permissions import VALID_PERMISSIONS
 from api.main import (
     admin_ui,
     check_firewall_consistency,
+    cancel_trade_access_job,
+    cancel_any_trade_access_job,
     create_trade_access_allow_job,
     create_trade_access_deny_job,
     create_trade_access_ip_allow_job,
@@ -84,6 +86,39 @@ class ApiTests(unittest.TestCase):
             ),
             principal=owner or self.user,
         )
+
+    def test_request_id_returns_existing_job_and_rejects_changed_body(self):
+        request = TradeAccessAllowRequest(target_ip="203.0.113.10", ports=[443], client_request_id="retry-safe")
+        first = create_trade_access_allow_job(request, self.user)
+        self.storage.update_job(first["job_id"], {"status": "successful"})
+        replay = create_trade_access_allow_job(request, self.user)
+        self.assertEqual(replay["job_id"], first["job_id"])
+        self.assertEqual(replay["status"], "successful")
+        with self.assertRaises(HTTPException) as conflict:
+            create_trade_access_allow_job(request.model_copy(update={"ports": [80]}), self.user)
+        self.assertEqual(conflict.exception.status_code, 409)
+        self.assertEqual(len(self.storage.list_jobs()), 1)
+
+    def test_cancellation_checks_ownership_and_keeps_duplicate_request_canceled(self):
+        request = TradeAccessAllowRequest(target_ip="203.0.113.10", ports=[443], client_request_id="cancel-key")
+        job = create_trade_access_allow_job(request, self.user)
+        with self.assertRaises(HTTPException) as unauthorized:
+            cancel_trade_access_job(job["job_id"], self.other_user)
+        self.assertEqual(unauthorized.exception.status_code, 404)
+        canceled = cancel_trade_access_job(job["job_id"], self.user)
+        self.assertEqual(canceled["status"], "canceled")
+        self.assertEqual(cancel_trade_access_job(job["job_id"], self.user)["status"], "canceled")
+        self.assertEqual(create_trade_access_allow_job(request, self.user)["job_id"], job["job_id"])
+        self.assertEqual({target["status"] for target in canceled["target_results"]}, {"canceled"})
+
+    def test_admin_can_cancel_pending_job_but_cannot_cancel_application(self):
+        job = self.create_job()
+        self.assertEqual(cancel_any_trade_access_job(job["job_id"], self.admin)["status"], "canceled")
+        next_job = self.create_job()
+        self.storage.update_job(next_job["job_id"], {"status": "applying"})
+        with self.assertRaises(HTTPException) as conflict:
+            cancel_any_trade_access_job(next_job["job_id"], self.admin)
+        self.assertEqual(conflict.exception.status_code, 409)
 
     def test_user_job_creation_and_subject_scoped_read(self) -> None:
         job = self.create_job()

@@ -210,6 +210,8 @@ class JobDetailResponse(BaseModel):
     desired_state: dict[str, object] | None = None
     state_version: int | None = None
     next_attempt_at: str | None = None
+    deadline_at: str | None = None
+    precheck_attempt_count: int = 0
     target_results: list[FirewallTargetResponse] = Field(default_factory=list)
 
     @field_validator(
@@ -217,6 +219,7 @@ class JobDetailResponse(BaseModel):
         "started_at",
         "finished_at",
         "next_attempt_at",
+        "deadline_at",
         mode="before",
     )
     @classmethod

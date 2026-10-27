@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from api.config import settings
@@ -127,7 +128,7 @@ class FakeRunner:
             with self._lock:
                 self.active_mutations -= 1
 
-    def run_firewall_snapshot(self, snapshot_mode="snapshot", firewall_code=None):
+    def run_firewall_snapshot(self, snapshot_mode="snapshot", firewall_code=None, timeout_seconds=None):
         code = str(firewall_code)
         with self._lock:
             self.snapshot_calls.append((snapshot_mode, code))
@@ -556,6 +557,84 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(job["runner_status"], "precheck_retry_scheduled")
         self.assertIsNotNone(job["next_attempt_at"])
         self.assertEqual(runner.jobs, [])
+
+    def test_precheck_retry_limit_is_persisted_and_unblocks_later_job(self) -> None:
+        self.create_job()
+        self.create_job(job_id="later", created_at="2026-06-05T00:00:01+00:00")
+        runner = FakeRunner(snapshot_failed_codes={"TEST-FW"})
+        with patch.object(settings, "precheck_max_attempts", 2):
+            worker = self.make_worker(runner)
+            worker.run_once()
+            self.assertEqual(self.storage.get_job("job-1")["precheck_attempt_count"], 1)
+            self.storage.update_job("job-1", {"next_attempt_at": "2000-01-01T00:00:00+00:00"})
+            self.make_worker(runner).run_once()
+        job = self.storage.get_job("job-1")
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["runner_status"], "precheck_attempt_limit_reached")
+        self.assertEqual(job["precheck_attempt_count"], 2)
+        self.assertIsNone(job["next_attempt_at"])
+        self.assertEqual(self.storage.claim_next_runnable_job("2026-10-27T00:00:00+00:00")["job_id"], "later")
+        self.assertEqual(runner.jobs, [])
+
+    def test_cancel_during_precheck_does_not_write_ledger_or_firewall(self) -> None:
+        self.create_job()
+        runner = FakeRunner()
+        original_snapshot = runner.run_firewall_snapshot
+
+        def cancel_while_querying(*args, **kwargs):
+            self.assertTrue(self.storage.cancel_job("job-1", "2026-10-27T00:00:00+00:00"))
+            return original_snapshot(*args, **kwargs)
+
+        runner.run_firewall_snapshot = cancel_while_querying
+        self.make_worker(runner).run_once()
+        self.assertEqual(self.storage.get_job("job-1")["status"], "canceled")
+        self.assertIsNone(self.storage.get_desired_access_state("203.0.113.10"))
+        self.assertEqual(runner.jobs, [])
+
+    def test_expired_resumed_job_cannot_access_device(self) -> None:
+        self.create_job()
+        self.storage.update_job("job-1", {"status": "running", "deadline_at": "2000-01-01T00:00:00+00:00"})
+        runner = FakeRunner()
+        self.make_worker(runner).run_once()
+        self.assertEqual(self.storage.get_job("job-1")["runner_status"], "timed_out")
+        self.assertEqual(runner.snapshot_calls, [])
+        self.assertEqual(runner.jobs, [])
+
+    def test_deadline_expires_during_retry_backoff_without_second_mutation(self) -> None:
+        self.create_job()
+        runner = FakeRunner(failed_codes={"TEST-FW"})
+        expired = False
+
+        def expire(_seconds):
+            nonlocal expired
+            expired = True
+
+        worker = self.make_worker(runner, expire)
+        worker._remaining_job_seconds = lambda job: -1 if expired else 60
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("job-1")["runner_status"], "timed_out")
+        self.assertEqual(len(runner.jobs), 1)
+
+    def test_deadline_expiring_during_final_verification_cannot_report_success(self) -> None:
+        self.create_job()
+        runner = FakeRunner()
+        original_snapshot = runner.run_firewall_snapshot
+        expired = False
+
+        def expire_after_verification(*args, **kwargs):
+            nonlocal expired
+            result = original_snapshot(*args, **kwargs)
+            if runner.jobs:
+                expired = True
+            return result
+
+        runner.run_firewall_snapshot = expire_after_verification
+        worker = self.make_worker(runner)
+        worker._remaining_job_seconds = lambda job: -1 if expired else 60
+        worker.run_once()
+        job = self.storage.get_job("job-1")
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["runner_status"], "timed_out")
 
     def test_internal_retry_finishes_before_a_different_ip_parent_can_run(self) -> None:
         codes = ("PG-FW", "PG-FW-1", "IDC-FW")

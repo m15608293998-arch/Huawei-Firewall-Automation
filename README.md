@@ -8,7 +8,7 @@
 - FastAPI：提供 `/admin-ui`、`/test-ui` 和业务 API。
 - Worker：从本地 SQLite 队列读取任务，调用 Ansible Runner 执行防火墙变更。
 
-业务变更接口会先返回 `202 Accepted` 和 `job_id`。父任务内的防火墙子任务并行执行并逐台校验；失败节点按轮次继续修复，等待重试时不会阻塞其他 IP 的变更。全量快照会并行查询所有启用防火墙，但存在未收敛父任务时暂停查询，改用一致性检查查看差异。
+业务变更接口会先返回 `202 Accepted` 和 `job_id`。父任务内的防火墙子任务并行执行并逐台校验；配置失败在同一父任务内有限重试，预检失败则按计划释放队列后重试。全量快照会并行查询所有启用防火墙，但存在修复中的父任务时暂停查询，改用一致性检查查看差异。
 
 ## 1. 准备环境
 
@@ -429,7 +429,13 @@ curl -X POST \
 | `POST /api/v1/trade-access/deny/ip` | 确认该 IP 已无应用端口后，再移出所有业务地址集 | 否 |
 | `POST /api/v1/trade-access/deny` | 删除该 IP 的全部应用端口，再移出所有业务地址集 | 否 |
 
-接口路径不区分防火墙。一次请求会创建 `firewall_targets` 中所有设备的子任务，
+`client_request_id` 是可选幂等键。同一用户使用相同键提交相同动作、IP、掩码、
+规范化端口和描述时，返回原 `job_id` 及当前状态，保留原防火墙目标；已成功、失败或
+取消的任务也不会重新执行。相同键用于不同内容返回 `409`。需要发起新变更或重做
+已失败/取消的任务时使用新键；省略该字段则每次创建新任务。升级前若同一用户的某个
+键对应多个历史任务，重用会返回 `409`，客户端需换新键。
+
+接口路径不区分防火墙。新任务会创建 `firewall_targets` 中所有设备的子任务，
 并在同一个父任务内并行执行。端口必须在 `1` 到 `65535` 之间，单次最多提交
 256 个。变更接口返回 `job_id` 后，查询任务和 Ansible 事件：
 
@@ -451,13 +457,45 @@ curl \
 任务详情的 `desired_state` 是该 IP 的完整业务期望状态，`target_results` 是逐台
 防火墙的变更前、期望和实测结果。只有全部子任务完成所启用的提交/保存，且逐虚拟
 系统地址及原始应用配置实时校验一致，父任务才是
-`successful`。已有期望基线的任务和所有重试均跳过预检；普通 runner 失败时不做
-中间完整查询，父任务内部短暂退避后只重试失败节点。端口任务按固定的完整期望端口
+`successful`。已有期望基线的任务和配置阶段重试均跳过预检；未知 IP 的基线查询
+失败会有限重试。普通 runner 失败时不做中间完整查询，父任务内部短暂退避后只重试
+失败节点。端口任务按固定的完整期望端口
 重新计算差量，重试时即使没有增删也会补提交/保存。所有节点的 runner 均成功后做
 最终验证；提交或保存失败不能仅凭配置已存在而改判成功。当前父任务终止前，后来
 的任务不会插入这次修复过程。
 事件接口默认返回关键业务步骤摘要，`detail=full` 才返回全部 Ansible 事件。普通用户
 只能读取自己的任务，管理员可读取全部任务。
+
+取消尚未准备配置的任务：
+
+```bash
+curl -X POST \
+  -H 'Authorization: Bearer <ACCESS_TOKEN_OR_SK>' \
+  http://127.0.0.1:8000/api/v1/trade-access/jobs/<JOB_ID>/cancel
+```
+
+普通用户只能取消自己的任务，管理员使用
+`POST /api/v1/admin/trade-access/jobs/<JOB_ID>/cancel` 取消任意用户任务。仅允许取消
+排队、只读预检或等待预检重试的任务；进入配置准备后返回 `409`。取消成功返回
+`200` 和 `canceled` 状态，重复取消仍返回原结果。正在运行的只读预检会在查询完成
+或超时后退出，不会继续写入期望账本或下发配置。
+
+执行边界通过 API 与 worker 共用的环境文件配置，生产示例见
+[`config/production/trade-access.env.example`](config/production/trade-access.env.example)：
+
+| 环境变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `TRADE_ACCESS_API_JOB_TIMEOUT_SECONDS` | `1800` | 首次认领起的父任务总预算，包含预检、退避、配置和验证 |
+| `TRADE_ACCESS_API_RUNNER_TIMEOUT_SECONDS` | `900` | 单次配置 Runner 的执行预算 |
+| `TRADE_ACCESS_API_SNAPSHOT_TIMEOUT_SECONDS` | `300` | 单次设备查询及全量查询的总预算 |
+| `TRADE_ACCESS_API_RUNNER_LOCK_TIMEOUT_SECONDS` | `10` | 全局编排锁与单设备 Runner 锁的最长等待时间 |
+| `TRADE_ACCESS_API_PRECHECK_MAX_ATTEMPTS` | `3` | 持久化的基线查询尝试上限，包含首次查询 |
+
+任务详情增加 `deadline_at`、`precheck_attempt_count`。排队时间不计入父任务预算；
+首次认领后，重试和 worker 重启都保留原截止时间。预检退避从
+`firewall_reconcile_retry_seconds` 开始倍增，最多 60 秒，并受剩余预算限制。
+超时停止继续执行；若已开始配置，设备可能存在部分变更，须结合逐台结果和 `check`
+人工处理。快照锁等待或执行超时返回 `503`。
 
 ## 8. 查询与一致性检查
 

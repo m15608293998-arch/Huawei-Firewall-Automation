@@ -25,6 +25,7 @@ from api.auth import (
     offline_api_key_service,
 )
 from api.jobs import (
+    cancel_job,
     create_job,
     get_admin_job_events,
     get_job_events,
@@ -620,6 +621,14 @@ def get_trade_access_job_events(
     }
 
 
+@app.post("/api/v1/trade-access/jobs/{job_id}/cancel", response_model=JobDetailResponse)
+def cancel_trade_access_job(
+    job_id: str,
+    principal: Principal = Depends(require_firewall_job_read),
+):
+    return cancel_job(job_id, principal)
+
+
 @app.get(
     "/api/v1/admin/trade-access/jobs",
     response_model=list[JobDetailResponse],
@@ -665,3 +674,11 @@ def get_any_trade_access_job_events(
         "job_id": job_id,
         "events": get_admin_job_events(job_id, detailed=detail == "full"),
     }
+
+
+@app.post("/api/v1/admin/trade-access/jobs/{job_id}/cancel", response_model=JobDetailResponse)
+def cancel_any_trade_access_job(
+    job_id: str,
+    principal: Principal = Depends(require_firewall_job_audit),
+):
+    return cancel_job(job_id, principal, include_all=True)

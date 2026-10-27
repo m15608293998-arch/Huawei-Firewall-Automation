@@ -123,6 +123,11 @@ class Settings(BaseSettings):
         ge=1,
         le=3600,
     )
+    job_timeout_seconds: float = Field(default=1800, gt=0, le=86400)
+    runner_timeout_seconds: float = Field(default=900, gt=0, le=86400)
+    snapshot_timeout_seconds: float = Field(default=300, gt=0, le=86400)
+    runner_lock_timeout_seconds: float = Field(default=10, gt=0, le=300)
+    precheck_max_attempts: int = Field(default=3, ge=1, le=100)
     auth_enabled: bool = True
     development_subject: str = "api-placeholder"
     keycloak_server_url: str = "http://127.0.0.1:8080"
