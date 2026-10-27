@@ -201,6 +201,9 @@ class AnsibleRunnerService:
         }
         if job["action"] in {"allow", "allow_ports", "deny_ports"}:
             extravars["application_ports"] = job["ports"]
+        if job.get("desired_state") is not None:
+            extravars["desired_access_state"] = job["desired_state"]
+        extravars["force_finalize"] = bool(job.get("force_finalize", False))
 
         try:
             with self._exclusive_runner_lock(firewall_runner_dir):

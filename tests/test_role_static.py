@@ -198,12 +198,13 @@ class RoleStaticTests(unittest.TestCase):
         add_to_group_block = template.split("{% elif operation.type == 'add_to_group' %}", 1)[1]
         add_to_group_block = add_to_group_block.split("{% elif operation.type == 'remove_application' %}", 1)[0]
         remove_application_block = template.split("{% elif operation.type == 'remove_application' %}", 1)[1]
-        remove_application_block = remove_application_block.split("{% endif %}", 1)[0]
+        remove_application_block = remove_application_block.split("{% endfor %}", 1)[0]
 
         self.assertIn("application-group name", add_to_group_block)
         self.assertIn("add application {{ operation.app_name }}\nquit\nsa", add_to_group_block)
         self.assertIn("undo add application {{ operation.app_name }}\nquit\nsa", remove_application_block)
-        self.assertIn("sa\nundo user-defined-application name {{ operation.app_name }}", remove_application_block)
+        self.assertIn("undo user-defined-application name {{ operation.app_name }}", remove_application_block)
+        self.assertIn("operation.in_group", remove_application_block)
 
     def test_incremental_port_template_can_rewrite_rule_ports(self) -> None:
         template = (
@@ -233,10 +234,9 @@ class RoleStaticTests(unittest.TestCase):
         self.assertIn("firewall_mutated: false", main_yml)
         self.assertIn("address_mutated: false", main_yml)
         self.assertIn("application_mutated: false", main_yml)
-        self.assertIn(
-            "application_mutated | default(false) | bool and commit_security_engine",
-            main_yml,
-        )
+        self.assertIn("application_commit_required", main_yml)
+        self.assertIn("configuration_save_required", main_yml)
+        self.assertIn("force_finalize | default(false) | bool", main_yml)
 
     def test_address_post_validation_only_runs_after_mutation(self) -> None:
         address_yml = (

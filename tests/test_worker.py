@@ -106,6 +106,8 @@ class FakeRunner:
                     state["ip_present"] = False
                     if action == "deny":
                         ports.clear()
+                if action in {"allow", "allow_ports", "deny_ports"} and job.get("desired_state"):
+                    ports = set(job["desired_state"]["ports"])
                 state["ports"] = sorted(ports)
 
             if should_fail and code in self.failed_after_apply_codes:
@@ -159,7 +161,21 @@ class FakeRunner:
             status="successful",
             rc=0,
             artifact_dir="/tmp/snapshots/{0}".format(code),
-            payload={"ip_items": ip_items, "port_items": port_items},
+            payload={
+                "ip_items": ip_items, "port_items": port_items,
+                "address_state": {
+                    "vsystems": ["public"],
+                    "by_vsystem": {"public": {"203.0.113.10": 32} if state["ip_present"] else {}},
+                },
+                "application_prefix": "UD_TServe_",
+                "application_state": {"applications": [
+                    {"name": "UD_TServe_203.0.113.10", "ports": state["ports"],
+                     "ip_addresses": [{"ip": "203.0.113.10", "mask": 32}],
+                     "rules": [{"name": "1", "ports": state["ports"],
+                                "ip_addresses": [{"ip": "203.0.113.10", "mask": 32}]}]},
+                ] if state["ports"] else []},
+                "application_group_members": ["UD_TServe_203.0.113.10"] if state["ports"] else [],
+            },
         )
 
 
@@ -273,11 +289,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0]["status"], "verified")
         self.assertEqual(targets[0]["attempt_count"], 1)
-        self.assertEqual(targets[0]["before_state"], {"ip_present": False, "ports": []})
-        self.assertEqual(
-            targets[0]["observed_state"],
-            {"ip_present": True, "ports": [12001]},
-        )
+        self.assertFalse(targets[0]["before_state"]["ip_present"])
+        self.assertEqual(targets[0]["before_state"]["ports"], [])
+        self.assertTrue(targets[0]["observed_state"]["ip_present"])
+        self.assertEqual(targets[0]["observed_state"]["ports"], [12001])
         self.assertEqual(len(runner.jobs), 1)
         self.assertEqual(runner.snapshot_calls, [("state", "TEST-FW"), ("state", "TEST-FW")])
 
@@ -412,7 +427,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(retry_delays, [3.0])
         self.assertEqual(runner.snapshot_calls, [("state", "TEST-FW")])
 
-    def test_final_state_can_verify_after_both_runner_attempts_fail_late(self) -> None:
+    def test_matching_config_cannot_override_commit_or_save_failure(self) -> None:
         self.create_job(action="allow_ip", ports=[])
         self.storage.save_desired_access_state(
             target_ip="203.0.113.10",
@@ -433,12 +448,47 @@ class WorkerTests(unittest.TestCase):
 
         parent = self.storage.get_job("job-1")
         target = self.storage.list_job_targets("job-1")[0]
-        self.assertEqual(parent["status"], "successful")
-        self.assertEqual(target["status"], "verified")
-        self.assertEqual(target["runner_status"], "verified_after_runner_failure")
+        self.assertEqual(parent["status"], "failed")
+        self.assertEqual(target["status"], "failed")
+        self.assertEqual(target["runner_status"], "failed")
         self.assertEqual(target["attempt_count"], 2)
         self.assertEqual(retry_delays, [3.0])
-        self.assertEqual(runner.snapshot_calls, [("state", "TEST-FW")])
+        self.assertEqual(runner.snapshot_calls, [])
+
+    def test_late_failure_is_finalized_on_retry_even_when_state_already_matches(self) -> None:
+        self.create_job()
+        runner = FakeRunner(failed_after_apply_codes={"TEST-FW"})
+
+        def recover(_seconds):
+            runner.failed_after_apply_codes.clear()
+
+        self.make_worker(runner, recover).run_once()
+        self.assertEqual(self.storage.get_job("job-1")["status"], "successful")
+        self.assertEqual(len(runner.jobs), 2)
+        self.assertTrue(all(job["force_finalize"] for job, _ in runner.jobs))
+
+    def test_followup_port_job_repairs_failed_previous_desired_ports(self) -> None:
+        self.create_job(ports=[12001])
+        runner = FakeRunner(failed_codes={"TEST-FW"})
+        worker = self.make_worker(runner)
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("job-1")["status"], "failed")
+        runner.failed_codes.clear()
+        self.create_job(job_id="job-2", ports=[12002], created_at="2026-06-05T00:00:01+00:00")
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("job-2")["status"], "successful")
+        self.assertEqual(runner.states["TEST-FW"]["ports"], [12001, 12002])
+        self.assertEqual(runner.jobs[-1][0]["desired_state"]["ports"], [12001, 12002])
+
+    def test_crash_during_last_attempt_does_not_turn_matching_config_into_success(self) -> None:
+        self.create_job()
+        desired = {"ip_present": True, "ports": [12001], "version": 1}
+        self.storage.update_job("job-1", {"status": "applying", "desired_state": desired, "state_version": 1})
+        self.storage.update_job_target("job-1", "TEST-FW", {"status": "applying", "attempt_count": 2})
+        runner = FakeRunner(states={"TEST-FW": {"ip_present": True, "ports": [12001]}})
+        self.make_worker(runner).run_once()
+        self.assertEqual(self.storage.get_job("job-1")["status"], "failed")
+        self.assertEqual(runner.jobs, [])
 
     def test_application_capacity_error_requires_manual_intervention_immediately(self) -> None:
         self.create_job()
@@ -598,6 +648,8 @@ class WorkerTests(unittest.TestCase):
                 code,
                 {
                     "status": "verified",
+                    "runner_status": "successful",
+                    "runner_rc": 0,
                     "desired_state": {
                         "ip_present": True,
                         "ports": [12001],

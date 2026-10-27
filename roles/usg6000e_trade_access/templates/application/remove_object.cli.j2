@@ -4,9 +4,13 @@ switch vsys {{ application_vsystem }}
 system-view
 {% endif %}
 sa
+{% if application_group_contains_app | bool %}
 application-group name {{ user_defined_application.application_group_name }}
 undo add application {{ app_name }}
 quit
 sa
+{% endif %}
+{% if application_object_exists | bool %}
 undo user-defined-application name {{ app_name }}
+{% endif %}
 quit

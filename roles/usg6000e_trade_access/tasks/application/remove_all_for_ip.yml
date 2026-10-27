@@ -49,6 +49,67 @@
     application_units_to_remove: []
   when: enable_application_config | default(true) | bool
 
+- name: Render exact application detail queries before full removal
+  ansible.builtin.template:
+    src: application/query_details.cli.j2
+    dest: "{{ local_tmp_dir }}/query_removal_details_{{ access_request.target_ip }}.cli"
+    mode: "0600"
+  vars:
+    application_names_to_query: "{{ application_remove_discovery_data.object_names }}"
+  when:
+    - enable_application_config | default(true) | bool
+    - application_remove_discovery_data.object_names | length > 0
+
+- name: Query every application owner before any full removal
+  ansible.builtin.command:
+    argv: "{{ firewall_cli_command_prefix + ['--cli-file', local_tmp_dir ~ '/query_removal_details_' ~ access_request.target_ip ~ '.cli'] }}"
+  environment: "{{ firewall_cli_environment }}"
+  register: application_removal_details
+  changed_when: false
+  when:
+    - enable_application_config | default(true) | bool
+    - application_remove_discovery_data.object_names | length > 0
+
+- name: Save application ownership evidence before full removal
+  ansible.builtin.copy:
+    dest: "{{ local_tmp_dir }}/application_removal_ownership_{{ access_request.target_ip }}.out"
+    mode: "0600"
+    content: |
+      {{ application_remove_discovery.stdout }}
+      {{ application_removal_details.stdout | default('') }}
+  changed_when: false
+  when: enable_application_config | default(true) | bool
+
+- name: Parse actual application IP bindings before full removal
+  ansible.builtin.command:
+    argv:
+      - "{{ local_python_interpreter | default('python3.12') }}"
+      - "{{ role_path }}/files/extract_usg_application_names.py"
+      - "--file"
+      - "{{ local_tmp_dir }}/application_removal_ownership_{{ access_request.target_ip }}.out"
+      - "--base-app-name"
+      - "{{ base_app_name }}"
+      - "--target-ip"
+      - "{{ access_request.target_ip }}"
+      - "--mask"
+      - "{{ access_request.mask | default(32) | string }}"
+  register: application_removal_ownership
+  changed_when: false
+  when: enable_application_config | default(true) | bool
+
+- name: Reject full removal of applications with conflicting or incomplete ownership
+  ansible.builtin.assert:
+    that:
+      - ownership.all_target_ips_match | bool
+      - ownership.all_details_complete | bool
+    fail_msg: >-
+      Refusing full removal: application IP ownership conflicts with
+      {{ access_request.target_ip }} or its details are incomplete.
+      No application has been deleted. Conflicts: {{ ownership.invalid_target_applications }}.
+  vars:
+    ownership: "{{ application_removal_ownership.stdout | from_json }}"
+  when: enable_application_config | default(true) | bool
+
 - name: Build application removal units
   ansible.builtin.set_fact:
     application_units_to_remove: >-

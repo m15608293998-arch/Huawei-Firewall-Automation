@@ -84,9 +84,9 @@
       - "--mask"
       - "{{ access_request.mask | default(32) | string }}"
       - "--requested-ports-json"
-      - "{{ application_ports_int | to_json }}"
+      - "{{ (desired_access_state.ports if desired_access_state is defined else application_ports_int) | to_json }}"
       - "--mode"
-      - "{{ application_port_mode | default('add') }}"
+      - "{{ 'reconcile' if desired_access_state is defined else application_port_mode | default('add') }}"
       - "--rule-port-limit"
       - "{{ rule_port_limit | int | string }}"
       - "--application-rule-limit"
@@ -105,6 +105,7 @@
   ansible.builtin.assert:
     that:
       - application_state.all_target_ips_match | bool
+      - application_state.all_details_complete | bool
     fail_msg: >-
       Refusing to modify {{ application_state.invalid_target_applications }} because
       an application name belonging to {{ access_request.target_ip }} contains a
@@ -213,6 +214,8 @@
       - "{{ access_request.mask | default(32) | string }}"
       - "--requested-ports-json"
       - "{{ application_plan.effective_ports | to_json }}"
+      - "--mode"
+      - "{{ 'reconcile' if desired_access_state is defined else 'add' }}"
       - "--rule-port-limit"
       - "{{ rule_port_limit | int | string }}"
       - "--application-rule-limit"
@@ -226,6 +229,7 @@
   ansible.builtin.assert:
     that:
       - application_validation_state.all_target_ips_match | bool
+      - application_validation_state.all_details_complete | bool
       - application_validation_state.all_ports_valid | bool
       - not application_validation_state.plan.change_needed | bool
       - application_validation_state.plan.existing_ports == application_plan.effective_ports

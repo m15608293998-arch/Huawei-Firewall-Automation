@@ -434,10 +434,19 @@ def build_state_snapshot(
     application_vsystem: str,
     application_group: str,
 ) -> dict[str, Any]:
-    """Return IP and port views from one device query for task verification."""
+    """Include raw configuration so cleanup verification cannot hide residue."""
     address_state = build_address_state(address_sources)
     return {
         "generated_at": generated_at_iso(),
+        "address_state": address_state,
+        "application_state": parse_application_config(
+            application_inventory_text + "\n" + application_details_text,
+            application_prefix,
+        ),
+        "application_group_members": parse_application_group_members(
+            application_group_text, application_prefix, application_group,
+        ),
+        "application_prefix": application_prefix,
         "ip_items": build_ip_items(address_state),
         "port_items": build_port_items(
             address_state,

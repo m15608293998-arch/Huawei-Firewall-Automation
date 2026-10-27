@@ -136,6 +136,8 @@ class RunnerServiceTests(unittest.TestCase):
                             "target_ip": "203.0.113.10",
                             "mask": 32,
                             "ports": [12001, 12002],
+                            "desired_state": {"ip_present": True, "ports": [12001, 12002, 12003], "version": 2},
+                            "force_finalize": True,
                             "principal_subject": "employee-a",
                             "description": None,
                             "local_tmp_dir": str(Path(temp_dir) / "allow-job"),
@@ -174,6 +176,9 @@ class RunnerServiceTests(unittest.TestCase):
         )
         self.assertNotIn("application_ports", captured_calls[1]["extravars"])
         self.assertEqual(captured_calls[2]["extravars"]["application_ports"], [12001])
+        self.assertEqual(captured_calls[0]["extravars"]["desired_access_state"]["ports"], [12001, 12002, 12003])
+        self.assertTrue(captured_calls[0]["extravars"]["force_finalize"])
+        self.assertNotIn("desired_access_state", captured_calls[1]["extravars"])
 
     def test_trade_access_failure_returns_device_error_from_runner_event(self) -> None:
         capacity_error = (

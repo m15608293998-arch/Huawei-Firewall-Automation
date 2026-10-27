@@ -1,0 +1,19 @@
+---
+# Copy to .runtime/firewall-devices.yml and chmod 600 before filling values.
+# Keys must match the profile codes in group_vars/all.yml.
+TEST-FW:
+  device_host: "<FIREWALL_MGMT_IP>"
+  device_user: "<FIREWALL_USER>"
+  device_password: "<FIREWALL_PASSWORD>"
+PG-FW:
+  device_host: "<PG_FW_MGMT_IP>"
+  device_user: "<PG_FW_USER>"
+  device_password: "<PG_FW_PASSWORD>"
+PG-FW-1:
+  device_host: "<PG_FW_1_MGMT_IP>"
+  device_user: "<PG_FW_1_USER>"
+  device_password: "<PG_FW_1_PASSWORD>"
+IDC-FW:
+  device_host: "<IDC_FW_MGMT_IP>"
+  device_user: "<IDC_FW_USER>"
+  device_password: "<IDC_FW_PASSWORD>"

@@ -1,6 +1,7 @@
 import argparse
 import fcntl
 import logging
+import re
 import signal
 import threading
 import time
@@ -149,6 +150,7 @@ class JobWorker:
                     return
 
             desired_state = self._resolve_desired_state(job, before_states)
+            job = {**job, "desired_state": desired_state}
             self.storage.update_job(
                 job_id,
                 {
@@ -427,6 +429,22 @@ class JobWorker:
                 "ports": sorted({int(port) for port in stored["ports"]}),
             }
         else:
+            for state in before_states.values():
+                membership = state["address_membership"]
+                if (
+                    not state["application_targets_valid"]
+                    or not state["application_group_complete"]
+                    or (
+                        not state["ip_present"]
+                        and (
+                            any(value is not None for value in membership.values())
+                            or state["application_names"]
+                        )
+                    )
+                ):
+                    raise RuntimeError(
+                        "Firewall precheck found inconsistent state and no desired-state baseline exists."
+                    )
             normalized = {
                 (bool(state["ip_present"]), tuple(state["ports"]))
                 for state in before_states.values()
@@ -544,7 +562,11 @@ class JobWorker:
     ) -> bool:
         job_id = str(job["job_id"])
         previous = self.storage.get_job_target(job_id, firewall_code) or {}
-        if previous.get("status") in {"applied", "verifying", "verified"}:
+        if (
+            previous.get("status") in {"applied", "verifying", "verified"}
+            and previous.get("runner_status") in {"successful", "ok"}
+            and previous.get("runner_rc") == 0
+        ):
             return True
 
         last_error: str | None = None
@@ -554,18 +576,15 @@ class JobWorker:
                 job_id,
                 firewall_code,
                 {
-                    # A failed runner can still have changed the firewall before
-                    # a later CLI/commit step failed.  Verify once before the
-                    # parent declares the attempt exhausted.
-                    "status": "verifying",
+                    "status": "failed",
                     "runner_status": previous.get("runner_status")
                     or "attempt_limit_reached",
                     "error_message": previous.get("error_message")
                     or "Firewall target attempt limit already reached.",
-                    "finished_at": None,
+                    "finished_at": utc_now_iso(),
                 },
             )
-            return True
+            return False
 
         attempt = previous_attempts + 1
         self.storage.start_job_target_attempt(
@@ -575,7 +594,11 @@ class JobWorker:
             attempt,
             utc_now_iso(),
         )
-        result: RunnerResult = self.runner.run_trade_access(job, firewall_code)
+        # Re-run commit/save even on a no-op plan: an interrupted previous run
+        # may already have changed configuration without finalizing it.
+        result: RunnerResult = self.runner.run_trade_access(
+            {**job, "force_finalize": True}, firewall_code,
+        )
         runner_failed = result.rc != 0 or result.status not in ("successful", "ok")
         last_error = result.error_message
         if runner_failed:
@@ -597,26 +620,22 @@ class JobWorker:
                     },
                 )
                 return False
-            attempts_exhausted = attempt >= settings.firewall_child_max_attempts
             self.storage.update_job_target(
                 job_id,
                 firewall_code,
                 {
-                    "status": "verifying" if attempts_exhausted else "failed",
+                    "status": "failed",
                     "runner_status": result.status,
                     "runner_rc": result.rc,
                     "before_state": before_state,
                     "desired_state": desired_state,
                     "artifact_dir": result.artifact_dir,
                     "error_message": last_error,
-                    "finished_at": None if attempts_exhausted else utc_now_iso(),
+                    "finished_at": utc_now_iso(),
                 },
             )
-            # Do not spend a full snapshot between idempotent mutation
-            # attempts.  Once the last runner attempt has finished, verify the
-            # real device state exactly once because a late CLI failure may
-            # still have left the requested configuration in place.
-            return attempts_exhausted
+            # Configuration presence cannot prove engine commit or save success.
+            return False
 
         self.storage.update_job_target(
             job_id,
@@ -703,9 +722,19 @@ class JobWorker:
 
         if self._state_matches(observed_state, desired_state):
             runner_status = str(previous.get("runner_status") or "successful")
-            runner_rc = int(previous.get("runner_rc") or 0)
-            if runner_rc != 0 or runner_status not in ("successful", "ok"):
-                runner_status = "verified_after_runner_failure"
+            if previous.get("runner_rc") != 0 or runner_status not in ("successful", "ok"):
+                self.storage.update_job_target(
+                    job_id,
+                    firewall_code,
+                    {
+                        "status": "failed",
+                        "observed_state": observed_state,
+                        "error_message": previous.get("error_message")
+                        or "Mutation, commit and save have not completed successfully.",
+                        "finished_at": utc_now_iso(),
+                    },
+                )
+                return False
             self.storage.update_job_target(
                 job_id,
                 firewall_code,
@@ -745,28 +774,75 @@ class JobWorker:
         snapshot = self.runner.run_firewall_snapshot("state", firewall_code)
         if snapshot.rc != 0 or snapshot.payload is None:
             raise RuntimeError(snapshot.error_message or "Firewall state query failed.")
-        target_ip = str(job["target_ip"])
-        ip_present = any(
-            str(item.get("ip")) == target_ip
-            for item in snapshot.payload.get("ip_items", [])
-        )
-        ports = sorted(
-            {
-                int(item["port"])
-                for item in snapshot.payload.get("port_items", [])
-                if str(item.get("ip")) == target_ip
+        payload = snapshot.payload
+        try:
+            address_state = payload["address_state"]
+            vsystems = address_state["vsystems"]
+            if not vsystems:
+                raise ValueError("No virtual systems returned")
+            target_ip = str(job["target_ip"])
+            membership = {
+                vsystem: address_state["by_vsystem"][vsystem].get(target_ip)
+                for vsystem in vsystems
             }
-        )
-        return {"ip_present": ip_present, "ports": ports}, snapshot
+            name_pattern = re.compile(
+                re.escape(payload["application_prefix"] + target_ip) + r"(?:_[0-9]+)?$"
+            )
+            applications = [
+                application for application in payload["application_state"]["applications"]
+                if name_pattern.fullmatch(application["name"])
+            ]
+            object_names = {application["name"] for application in applications}
+            group_names = {
+                name for name in payload["application_group_members"]
+                if name_pattern.fullmatch(name)
+            }
+            expected_pair = {"ip": target_ip, "mask": 32}
+            targets_valid = all(
+                all(pair == expected_pair for pair in application["ip_addresses"])
+                and all(
+                    (not rule["ports"] or bool(rule["ip_addresses"]))
+                    and all(pair == expected_pair for pair in rule["ip_addresses"])
+                    for rule in application["rules"]
+                )
+                for application in applications
+            )
+            ports = sorted({
+                int(port) for application in applications for port in application["ports"]
+            })
+            if any(port < 1 or port > 65535 for port in ports):
+                raise ValueError("Invalid application ports")
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise RuntimeError("Firewall raw state is incomplete or invalid: {0}".format(exc)) from exc
+        return {
+            "ip_present": all(mask == 32 for mask in membership.values()),
+            "ports": ports,
+            "address_membership": membership,
+            "application_names": sorted(object_names | group_names),
+            "application_group_complete": all(
+                application["name"] in group_names
+                for application in applications if application["ports"]
+            ) and group_names.issubset(object_names),
+            "application_targets_valid": targets_valid,
+        }, snapshot
 
     @staticmethod
     def _state_matches(
         observed_state: dict[str, Any],
         desired_state: dict[str, Any],
     ) -> bool:
-        return bool(observed_state.get("ip_present")) == bool(
-            desired_state.get("ip_present")
-        ) and sorted({int(port) for port in observed_state.get("ports") or []}) == sorted(
+        membership = observed_state.get("address_membership")
+        if not membership or not observed_state.get("application_targets_valid"):
+            return False
+        if desired_state["ip_present"]:
+            if (
+                not all(mask == 32 for mask in membership.values())
+                or not observed_state["application_group_complete"]
+            ):
+                return False
+        elif any(mask is not None for mask in membership.values()) or observed_state["application_names"]:
+            return False
+        return sorted({int(port) for port in observed_state.get("ports") or []}) == sorted(
             {int(port) for port in desired_state.get("ports") or []}
         )
 

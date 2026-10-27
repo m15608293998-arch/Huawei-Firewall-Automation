@@ -1,6 +1,7 @@
 #!/usr/bin/env python3.12
 import argparse
 import copy
+import ipaddress
 import json
 import re
 from typing import Any
@@ -49,6 +50,7 @@ def extract_application_config(
     ip_pattern = re.compile(r"^ip-address\s+(\S+)\s+(\d+)$")
     port_pattern = re.compile(r"^port\s+(\d+)$")
     application_info_pattern = re.compile(r"^Application\s+(\S+)\s+Information:$")
+    total_rule_pattern = re.compile(r"^Total Rule Number\s*:\s*(\d+)$")
     display_rule_pattern = re.compile(r"^Rule Name\s*:\s*(\S+)$")
     display_ip_pattern = re.compile(r"^(?:IP Address|Destination)\s*:\s*(\S+)$")
     display_port_pattern = re.compile(r"^Port\s*:\s*(.*)$")
@@ -60,6 +62,20 @@ def extract_application_config(
     invalid_ports: list[dict[str, Any]] = []
     current_application: dict[str, Any] | None = None
     current_rule: dict[str, Any] | None = None
+    detailed_names: set[str] = set()
+    declared_rule_counts: dict[str, int] = {}
+    detail_fields: dict[tuple[str, str | None], set[str]] = {}
+
+    def mark_detail_field(field: str) -> None:
+        key = (current_application["name"], current_rule["name"] if current_rule else None)
+        detail_fields.setdefault(key, set()).add(field)
+
+    def display_pair(value: str) -> dict[str, Any] | None:
+        try:
+            network = ipaddress.IPv4Interface(value)
+        except ValueError:
+            return None
+        return {"ip": str(network.ip), "mask": network.network.prefixlen}
 
     def ensure_application(name: str) -> dict[str, Any]:
         return applications.setdefault(
@@ -107,6 +123,10 @@ def extract_application_config(
         line = " ".join(raw_line.strip().split())
         if not line:
             continue
+        if line == "#" or line.startswith("application-group name "):
+            current_application = None
+            current_rule = None
+            continue
 
         # 解析到非目标应用时清空上下文，避免后续端口/IP 记到上一条目标应用上。
         declaration_match = declaration_pattern.match(line)
@@ -127,6 +147,7 @@ def extract_application_config(
             name = application_info_match.group(1)
             if target_name_pattern.match(name):
                 object_names.add(name)
+                detailed_names.add(name)
                 current_application = ensure_application(name)
                 current_rule = None
             else:
@@ -143,6 +164,11 @@ def extract_application_config(
             continue
 
         if current_application is None:
+            continue
+
+        total_rule_match = total_rule_pattern.match(line)
+        if total_rule_match:
+            declared_rule_counts[current_application["name"]] = int(total_rule_match.group(1))
             continue
 
         rule_match = rule_pattern.match(line)
@@ -168,16 +194,22 @@ def extract_application_config(
             continue
 
         display_ip_match = display_ip_pattern.match(line)
-        if display_ip_match and display_ip_match.group(1) != "-":
-            address = display_ip_match.group(1)
-            if "/" in address:
-                ip, display_mask = address.rsplit("/", 1)
-                pair = {"ip": ip, "mask": int(display_mask)}
+        if display_ip_match:
+            mark_detail_field("ip")
+            pair = display_pair(display_ip_match.group(1))
+            if pair is not None:
                 add_ip(current_application, current_rule, pair)
             continue
 
+        if "/" in line:
+            pair = display_pair(line)
+            if pair is not None:
+                add_ip(current_application, current_rule, pair)
+                continue
+
         display_port_match = display_port_pattern.match(line)
         if display_port_match:
+            mark_detail_field("ports")
             for value in re.findall(r"\d+", display_port_match.group(1)):
                 add_port(current_application, current_rule, int(value))
 
@@ -204,8 +236,6 @@ def extract_application_config(
         # 删除端口前确认应用对象仍指向目标 IP，避免改到同名但不同地址的对象。
         expected_pair = {"ip": target_ip, "mask": int(mask)}
         for application in application_list:
-            if not application["ports"]:
-                continue
             pairs = application["ip_addresses"]
             rules = application["rules"]
             rule_pairs_match = all(
@@ -215,7 +245,7 @@ def extract_application_config(
                 if rule["ports"]
             )
             if (
-                not pairs
+                (application["ports"] and not pairs)
                 or any(pair != expected_pair for pair in pairs)
                 or not rule_pairs_match
             ):
@@ -233,6 +263,15 @@ def extract_application_config(
         "invalid_ports": invalid_ports,
         "all_target_ips_match": all_target_ips_match,
         "invalid_target_applications": invalid_target_applications,
+        "all_details_complete": object_names.issubset(detailed_names) and all(
+            declared_rule_counts.get(application["name"])
+            == len(application["rules"])
+            and all(
+                detail_fields.get((application["name"], rule["name"])) == {"ip", "ports"}
+                for rule in application["rules"]
+            )
+            for application in application_list
+        ),
     }
 
 
@@ -244,17 +283,38 @@ def build_application_plan(
     application_rule_limit: int = 8,
     mode: str = "add",
 ) -> dict[str, Any]:
-    if mode not in {"add", "remove"}:
-        raise ValueError("mode must be add or remove")
+    if mode not in {"add", "remove", "reconcile"}:
+        raise ValueError("mode must be add, remove or reconcile")
     requested = sorted({int(port) for port in requested_ports})
     existing = sorted({int(port) for port in parsed["all_ports"]})
     applications = copy.deepcopy(parsed.get("applications", []))
     group_names = set(parsed.get("group_names", []))
     expected_names = list(parsed.get("object_names", []))
     operations: list[dict[str, Any]] = []
-    if mode == "add":
+    if mode in {"add", "reconcile"}:
         new_ports = sorted(set(requested) - set(existing))
         removed_ports: list[int] = []
+        if mode == "reconcile":
+            # Release capacity before restoring missing ports. Prune deleted
+            # rules/objects from the model so later adds recreate their IPs.
+            removed_ports = sorted(set(existing) - set(requested))
+            _plan_remove_ports(
+                applications, operations, expected_names, group_names, set(removed_ports),
+            )
+            removed_names = {
+                operation["app_name"] for operation in operations
+                if operation["type"] == "remove_application"
+            }
+            removed_rules = {
+                (operation["app_name"], operation["rule_name"])
+                for operation in operations if operation["type"] == "remove_rule"
+            }
+            applications = [application for application in applications if application["name"] not in removed_names]
+            for application in applications:
+                application["rules"] = [
+                    rule for rule in application["rules"]
+                    if (application["name"], rule["name"]) not in removed_rules
+                ]
         for port in new_ports:
             _plan_add_port(
                 applications,
@@ -265,6 +325,15 @@ def build_application_plan(
                 rule_port_limit,
                 application_rule_limit,
             )
+        if mode == "reconcile":
+            for application in applications:
+                if not application["ports"]:
+                    name = application["name"]
+                    operations.append({"type": "remove_application", "app_name": name, "in_group": name in group_names})
+                    group_names.discard(name)
+            for name in sorted(group_names - {application["name"] for application in applications}):
+                operations.append({"type": "remove_application", "app_name": name, "in_group": True, "object_exists": False})
+                group_names.discard(name)
         active_application_names = {
             application["name"] for application in applications if application["ports"]
         }
@@ -275,7 +344,7 @@ def build_application_plan(
         for app_name in missing_group_names:
             operations.append({"type": "add_to_group", "app_name": app_name})
             group_names.add(app_name)
-        effective = sorted(set(existing) | set(new_ports))
+        effective = requested if mode == "reconcile" else sorted(set(existing) | set(new_ports))
     else:
         new_ports = []
         removed_ports = sorted(set(existing) & set(requested))
@@ -291,11 +360,11 @@ def build_application_plan(
         application["name"] for application in applications if application["ports"]
     }
     reasons = []
-    if mode == "add" and new_ports:
+    if mode in {"add", "reconcile"} and new_ports:
         reasons.append("requested_ports_missing")
-    if mode == "add" and active_application_names - set(parsed.get("group_names", [])):
+    if mode in {"add", "reconcile"} and active_application_names - set(parsed.get("group_names", [])):
         reasons.append("application_group_members_missing")
-    if mode == "remove" and removed_ports:
+    if mode in {"remove", "reconcile"} and removed_ports:
         reasons.append("requested_ports_present")
     if not parsed["all_target_ips_match"]:
         reasons.append("application_target_ip_mismatch")
@@ -329,6 +398,7 @@ def _plan_add_port(
     for application in applications:
         for rule in application["rules"]:
             if len(rule["ports"]) < rule_port_limit:
+                set_target_ip = not rule["ports"] and not rule.get("ip_addresses")
                 rule["ports"].append(port)
                 application["ports"].append(port)
                 operations.append(
@@ -337,6 +407,7 @@ def _plan_add_port(
                         "app_name": application["name"],
                         "rule_name": rule["name"],
                         "ports": [port],
+                        **({"set_target_ip": True} if set_target_ip else {}),
                     }
                 )
                 return
@@ -436,11 +507,11 @@ def _plan_remove_ports(
                     }
                 )
         if app_removed_any and not application["ports"]:
-            if application["name"] in group_names:
-                operations.append(
-                    {"type": "remove_application", "app_name": application["name"]}
-                )
-                group_names.remove(application["name"])
+            operations.append(
+                {"type": "remove_application", "app_name": application["name"],
+                 "in_group": application["name"] in group_names}
+            )
+            group_names.discard(application["name"])
             if application["name"] in expected_names:
                 expected_names.remove(application["name"])
 
@@ -484,7 +555,7 @@ def main() -> int:
     parser.add_argument("--target-ip")
     parser.add_argument("--mask", type=int)
     parser.add_argument("--requested-ports-json")
-    parser.add_argument("--mode", choices=["add", "remove"], default="add")
+    parser.add_argument("--mode", choices=["add", "remove", "reconcile"], default="add")
     parser.add_argument("--rule-port-limit", type=int, default=4)
     parser.add_argument("--application-rule-limit", type=int, default=8)
     args = parser.parse_args()
