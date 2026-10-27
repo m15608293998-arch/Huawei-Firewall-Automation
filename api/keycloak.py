@@ -24,7 +24,10 @@ class KeycloakTokenVerifier:
         cache_seconds: float = 300.0,
         ca_cert: str | None = None,
         jwks_fetcher: Callable[[], dict[str, Any]] | None = None,
+        refresh_min_interval_seconds: float = 10.0,
     ) -> None:
+        if cache_seconds <= 0 or refresh_min_interval_seconds <= 0:
+            raise ValueError("JWKS cache and refresh intervals must be positive.")
         self.issuer = issuer.rstrip("/")
         self.audience = audience
         self.jwks_url = jwks_url
@@ -32,9 +35,12 @@ class KeycloakTokenVerifier:
         self.cache_seconds = cache_seconds
         self.ca_cert = ca_cert
         self.jwks_fetcher = jwks_fetcher
+        self.refresh_min_interval_seconds = min(refresh_min_interval_seconds, cache_seconds)
         self._keys: dict[str, dict[str, Any]] = {}
         self._cache_expires_at = 0.0
-        self._lock = threading.Lock()
+        self._refresh_after = 0.0
+        self._refreshing = False
+        self._condition = threading.Condition()
 
     def verify(self, token: str) -> dict[str, Any]:
         try:
@@ -69,18 +75,47 @@ class KeycloakTokenVerifier:
         return claims
 
     def _get_jwk(self, key_id: str) -> dict[str, Any]:
-        now = time.monotonic()
-        with self._lock:
-            # kid 不在缓存里时也主动刷新，兼容 Keycloak 轮换签名证书。
-            if now >= self._cache_expires_at or key_id not in self._keys:
-                self._refresh_jwks()
-            jwk = self._keys.get(key_id)
+        with self._condition:
+            while True:
+                now = time.monotonic()
+                jwk = self._keys.get(key_id)
+                if now < self._cache_expires_at and jwk is not None:
+                    return jwk
+                if self._refreshing:
+                    if not self._condition.wait_for(lambda: not self._refreshing, self.timeout_seconds):
+                        raise KeycloakUnavailableError("Timed out waiting for Keycloak signing keys.")
+                    continue
+                if now < self._refresh_after:
+                    if now >= self._cache_expires_at:
+                        raise KeycloakUnavailableError("Keycloak signing keys are temporarily unavailable.")
+                    raise InvalidAccessTokenError("Access token signing key is unknown.")
+                self._refreshing = True
+                break
 
+        # Network I/O must not hold the cache lock: known, unexpired keys remain
+        # usable while an unrelated kid triggers a refresh.
+        try:
+            keys = self._refresh_jwks()
+        except Exception:
+            with self._condition:
+                self._refresh_after = time.monotonic() + self.refresh_min_interval_seconds
+                self._refreshing = False
+                self._condition.notify_all()
+            raise
+        with self._condition:
+            self._keys = keys
+            self._cache_expires_at = time.monotonic() + self.cache_seconds
+            # One complete JWKS also negatively caches every unknown kid for
+            # this interval, without retaining attacker-controlled identifiers.
+            self._refresh_after = time.monotonic() + self.refresh_min_interval_seconds
+            self._refreshing = False
+            self._condition.notify_all()
+            jwk = self._keys.get(key_id)
         if jwk is None:
             raise InvalidAccessTokenError("Access token signing key is unknown.")
         return jwk
 
-    def _refresh_jwks(self) -> None:
+    def _refresh_jwks(self) -> dict[str, dict[str, Any]]:
         try:
             if self.jwks_fetcher is not None:
                 payload = self.jwks_fetcher()
@@ -102,9 +137,8 @@ class KeycloakTokenVerifier:
         if not isinstance(keys, list):
             raise KeycloakUnavailableError("Keycloak JWKS response is invalid.")
 
-        self._keys = {
+        return {
             str(key["kid"]): key
             for key in keys
             if isinstance(key, dict) and key.get("kid")
         }
-        self._cache_expires_at = time.monotonic() + self.cache_seconds

@@ -196,6 +196,13 @@ curl -sS \
 ## 7. 权限和安全边界
 
 - FastAPI 验证 RS256 签名、`iss`、`aud`、`exp`、`iat` 和 `sub`。
+- JWKS 默认缓存 300 秒；每个 API 进程将并发刷新合并为一次，并在刷新结束后冷却
+  10 秒，失败刷新也进入冷却。已有有效缓存读取不等待无关 `kid` 的网络请求，过期
+  缓存不会在刷新失败后继续使用。新签名密钥在冷却期内首次出现时可能暂时返回
+  `401`，冷却结束后重试可触发刷新；需让 Keycloak 提前发布新密钥再切换签名。
+  环境变量 `TRADE_ACCESS_API_KEYCLOAK_JWKS_REFRESH_MIN_INTERVAL_SECONDS` 控制间隔，
+  实际值不超过 `TRADE_ACCESS_API_KEYCLOAK_JWKS_CACHE_SECONDS`。多 API 进程各自
+  维护缓存与冷却，不提供跨进程刷新协调。
 - 普通用户必须具有 `trade-access-user`，管理员必须具有 `trade-access-admin`。
 - 每次请求按 `sub` 读取本地接口权限。
 - 防火墙操作只接受合法 IPv4 单地址，掩码固定 `/32`。

@@ -66,6 +66,7 @@ token_verifier = KeycloakTokenVerifier(
     jwks_url=settings.keycloak_jwks_url,
     timeout_seconds=settings.keycloak_http_timeout_seconds,
     cache_seconds=settings.keycloak_jwks_cache_seconds,
+    refresh_min_interval_seconds=settings.keycloak_jwks_refresh_min_interval_seconds,
     ca_cert=settings.keycloak_ca_cert,
 )
 offline_api_key_service = OfflineApiKeyService(
