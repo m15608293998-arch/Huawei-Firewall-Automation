@@ -1,4 +1,5 @@
 import uuid
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from api.runner_service import runner_service
 from api.schemas import JobStatus, TradeAccessJobCreate
 from api.storage import IdempotencyConflictError, JobStorage
 from api.time_utils import utc_now_iso
+from api.runtime_health import readiness_report
 
 
 storage = JobStorage(settings.database_path)
@@ -18,23 +20,21 @@ storage = JobStorage(settings.database_path)
 def _target_artifact_dirs(
     job_id: str,
     target: dict[str, Any],
-) -> list[object]:
-    """Return every retained mutation attempt, not only the latest artifact."""
+) -> list[Path]:
+    """Read this job's evidence, including legacy and interrupted attempts."""
     artifact_value = target.get("artifact_dir")
-    if not artifact_value:
-        return [None]
-    artifact_path = Path(str(artifact_value))
-    candidates = {artifact_path}
-    parent = artifact_path.parent
+    candidates = {Path(str(artifact_value))} if artifact_value else set()
+    profile_dir = settings.runner_private_data_dir / str(target["firewall_code"])
+    parents = {profile_dir / "job_artifacts" / job_id, profile_dir / "artifacts"}
+    if artifact_value:
+        parents.add(Path(str(artifact_value)).parent)
     prefix = "{0}-{1}-".format(job_id, target["firewall_code"])
-    try:
-        candidates.update(
-            candidate
-            for candidate in parent.iterdir()
-            if candidate.is_dir() and candidate.name.startswith(prefix)
-        )
-    except OSError:
-        pass
+    for parent in parents:
+        try:
+            candidates.update(candidate for candidate in parent.iterdir()
+                              if candidate.is_dir() and candidate.name.startswith(prefix))
+        except OSError:
+            pass
     return sorted(candidates, key=lambda candidate: candidate.name)
 
 
@@ -115,42 +115,89 @@ def get_job_events(
     job_id: str,
     principal: Principal,
     detailed: bool = False,
-) -> list[dict[str, object]]:
+) -> dict[str, Any]:
     job = get_job_or_404(job_id)
     authorize_job_read(principal, job)
-    events: list[dict[str, object]] = []
-    for target in job.get("target_results") or []:
-        for artifact_dir in _target_artifact_dirs(job_id, target):
-            for event in runner_service.read_events(
-                artifact_dir,
-                detailed=detailed,
-            ):
-                event["firewall_code"] = target["firewall_code"]
-                events.append(event)
-    return sorted(
-        events,
-        key=lambda event: (str(event.get("created") or ""), int(event.get("counter") or 0)),
-    )
+    return _job_event_report(job, detailed)
 
 
 def get_admin_job_events(
     job_id: str,
     detailed: bool = False,
-) -> list[dict[str, object]]:
+) -> dict[str, Any]:
     job = get_job_or_404(job_id)
+    return _job_event_report(job, detailed)
+
+
+def _job_event_report(job: dict[str, Any], detailed: bool) -> dict[str, Any]:
+    job_id = str(job["job_id"])
     events: list[dict[str, object]] = []
+    warnings: list[str] = []
+    retained_runs = 0
+    expected_runs = 0
     for target in job.get("target_results") or []:
+        prefix = "{0}-{1}-".format(job_id, target["firewall_code"])
+        mutations = 0
+        prechecks = 0
+        verifications = 0
+        expected_mutations = int(target.get("attempt_count") or 0)
+        expected_prechecks = int(job.get("precheck_attempt_count") or 0)
+        expected_verifications = int(target.get("verification_attempt_count") or 0)
+        expected_runs += expected_mutations + expected_prechecks + expected_verifications
         for artifact_dir in _target_artifact_dirs(job_id, target):
-            for event in runner_service.read_events(
-                artifact_dir,
-                detailed=detailed,
-            ):
+            try:
+                if not any((artifact_dir / "job_events").glob("*.json")):
+                    continue
+                run_report = runner_service.read_event_report(artifact_dir, detailed=detailed)
+            except Exception:
+                warnings.append("{0}: an audit run could not be read.".format(target["firewall_code"]))
+                continue
+            if run_report["unreadable_event_count"]:
+                warnings.append("{0}: some audit event files are unreadable or incomplete.".format(target["firewall_code"]))
+            if not run_report["readable_event_count"]:
+                continue
+            run_events = run_report["events"]
+            retained_runs += 1
+            if re.fullmatch(re.escape(prefix) + r"[0-9a-f]{8}", artifact_dir.name):
+                mutations += 1
+            elif artifact_dir.name.startswith(prefix + "precheck-"):
+                prechecks += 1
+            elif artifact_dir.name.startswith(prefix + "verify-"):
+                verifications += 1
+            elif expected_mutations == 0 and "-state-snapshot-" in artifact_dir.name:
+                # The latest precheck path is known for legacy jobs; earlier
+                # query runs had no job identity and cannot be reconstructed.
+                prechecks += 1
+            for event in run_events:
                 event["firewall_code"] = target["firewall_code"]
+                event["run_id"] = artifact_dir.name
                 events.append(event)
-    return sorted(
-        events,
-        key=lambda event: (str(event.get("created") or ""), int(event.get("counter") or 0)),
-    )
+        if (mutations < expected_mutations or prechecks < expected_prechecks
+                or verifications < expected_verifications):
+            warnings.append(
+                "{0}: audit logs are incomplete ({1}/{2} mutation attempts, {3}/{4} prechecks, "
+                "{5}/{6} verifications retained); "
+                "missing logs may still be recording, expired or deleted.".format(
+                    target["firewall_code"], mutations, expected_mutations, prechecks, expected_prechecks,
+                    verifications, expected_verifications,
+                )
+            )
+    active = job["status"] in {"pending", "running", "prechecking", "applying", "verifying", "reconciling"}
+    audit_status = "available" if retained_runs else "not_started"
+    if warnings or (expected_runs and not retained_runs):
+        audit_status = "recording" if active else ("partial" if retained_runs else "unavailable")
+    return {
+        "job_id": job_id,
+        "events": sorted(events, key=lambda event: (
+            str(event.get("created") or ""), str(event.get("run_id") or ""), int(event.get("counter") or 0),
+        )),
+        "audit_status": audit_status,
+        "audit_warnings": warnings,
+    }
+
+
+def get_readiness_report() -> dict[str, Any]:
+    return readiness_report(storage)
 
 
 def list_jobs(

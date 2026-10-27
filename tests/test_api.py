@@ -1,4 +1,5 @@
 import inspect
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -257,7 +258,7 @@ class ApiTests(unittest.TestCase):
             payload=payload,
         )
         try:
-            response = get_firewall_snapshot(principal=self.user)
+            response = asyncio.run(get_firewall_snapshot(principal=self.user))
         finally:
             main_module.runner_service.run_reconciled_snapshot = original_runner
 
@@ -301,8 +302,8 @@ class ApiTests(unittest.TestCase):
 
         main_module.runner_service.run_reconciled_snapshot = fake_snapshot
         try:
-            ip_response = get_firewall_ip_snapshot(principal=self.user)
-            port_response = get_firewall_port_snapshot(principal=self.user)
+            ip_response = asyncio.run(get_firewall_ip_snapshot(principal=self.user))
+            port_response = asyncio.run(get_firewall_port_snapshot(principal=self.user))
         finally:
             main_module.runner_service.run_reconciled_snapshot = original_runner
 
@@ -328,7 +329,7 @@ class ApiTests(unittest.TestCase):
         )
         try:
             with self.assertRaises(HTTPException) as caught:
-                get_firewall_snapshot(principal=self.user)
+                asyncio.run(get_firewall_snapshot(principal=self.user))
         finally:
             main_module.runner_service.run_reconciled_snapshot = original_runner
 
@@ -358,7 +359,7 @@ class ApiTests(unittest.TestCase):
         )
         try:
             with self.assertRaises(HTTPException) as caught:
-                get_firewall_snapshot(principal=self.user)
+                asyncio.run(get_firewall_snapshot(principal=self.user))
         finally:
             main_module.runner_service.run_reconciled_snapshot = original_runner
 
@@ -396,7 +397,7 @@ class ApiTests(unittest.TestCase):
                 get_firewall_port_snapshot,
             ):
                 with self.assertRaises(HTTPException) as caught:
-                    endpoint(principal=self.user)
+                    asyncio.run(endpoint(principal=self.user))
                 self.assertEqual(caught.exception.status_code, 409)
                 self.assertEqual(
                     caught.exception.detail["blocking_jobs"][0]["job_id"],
@@ -430,7 +431,7 @@ class ApiTests(unittest.TestCase):
             payload={"overall_status": "drifted"},
         )
         try:
-            response = check_firewall_consistency(principal=self.user)
+            response = asyncio.run(check_firewall_consistency(principal=self.user))
         finally:
             main_module.runner_service.run_firewall_consistency_check = original_runner
 
@@ -506,7 +507,7 @@ class ApiTests(unittest.TestCase):
             payload=payload,
         )
         try:
-            response = check_firewall_consistency(principal=self.user)
+            response = asyncio.run(check_firewall_consistency(principal=self.user))
         finally:
             main_module.runner_service.run_firewall_consistency_check = original_runner
 
@@ -530,7 +531,7 @@ class ApiTests(unittest.TestCase):
         )
         try:
             with self.assertRaises(HTTPException) as caught:
-                check_firewall_consistency(principal=self.user)
+                asyncio.run(check_firewall_consistency(principal=self.user))
         finally:
             main_module.runner_service.run_firewall_consistency_check = original_runner
 
@@ -685,15 +686,19 @@ class ApiTests(unittest.TestCase):
 
     def test_user_and_admin_event_endpoints(self) -> None:
         job = self.create_job()
-        original_read_events = jobs_module.runner_service.read_events
-        jobs_module.runner_service.read_events = lambda artifact_dir, detailed=False: [
+        run = Path(self.temp_dir.name) / (job["job_id"] + "-" + settings.firewall_target_codes[0] + "-123456ab")
+        (run / "job_events").mkdir(parents=True)
+        (run / "job_events/1-event.json").write_text("{}")
+        self.storage.update_job_target(job["job_id"], settings.firewall_target_codes[0], {"artifact_dir": str(run), "attempt_count": 1})
+        original_read_events = jobs_module.runner_service.read_event_report
+        jobs_module.runner_service.read_event_report = lambda artifact_dir, detailed=False: {"readable_event_count": 1, "unreadable_event_count": 0, "events": [
             {
                 "counter": 1,
                 "event": "runner_on_ok",
                 "task": "Test task",
                 "created": "2026-06-05T00:00:00+00:00",
             }
-        ]
+        ]}
         try:
             user_response = get_trade_access_job_events(
                 job_id=job["job_id"],
@@ -704,7 +709,7 @@ class ApiTests(unittest.TestCase):
                 principal=self.admin,
             )
         finally:
-            jobs_module.runner_service.read_events = original_read_events
+            jobs_module.runner_service.read_event_report = original_read_events
 
         self.assertEqual(user_response["events"][0]["task"], "Test task")
         self.assertEqual(admin_response["events"][0]["task"], "Test task")

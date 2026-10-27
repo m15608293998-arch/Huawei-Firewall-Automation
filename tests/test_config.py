@@ -8,6 +8,10 @@ from api.config import Settings, load_firewall_orchestration_defaults
 
 
 class ConfigTests(unittest.TestCase):
+    def test_heartbeat_timeout_cannot_be_shorter_than_normal_publish_interval(self) -> None:
+        with self.assertRaisesRegex(ValueError, "twice"):
+            Settings(worker_heartbeat_interval_seconds=10, worker_heartbeat_timeout_seconds=15)
+
     def test_firewall_orchestration_defaults_are_loaded_from_all_yml(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "all.yml"

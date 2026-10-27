@@ -165,6 +165,7 @@ class FirewallTargetResponse(BaseModel):
     firewall_code: str
     status: str
     attempt_count: int = 0
+    verification_attempt_count: int = 0
     runner_status: str | None = None
     runner_rc: int | None = None
     error_message: str | None = None
@@ -231,6 +232,7 @@ class JobDetailResponse(BaseModel):
 
 
 class JobEvent(BaseModel):
+    run_id: str | None = None
     firewall_code: str | None = None
     counter: int | None = None
     event: str | None = None
@@ -242,6 +244,8 @@ class JobEvent(BaseModel):
 class JobEventsResponse(BaseModel):
     job_id: str
     events: list[JobEvent]
+    audit_status: str = "available"
+    audit_warnings: list[str] = Field(default_factory=list)
 
 
 class FirewallIpSnapshotItem(BaseModel):

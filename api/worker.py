@@ -8,6 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from math import ceil
 from typing import Any
 
 from api.config import settings
@@ -23,6 +24,7 @@ from api.runner_service import (
     runner_service,
 )
 from api.schemas import JobStatus
+from api.runtime_health import WorkerHeartbeat
 from api.storage import JobStorage
 from api.time_utils import utc_after_iso, utc_now_iso
 
@@ -49,19 +51,27 @@ class JobWorker:
         self.runner = runner
         self.poll_interval = poll_interval
         self.retry_waiter = retry_waiter or time.sleep
+        self.heartbeat = WorkerHeartbeat(storage)
 
     def run_once(self) -> bool:
         # One parent execution is serialized so an all-node query never observes
         # the middle of a three-firewall mutation.  A recoverable child failure
         # is retried inside this boundary before another parent can overtake it.
+        if self.heartbeat.phase != "waiting_lock":
+            self.heartbeat.progress("waiting_lock", max(settings.job_timeout_seconds, settings.snapshot_timeout_seconds))
         try:
             with self._parent_orchestration_lock():
+                self.heartbeat.progress("polling", settings.worker_progress_timeout_seconds)
                 job = self.storage.claim_next_runnable_job(
                     utc_now_iso(), job_timeout_seconds=settings.job_timeout_seconds,
                 )
+                self.heartbeat.poll_succeeded()
                 if job is None:
+                    self.heartbeat.progress("idle", max(settings.worker_progress_timeout_seconds, self.poll_interval))
                     return False
+                self._job_progress(job, "preparing", settings.worker_progress_timeout_seconds)
                 self._execute_job(job)
+                self.heartbeat.progress("idle", max(settings.worker_progress_timeout_seconds, self.poll_interval))
         except ExecutionTimeout:
             return False
         return True
@@ -84,14 +94,22 @@ class JobWorker:
             raise ExecutionTimeout("Job execution deadline exceeded; firewall changes may be partial. Inspect target results before retrying.")
         return remaining
 
+    def _job_progress(self, job: dict[str, Any], phase: str, budget: float):
+        self.heartbeat.progress(phase, min(budget, max(0, self._remaining_job_seconds(job))), str(job["job_id"]))
+
     def run_forever(self, stop_event: threading.Event) -> None:
-        while not stop_event.is_set():
-            try:
-                if self.run_once():
-                    continue
-            except Exception:
-                logger.exception("Worker queue polling failed.")
-            stop_event.wait(self.poll_interval)
+        self.heartbeat.start(stop_event)
+        try:
+            while not stop_event.is_set():
+                try:
+                    if self.run_once():
+                        continue
+                except Exception:
+                    self.heartbeat.progress("poll_error", settings.worker_progress_timeout_seconds)
+                    logger.exception("Worker queue polling failed.")
+                stop_event.wait(self.poll_interval)
+        finally:
+            self.heartbeat.stop()
 
     def _execute_job(self, job: dict[str, Any]) -> None:
         job_id = str(job["job_id"])
@@ -285,9 +303,10 @@ class JobWorker:
         states: dict[str, dict[str, Any]] = {}
         errors: dict[str, str] = {}
         worker_count = min(len(target_codes), settings.firewall_parallel_workers)
+        self._job_progress(job, "prechecking", settings.snapshot_timeout_seconds * ceil(len(target_codes) / worker_count))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {
-                executor.submit(self._query_target_state, job, code): code
+                executor.submit(self._query_target_state, job, code, "precheck"): code
                 for code in target_codes
             }
             for future in as_completed(futures):
@@ -440,6 +459,7 @@ class JobWorker:
             },
         )
         retry_delay = float(settings.firewall_reconcile_retry_seconds)
+        self._job_progress(job, "backoff", retry_delay)
         logger.info(
             "Job %s will retry targets %s after %.1f seconds inside the parent.",
             job_id,
@@ -558,6 +578,7 @@ class JobWorker:
     ) -> dict[str, bool]:
         outcomes: dict[str, bool] = {}
         worker_count = min(len(target_codes), settings.firewall_parallel_workers)
+        self._job_progress(job, "applying", settings.runner_timeout_seconds * ceil(len(target_codes) / worker_count))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {
                 executor.submit(
@@ -695,6 +716,7 @@ class JobWorker:
     ) -> dict[str, bool]:
         outcomes: dict[str, bool] = {}
         worker_count = min(len(target_codes), settings.firewall_parallel_workers)
+        self._job_progress(job, "verifying", settings.snapshot_timeout_seconds * ceil(len(target_codes) / worker_count))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {
                 executor.submit(
@@ -736,6 +758,7 @@ class JobWorker:
             firewall_code,
             {
                 "status": "verifying",
+                "verification_attempt_count": int(previous.get("verification_attempt_count") or 0) + 1,
                 "finished_at": None,
             },
         )
@@ -804,9 +827,11 @@ class JobWorker:
         self,
         job: dict[str, Any],
         firewall_code: str,
+        audit_phase: str = "verify",
     ) -> tuple[dict[str, Any], SnapshotRunnerResult]:
         snapshot = self.runner.run_firewall_snapshot(
             "state", firewall_code, timeout_seconds=self._require_job_time(job),
+            audit_job_id=job.get("job_id"), audit_phase=audit_phase,
         )
         if snapshot.rc != 0 or snapshot.payload is None:
             raise RuntimeError(snapshot.error_message or "Firewall state query failed.")

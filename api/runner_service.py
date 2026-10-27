@@ -176,9 +176,8 @@ class AnsibleRunnerService:
         playbook = str(project_root / settings.playbook_path)
         firewall_runner_dir = self._private_data_dir(target_code)
         firewall_runner_dir.mkdir(parents=True, exist_ok=True)
-        artifact_root = firewall_runner_dir / "artifacts"
-
         job_id = str(job["job_id"])
+        artifact_root = firewall_runner_dir / "job_artifacts" / job_id
         local_tmp_dir = Path(
             str(
                 job.get("target_local_tmp_dir")
@@ -232,7 +231,7 @@ class AnsibleRunnerService:
                         extravars=extravars,
                         **self._runner_options(deadline),
                         suppress_env_files=True,
-                        rotate_artifacts=20,
+                        rotate_artifacts=0,
                         quiet=True,
                         event_handler=capture_failure,
                     )
@@ -262,6 +261,8 @@ class AnsibleRunnerService:
         snapshot_mode: str = "snapshot",
         firewall_code: str | None = None,
         timeout_seconds: float | None = None,
+        audit_job_id: str | None = None,
+        audit_phase: str = "verify",
     ) -> SnapshotRunnerResult:
         target_code = self._firewall_code(firewall_code)
         if snapshot_mode not in {"snapshot", "ips", "ports", "state"}:
@@ -289,13 +290,16 @@ class AnsibleRunnerService:
         playbook = str(project_root / settings.playbook_path)
         firewall_runner_dir = self._private_data_dir(target_code)
         firewall_runner_dir.mkdir(parents=True, exist_ok=True)
-        artifact_root = firewall_runner_dir / "artifacts"
+        artifact_root = (firewall_runner_dir / "job_artifacts" / audit_job_id
+                         if audit_job_id else firewall_runner_dir / "snapshot_artifacts")
 
         snapshot_id = "{0}-{1}-snapshot-{2}".format(
             target_code,
             snapshot_mode,
             uuid.uuid4(),
         )
+        if audit_job_id:
+            snapshot_id = "{0}-{1}-{2}-{3}".format(audit_job_id, target_code, audit_phase, uuid.uuid4().hex[:8])
         artifact_dir = str(artifact_root / snapshot_id)
         settings.job_tmp_root.mkdir(parents=True, exist_ok=True)
         # Snapshot files are only an exchange boundary between Ansible and this
@@ -334,7 +338,7 @@ class AnsibleRunnerService:
                             extravars=extravars,
                             **self._runner_options(deadline),
                             suppress_env_files=True,
-                            rotate_artifacts=20,
+                            rotate_artifacts=0 if audit_job_id else 20,
                             quiet=True,
                         )
             except ExecutionTimeout as exc:
@@ -811,12 +815,16 @@ class AnsibleRunnerService:
         artifact_dir: object,
         detailed: bool = False,
     ) -> list[dict[str, object]]:
+        return self.read_event_report(artifact_dir, detailed)["events"]
+
+    def read_event_report(self, artifact_dir: object, detailed: bool = False) -> dict[str, Any]:
+        report: dict[str, Any] = {"events": [], "readable_event_count": 0, "unreadable_event_count": 0}
         if not artifact_dir:
-            return []
+            return report
 
         event_dir = Path(str(artifact_dir)) / "job_events"
         if not event_dir.exists():
-            return []
+            return report
 
         def event_counter(event_file: Path) -> int:
             # ansible-runner 事件文件名前缀是递增序号，用它保持输出顺序。
@@ -830,9 +838,15 @@ class AnsibleRunnerService:
             try:
                 with event_file.open("r", encoding="utf-8") as handle:
                     payload = json.load(handle)
+                if not isinstance(payload, dict) or not isinstance(payload.get("event"), str):
+                    raise ValueError("Invalid audit event")
+                if not isinstance(payload.get("event_data") or {}, dict):
+                    raise ValueError("Invalid audit event data")
             except Exception:
                 # 单个坏事件文件不影响接口返回已有事件。
+                report["unreadable_event_count"] += 1
                 continue
+            report["readable_event_count"] += 1
 
             event_data = payload.get("event_data") or {}
             event_name = str(payload.get("event") or "")
@@ -871,7 +885,8 @@ class AnsibleRunnerService:
             event["event"] = "changed" if bool(result.get("changed")) else "ok"
             events.append(event)
 
-        return events
+        report["events"] = events
+        return report
 
 
 runner_service = AnsibleRunnerService()

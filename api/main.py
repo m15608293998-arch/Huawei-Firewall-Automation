@@ -1,9 +1,10 @@
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 import json
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.config import settings
@@ -30,6 +31,7 @@ from api.jobs import (
     get_admin_job_events,
     get_job_events,
     get_job_or_404,
+    get_readiness_report,
     list_jobs,
     list_reconciling_jobs,
 )
@@ -83,12 +85,28 @@ from api.offline_api_keys import (
     OfflineApiKeyUnavailableError,
 )
 from api.runner_service import runner_service
+from api.query_capacity import DeviceQueryCoordinator, QueryBusyError
+
+
+query_coordinator = DeviceQueryCoordinator()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    global query_coordinator
+    if query_coordinator.closed:
+        query_coordinator = DeviceQueryCoordinator()
+    try:
+        yield
+    finally:
+        query_coordinator.close()
 
 
 app = FastAPI(
     title="Trade Access API",
     description="HTTP API wrapper for the Huawei USG6000E Ansible trade access workflow.",
     version="0.9.0",
+    lifespan=lifespan,
 )
 
 TEST_UI_PATH = Path(__file__).resolve().parent / "static" / "test_ui.html"
@@ -116,6 +134,25 @@ def admin_ui():
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz():
+    report = get_readiness_report()
+    return JSONResponse(report, status_code=200 if report["status"] == "ready" else 503)
+
+
+async def _run_device_query(mode, operation):
+    key = ("ports" if mode == "snapshot" else mode, settings.firewall_target_codes)
+    try:
+        return await query_coordinator.run(key, operation)
+    except QueryBusyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "1"}) from exc
+
+
+def _read_clean_snapshot(mode):
+    _reject_snapshot_during_reconciliation()
+    return runner_service.run_reconciled_snapshot(mode)
 
 
 @app.get(
@@ -441,11 +478,11 @@ def create_trade_access_deny_job(
     "/api/v1/trade-access/firewall/check",
     response_model=FirewallConsistencyCheckResponse,
 )
-def check_firewall_consistency(
+async def check_firewall_consistency(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    result = runner_service.run_firewall_consistency_check()
+    result = await _run_device_query("check", runner_service.run_firewall_consistency_check)
     if result.rc != 0 or result.payload is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -488,12 +525,11 @@ def _reject_snapshot_during_reconciliation() -> None:
     "/api/v1/trade-access/firewall/snapshot",
     response_model=FirewallSnapshotResponse,
 )
-def get_firewall_snapshot(
+async def get_firewall_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    _reject_snapshot_during_reconciliation()
-    result = runner_service.run_reconciled_snapshot("snapshot")
+    result = await _run_device_query("snapshot", lambda: _read_clean_snapshot("snapshot"))
     if result.rc == 2:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -518,12 +554,11 @@ def get_firewall_snapshot(
     "/api/v1/trade-access/firewall/snapshot/ips",
     response_model=FirewallIpSnapshotResponse,
 )
-def get_firewall_ip_snapshot(
+async def get_firewall_ip_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    _reject_snapshot_during_reconciliation()
-    result = runner_service.run_reconciled_snapshot("ips")
+    result = await _run_device_query("ips", lambda: _read_clean_snapshot("ips"))
     if result.rc == 2:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -548,12 +583,11 @@ def get_firewall_ip_snapshot(
     "/api/v1/trade-access/firewall/snapshot/ports",
     response_model=FirewallPortSnapshotResponse,
 )
-def get_firewall_port_snapshot(
+async def get_firewall_port_snapshot(
     principal: Principal = Depends(require_firewall_snapshot_read),
 ):
     del principal
-    _reject_snapshot_during_reconciliation()
-    result = runner_service.run_reconciled_snapshot("ports")
+    result = await _run_device_query("ports", lambda: _read_clean_snapshot("ports"))
     if result.rc == 2:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -615,10 +649,7 @@ def get_trade_access_job_events(
     detail: str = Query(default="summary", pattern="^(summary|full)$"),
     principal: Principal = Depends(require_firewall_job_read),
 ):
-    return {
-        "job_id": job_id,
-        "events": get_job_events(job_id, principal, detailed=detail == "full"),
-    }
+    return get_job_events(job_id, principal, detailed=detail == "full")
 
 
 @app.post("/api/v1/trade-access/jobs/{job_id}/cancel", response_model=JobDetailResponse)
@@ -670,10 +701,7 @@ def get_any_trade_access_job_events(
     principal: Principal = Depends(require_firewall_job_audit),
 ):
     del principal
-    return {
-        "job_id": job_id,
-        "events": get_admin_job_events(job_id, detailed=detail == "full"),
-    }
+    return get_admin_job_events(job_id, detailed=detail == "full")
 
 
 @app.post("/api/v1/admin/trade-access/jobs/{job_id}/cancel", response_model=JobDetailResponse)

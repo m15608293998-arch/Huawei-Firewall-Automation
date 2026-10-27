@@ -11,6 +11,28 @@ from api.storage import JobStorage
 
 
 class StorageMigrationTests(unittest.TestCase):
+    def test_legacy_target_receives_verification_counter_without_losing_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "legacy-target.sqlite3"
+            with sqlite3.connect(database_path) as conn:
+                conn.execute(
+                    "create table job_firewall_targets ("
+                    "job_id text, firewall_code text, status text, attempt_count integer, "
+                    "runner_status text, runner_rc integer, error_message text, "
+                    "before_state text, desired_state text, observed_state text, "
+                    "artifact_dir text, local_tmp_dir text, started_at text, finished_at text, "
+                    "primary key (job_id, firewall_code))"
+                )
+                conn.execute(
+                    "insert into job_firewall_targets (job_id, firewall_code, status, attempt_count) "
+                    "values ('legacy', 'TEST-FW', 'verified', 2)"
+                )
+            storage = JobStorage(database_path)
+            target = storage.get_job_target("legacy", "TEST-FW")
+            self.assertEqual(target["attempt_count"], 2)
+            self.assertEqual(target["verification_attempt_count"], 0)
+            self.assertEqual(target["status"], "verified")
+
     def test_connection_context_closes_connection_after_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             storage = JobStorage(Path(temp_dir) / "closed.sqlite3")
