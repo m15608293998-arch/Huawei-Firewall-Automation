@@ -5,14 +5,16 @@ import re
 import sys
 import time
 import os
+import uuid
 import pexpect
 
 
 os.environ["LANG"] = "en_US.UTF-8"
 os.environ["LC_ALL"] = "en_US.UTF-8"
 
-# Huawei CLI 输出会夹杂分页、确认和不同形态的提示符，统一用正则兜住。
-PROMPT_PATTERN = r"(<[^>\r\n]+>|\[[^\]\r\n]+\])"
+# Login discovers the device identity; subsequent prompts must belong to that
+# device and occupy the entire last line, including across view changes.
+PROMPT_PATTERN = r"(?m)^(?:HRP_[MS][ \t]*)?(?:<[^<>\[\]\s]+>|\[[^<>\[\]\s]+\])[ \t\r]*\Z"
 MORE_PATTERN = r"(---- More ----|More:|<--- More --->|--- More ---)"
 CONFIRM_PATTERN = r"(Are you sure.*\([Yy]/[Nn]\).*|Are you sure.*\(y/n\)\[n\]:|Are you sure.*\[Y/N\].*|continue\? \[Y/N\].*)"
 PASSWORD_PROMPT_PATTERN = r"(?i)(?:password|passphrase).*:"
@@ -104,20 +106,49 @@ def read_commands_from_files(cli_files):
     return all_commands
 
 
+def read_command_echo(child, cmd, timeout):
+    # A wrapped continuation may itself look like a device prompt. Read the
+    # entire known command before interpreting any result prompt.
+    wrapped_echo = r"(?:\r*\n)?".join(re.escape(char) for char in cmd)
+    child.expect(
+        r"(?m)(?P<prefix>(?:^|[>\]])[ \t]*)" + wrapped_echo + r"[\r\n]+",
+        timeout=remaining_timeout(child, timeout),
+    )
+    prefix = child.match.group("prefix")
+    return child.before + prefix, child.after[len(prefix):]
+
+
+def remember_device_prompt(child, prompt):
+    prompt = re.sub(r"^HRP_[MS][ \t]*", "", prompt.strip())
+    identity = prompt[1:-1].lstrip("~*")
+    hostname = re.escape(identity)
+    view = r"(?:-[^<>\[\]\r\n]+)?"
+    child.prompt_pattern = rf"(?m)^(?:HRP_[MS][ \t]*)?(?:<{hostname}{view}>|\[[~*]?{hostname}{view}\])[ \t\r]*\Z"
+
+
+def prompt_is_settled(child):
+    # A prompt-shaped prefix may be only the first chunk of an echoed command.
+    # A TIMEOUT-only expect preserves any newly read bytes for the next expect.
+    child.expect([pexpect.TIMEOUT], timeout=remaining_timeout(child, CLI_COMMAND_SETTLE_DELAY))
+    return not child.before.strip()
+
+
 def expect_prompt_or_more(child, timeout):
     output = []
 
     while True:
         # 每次命令都读到设备提示符为止，中途分页或确认直接自动处理。
         index = child.expect(
-            [PROMPT_PATTERN, MORE_PATTERN, CONFIRM_PATTERN],
+            [getattr(child, "prompt_pattern", PROMPT_PATTERN), MORE_PATTERN, CONFIRM_PATTERN],
             timeout=remaining_timeout(child, timeout),
         )
         output.append(child.before)
         output.append(child.after)
 
         if index == 0:
-            return "".join(output)
+            if prompt_is_settled(child):
+                return "".join(output)
+            continue
 
         if index == 1:
             send_with_deadline(child, " ")
@@ -204,7 +235,11 @@ def establish_ssh_session(child, timeout, password=None):
         output.append(child.after)
 
         if index == 0:
-            return "".join(output)
+            prompt = child.after
+            if prompt_is_settled(child):
+                remember_device_prompt(child, prompt)
+                return "".join(output)
+            continue
 
         if index == 1:
             send_with_deadline(child, " ")
@@ -331,7 +366,21 @@ def run_command_with_busy_retry(
 
     for attempt in range(max_retries + 1):
         send_with_deadline(child, cmd + "\r")
-        command_output = expect_prompt_or_more(child, timeout)
+        echo = ""
+        if getattr(child, "prompt_pattern", None):
+            before, after = read_command_echo(child, cmd, timeout)
+            echo = before + after
+        command_output = echo + expect_prompt_or_more(child, timeout)
+        if getattr(child, "prompt_pattern", None) and cmd.lower().startswith("display "):
+            # Query data can contain the exact device prompt after wrapping.
+            # The unpredictable echo of a read-only probe proves the preceding
+            # query has completed, including any bytes after a false prompt.
+            probe = "display current-configuration | include TRADE_ACCESS_BOUNDARY_" + uuid.uuid4().hex
+            send_with_deadline(child, probe + "\r")
+            pending_output, _ = read_command_echo(child, probe, timeout)
+            command_output += pending_output
+            probe_output = expect_prompt_or_more(child, timeout)
+            ensure_cli_command_accepted("query boundary", probe, probe_output)
         output.append(command_output)
 
         if not DEVICE_BUSY_PATTERN.search(command_output):
@@ -350,6 +399,14 @@ def run_command_with_busy_retry(
     raise RuntimeError(
         f"Firewall remained busy after {max_retries + 1} attempts while running: {cmd}"
     )
+
+
+def prepare_cli_session(child, timeout):
+    # Session-only setting: probe bytes must never be consumed as pager keys.
+    command = "screen-length 0 temporary"
+    output = run_command_with_busy_retry(child, command, timeout)
+    ensure_cli_command_accepted("session setup", command, output)
+    return output
 
 
 def main():
@@ -422,6 +479,7 @@ def main():
         sleep_with_deadline(child, 1)
         send_with_deadline(child, "\r")
         output.append(expect_prompt_or_more(child, args.timeout))
+        output.append(prepare_cli_session(child, args.timeout))
 
         for source_file, cmd in commands:
             if source_file != current_source:

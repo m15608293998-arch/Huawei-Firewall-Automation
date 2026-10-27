@@ -22,6 +22,10 @@ class FakeChild:
         self.sent = []
 
     def expect(self, patterns, timeout):
+        if patterns == [RUNNER.pexpect.TIMEOUT]:
+            self.before = ""
+            self.after = RUNNER.pexpect.TIMEOUT
+            return 0
         index, before, after = self.events.pop(0)
         self.before = before
         self.after = after

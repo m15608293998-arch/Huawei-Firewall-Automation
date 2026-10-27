@@ -144,7 +144,8 @@ class Settings(BaseSettings):
     keycloak_user_role: str = "trade-access-user"
     keycloak_admin_role: str = "trade-access-admin"
     keycloak_http_timeout_seconds: float = 5.0
-    keycloak_jwks_cache_seconds: float = 300.0
+    keycloak_jwks_cache_seconds: float = Field(default=300.0, gt=0)
+    keycloak_jwks_refresh_min_interval_seconds: float = Field(default=10.0, gt=0)
     keycloak_ca_cert: str | None = None
     keycloak_admin_client_id: str | None = None
     keycloak_admin_client_secret: str | None = None

@@ -270,7 +270,9 @@ class JobWorker:
         firewalls before either case adds latency and, more importantly, turns a
         retry into an unnecessary second precheck.
         """
-        if job.get("desired_state"):
+        # Full deny has an absolute target and needs no common baseline. Each
+        # device's removal workflow still verifies ownership before deleting.
+        if str(job["action"]) == "deny" or job.get("desired_state"):
             return False
         return self.storage.get_desired_access_state(str(job["target_ip"])) is None
 
@@ -453,6 +455,8 @@ class JobWorker:
         job: dict[str, Any],
         before_states: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
+        if str(job["action"]) == "deny":
+            return {"ip_present": False, "ports": []}
         stored = self.storage.get_desired_access_state(str(job["target_ip"]))
         if stored is not None:
             base = {
@@ -505,8 +509,6 @@ class JobWorker:
         if action == "deny_ip":
             if current_ports:
                 raise RuntimeError("deny_ip requires all application ports to be removed first.")
-            return {"ip_present": False, "ports": []}
-        if action == "deny":
             return {"ip_present": False, "ports": []}
         raise RuntimeError("Unsupported firewall action: {0}".format(action))
 

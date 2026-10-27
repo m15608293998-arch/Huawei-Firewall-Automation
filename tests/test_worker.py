@@ -698,6 +698,45 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("inconsistent state", job["error_message"])
         self.assertEqual(runner.jobs, [])
 
+    def test_full_deny_cleans_drift_without_a_ledger_or_consistent_baseline(self) -> None:
+        codes = ("PG-FW", "PG-FW-1", "IDC-FW")
+        self.create_job(action="deny", ports=[], firewall_targets=codes)
+        runner = FakeRunner(states={
+            "PG-FW": {"ip_present": True, "ports": [443]},
+            "PG-FW-1": {"ip_present": False, "ports": [8443]},
+            "IDC-FW": {"ip_present": True, "ports": []},
+        })
+        self.assertTrue(self.make_worker(runner).run_once())
+        job = self.storage.get_job("job-1", include_targets=True)
+        self.assertEqual(job["status"], "successful")
+        self.assertEqual(job["precheck_attempt_count"], 0)
+        self.assertFalse(job["desired_state"]["ip_present"])
+        self.assertEqual(job["desired_state"]["ports"], [])
+        self.assertEqual(len(runner.jobs), 3)
+        self.assertEqual(len(runner.snapshot_calls), 3)
+        self.assertEqual({target["status"] for target in job["target_results"]}, {"verified"})
+        self.assertTrue(all(state == {"ip_present": False, "ports": []} for state in runner.states.values()))
+
+    def test_full_deny_still_fails_when_a_node_retains_orphan_application(self) -> None:
+        codes = ("PG-FW", "IDC-FW")
+        self.create_job(action="deny", ports=[], firewall_targets=codes)
+        runner = FakeRunner(
+            states={"IDC-FW": {"ip_present": False, "ports": [443]}},
+            no_op_codes={"IDC-FW"},
+        )
+        self.make_worker(runner).run_once()
+        self.assertEqual(self.storage.get_job("job-1")["status"], "failed")
+        self.assertEqual(runner.states["IDC-FW"]["ports"], [443])
+        self.assertTrue(runner.jobs)
+
+    def test_ip_only_deny_keeps_rejecting_drift_without_a_ledger(self) -> None:
+        codes = ("PG-FW", "IDC-FW")
+        self.create_job(action="deny_ip", ports=[], firewall_targets=codes)
+        runner = FakeRunner(states={"PG-FW": {"ip_present": True, "ports": [443]}})
+        self.make_worker(runner).run_once()
+        self.assertEqual(self.storage.get_job("job-1")["status"], "failed")
+        self.assertEqual(runner.jobs, [])
+
     def test_interrupted_parent_resumes_same_desired_version_and_repairs_only_missing_target(self) -> None:
         codes = ("PG-FW", "PG-FW-1", "IDC-FW")
         self.create_job(firewall_targets=codes)
