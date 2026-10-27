@@ -15,6 +15,7 @@ class QueryBusyError(RuntimeError):
 class _Query:
     key: tuple
     future: Future
+    wrapped: asyncio.Future
     callers: int = 1
 
 
@@ -38,12 +39,15 @@ class DeviceQueryCoordinator:
                     raise QueryBusyError("Firewall query capacity is full; retry later.")
                 group.callers += 1
             else:
-                group = _Query(key, self._executor.submit(operation))
+                future = self._executor.submit(operation)
+                wrapped = asyncio.wrap_future(future)
+                # All callers share one bridge; canceled or timed-out requests
+                # must not leave additional callbacks on the running Future.
+                wrapped.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+                group = _Query(key, future, wrapped)
                 self._active = group
 
-        wrapped = asyncio.wrap_future(group.future)
-        # A disconnected caller must not leave an unobserved async exception.
-        wrapped.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        wrapped = group.wrapped
         try:
             if follower:
                 try:

@@ -71,6 +71,32 @@ class QueryCapacityTests(unittest.IsolatedAsyncioTestCase):
             self.release.set()
             self.assertEqual(await leader, {"items": ["first"]})
 
+    async def test_canceled_followers_cannot_accumulate_completion_callbacks(self):
+        with patch.object(settings, "query_max_waiters", 1):
+            leader = await self.start_query()
+            for _ in range(100):
+                follower = asyncio.create_task(self.pool.run(("ips",), self.slow_query))
+                await asyncio.sleep(0)
+                follower.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await follower
+            self.assertLessEqual(len(self.pool._active.future._done_callbacks), 2)
+            self.release.set()
+            self.assertEqual(await leader, {"items": ["first"]})
+        self.assertEqual(self.calls, 1)
+
+    async def test_timed_out_followers_cannot_accumulate_completion_callbacks(self):
+        with patch.object(settings, "query_max_waiters", 1), \
+                patch.object(settings, "query_wait_timeout_seconds", 0.001):
+            leader = await self.start_query()
+            for _ in range(20):
+                with self.assertRaises(QueryBusyError):
+                    await self.pool.run(("ips",), self.slow_query)
+            self.assertLessEqual(len(self.pool._active.future._done_callbacks), 2)
+            self.release.set()
+            await leader
+        self.assertEqual(self.calls, 1)
+
     async def test_failed_query_releases_capacity(self):
         def failure():
             raise ValueError("test failure")

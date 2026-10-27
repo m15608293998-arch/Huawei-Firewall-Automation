@@ -15,6 +15,7 @@ from api.auth import Principal
 from api.config import settings
 from api.runner_service import AnsibleRunnerService
 from api.storage import JobStorage
+from api.worker import JobWorker
 
 
 class AuditRetentionTests(unittest.TestCase):
@@ -59,7 +60,15 @@ class AuditRetentionTests(unittest.TestCase):
         # Use the installed Runner rotation routine, including its real 0=off behavior.
         cleanup_artifact_dir(str(run.parent), kwargs.get("rotate_artifacts", 0))
         if not mutation:
-            Path(kwargs["extravars"]["snapshot_output_path"]).write_text(json.dumps({"items": []}))
+            payload = {"items": []}
+            if kwargs["extravars"]["snapshot_mode"] == "state":
+                payload = {
+                    "address_state": {"vsystems": ["public"], "by_vsystem": {"public": {}}},
+                    "application_prefix": "UD_TServe_",
+                    "application_state": {"applications": []},
+                    "application_group_members": [],
+                }
+            Path(kwargs["extravars"]["snapshot_output_path"]).write_text(json.dumps(payload))
         return types.SimpleNamespace(status="failed" if failed else "successful", rc=2 if failed else 0)
 
     def test_many_snapshots_cannot_rotate_any_mutation_attempt(self):
@@ -121,6 +130,32 @@ class AuditRetentionTests(unittest.TestCase):
         report = jobs.get_job_events("audit-job", self.user)
         self.assertEqual(report["audit_status"], "available")
         self.assertEqual(report["events"][0]["event"], "completed")
+
+    def test_missing_final_verification_is_reported(self):
+        with patch.dict(sys.modules, {"ansible_runner": types.SimpleNamespace(run=self.fake_run)}):
+            self.assertTrue(JobWorker(self.storage, self.service, retry_waiter=lambda _: None).run_once())
+        self.assertEqual(self.storage.get_job("audit-job")["status"], "successful")
+        self.assertEqual(jobs.get_job_events("audit-job", self.user)["audit_status"], "available")
+        root = settings.runner_private_data_dir / "TEST-FW/job_artifacts/audit-job"
+        verification = next(root.glob("audit-job-TEST-FW-verify-*"))
+        shutil.rmtree(verification)
+        report = jobs.get_job_events("audit-job", self.user)
+        self.assertEqual(report["audit_status"], "partial")
+        self.assertTrue(any("0/1 verification" in message for message in report["audit_warnings"]))
+
+    def test_missing_earlier_verification_is_not_hidden_by_recovered_attempt(self):
+        with patch.dict(sys.modules, {"ansible_runner": types.SimpleNamespace(run=self.fake_run)}):
+            self.assertTrue(JobWorker(self.storage, self.service, retry_waiter=lambda _: None).run_once())
+            root = settings.runner_private_data_dir / "TEST-FW/job_artifacts/audit-job"
+            first = next(root.glob("audit-job-TEST-FW-verify-*"))
+            # Simulate a crash after target verification but before parent completion.
+            self.storage.update_job("audit-job", {"status": "verifying", "finished_at": None})
+            self.assertTrue(JobWorker(self.storage, self.service, retry_waiter=lambda _: None).run_once())
+        self.assertEqual(jobs.get_job_events("audit-job", self.user)["audit_status"], "available")
+        shutil.rmtree(first)
+        report = jobs.get_job_events("audit-job", self.user)
+        self.assertEqual(report["audit_status"], "partial")
+        self.assertTrue(any("1/2 verification" in message for message in report["audit_warnings"]))
 
     def test_truncated_event_files_are_reported_without_losing_readable_events(self):
         with patch.dict(sys.modules, {"ansible_runner": types.SimpleNamespace(run=self.fake_run)}):

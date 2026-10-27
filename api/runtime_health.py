@@ -32,7 +32,12 @@ def readiness_report(storage: JobStorage, now: datetime | None = None) -> dict[s
     healthy = [row for row in progressing if row["phase"] != "draining"]
     owned = {row["job_id"] for row in progressing if row["job_id"]}
     stalled_jobs = {row["job_id"] for row in workers if row["job_id"] and row not in progressing}
-    active_ids = {job["job_id"] for job in snapshot["active_jobs"]}
+    active_ids = {job["job_id"] for job in snapshot["active_jobs"]
+                  if not (job["status"] == "reconciling"
+                          and job["runner_status"] == "precheck_retry_scheduled"
+                          and job["next_attempt_at"])}
+    # A scheduled precheck is waiting in the queue, not owned by its crashed
+    # executor. Its parent deadline still applies during that wait.
     overdue = any(job["deadline_at"] and now > _time(job["deadline_at"]) + grace for job in snapshot["active_jobs"])
     worker_ok = bool(healthy) and not ((stalled_jobs & active_ids) - owned) and not overdue
     queue = snapshot["queue"]

@@ -50,6 +50,7 @@ TARGET_COLUMNS = [
     "firewall_code",
     "status",
     "attempt_count",
+    "verification_attempt_count",
     "runner_status",
     "runner_rc",
     "error_message",
@@ -171,6 +172,7 @@ class JobStorage:
                 "create index if not exists job_firewall_targets_status_idx "
                 "on job_firewall_targets (status, job_id)"
             )
+            self._ensure_column(conn, "job_firewall_targets", "verification_attempt_count", "integer not null default 0")
             conn.execute(
                 "create table if not exists worker_heartbeats ("
                 "worker_id text primary key, heartbeat_at text not null, progress_at text not null, "
@@ -321,7 +323,7 @@ class JobStorage:
                 "from jobs where status='pending'"
             ).fetchone())
             active_jobs = [dict(row) for row in conn.execute(
-                "select job_id, deadline_at from jobs where status in "
+                "select job_id, deadline_at, status, runner_status, next_attempt_at from jobs where status in "
                 "('running', 'prechecking', 'applying', 'verifying', 'reconciling') "
                 "and finished_at is null"
             )]

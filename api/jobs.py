@@ -139,9 +139,11 @@ def _job_event_report(job: dict[str, Any], detailed: bool) -> dict[str, Any]:
         prefix = "{0}-{1}-".format(job_id, target["firewall_code"])
         mutations = 0
         prechecks = 0
+        verifications = 0
         expected_mutations = int(target.get("attempt_count") or 0)
         expected_prechecks = int(job.get("precheck_attempt_count") or 0)
-        expected_runs += expected_mutations + expected_prechecks
+        expected_verifications = int(target.get("verification_attempt_count") or 0)
+        expected_runs += expected_mutations + expected_prechecks + expected_verifications
         for artifact_dir in _target_artifact_dirs(job_id, target):
             try:
                 if not any((artifact_dir / "job_events").glob("*.json")):
@@ -160,6 +162,8 @@ def _job_event_report(job: dict[str, Any], detailed: bool) -> dict[str, Any]:
                 mutations += 1
             elif artifact_dir.name.startswith(prefix + "precheck-"):
                 prechecks += 1
+            elif artifact_dir.name.startswith(prefix + "verify-"):
+                verifications += 1
             elif expected_mutations == 0 and "-state-snapshot-" in artifact_dir.name:
                 # The latest precheck path is known for legacy jobs; earlier
                 # query runs had no job identity and cannot be reconstructed.
@@ -168,11 +172,14 @@ def _job_event_report(job: dict[str, Any], detailed: bool) -> dict[str, Any]:
                 event["firewall_code"] = target["firewall_code"]
                 event["run_id"] = artifact_dir.name
                 events.append(event)
-        if mutations < expected_mutations or prechecks < expected_prechecks:
+        if (mutations < expected_mutations or prechecks < expected_prechecks
+                or verifications < expected_verifications):
             warnings.append(
-                "{0}: audit logs are incomplete ({1}/{2} mutation attempts, {3}/{4} prechecks retained); "
+                "{0}: audit logs are incomplete ({1}/{2} mutation attempts, {3}/{4} prechecks, "
+                "{5}/{6} verifications retained); "
                 "missing logs may still be recording, expired or deleted.".format(
                     target["firewall_code"], mutations, expected_mutations, prechecks, expected_prechecks,
+                    verifications, expected_verifications,
                 )
             )
     active = job["status"] in {"pending", "running", "prechecking", "applying", "verifying", "reconciling"}

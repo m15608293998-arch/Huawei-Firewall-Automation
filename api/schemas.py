@@ -165,6 +165,7 @@ class FirewallTargetResponse(BaseModel):
     firewall_code: str
     status: str
     attempt_count: int = 0
+    verification_attempt_count: int = 0
     runner_status: str | None = None
     runner_rc: int | None = None
     error_message: str | None = None

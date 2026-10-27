@@ -758,6 +758,7 @@ class JobWorker:
             firewall_code,
             {
                 "status": "verifying",
+                "verification_attempt_count": int(previous.get("verification_attempt_count") or 0) + 1,
                 "finished_at": None,
             },
         )

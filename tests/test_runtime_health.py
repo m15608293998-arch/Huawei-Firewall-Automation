@@ -124,6 +124,40 @@ class RuntimeHealthTests(unittest.TestCase):
         self.assertEqual(report["status"], "not_ready")
         self.assertTrue(report["worker"]["execution_deadline_exceeded"])
 
+    def test_recovered_precheck_backoff_does_not_inherit_crashed_owner(self):
+        self.active_job((self.now + timedelta(hours=1)).isoformat())
+        self.storage.update_job("active-job", {"action": "allow"})
+        self.heartbeat(
+            worker_id="crashed-worker", phase="prechecking", job_id="active-job",
+            heartbeat_at=(self.now - timedelta(minutes=2)).isoformat(),
+        )
+        worker = JobWorker(self.storage, FakeRunner(snapshot_failed_codes={"TEST-FW"}))
+        self.assertTrue(worker.run_once())
+        worker.heartbeat._publish()
+        job = self.storage.get_job("active-job")
+        self.assertEqual(job["runner_status"], "precheck_retry_scheduled")
+        self.assertIsNotNone(job["next_attempt_at"])
+        report = readiness_report(self.storage)
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(report["worker"]["stalled_active_job_count"], 0)
+
+        # Reserving execution clears next_attempt_at: an idle peer must no
+        # longer hide a stalled executor, even after a normal backoff.
+        self.storage.update_job("active-job", {"next_attempt_at": self.now.isoformat()})
+        self.storage.claim_next_runnable_job(datetime.now(timezone.utc).isoformat())
+        self.assertEqual(readiness_report(self.storage)["status"], "not_ready")
+
+    def test_scheduled_precheck_backoff_still_respects_parent_deadline(self):
+        self.active_job((self.now - timedelta(minutes=2)).isoformat())
+        self.storage.update_job("active-job", {
+            "status": "reconciling", "runner_status": "precheck_retry_scheduled",
+            "next_attempt_at": (self.now + timedelta(minutes=1)).isoformat(),
+        })
+        self.heartbeat()
+        report = readiness_report(self.storage, self.now)
+        self.assertEqual(report["status"], "not_ready")
+        self.assertTrue(report["worker"]["execution_deadline_exceeded"])
+
     def test_normal_draining_job_is_not_misclassified_as_a_stalled_execution(self):
         self.active_job((self.now + timedelta(hours=1)).isoformat())
         self.heartbeat(phase="draining", job_id="active-job")
