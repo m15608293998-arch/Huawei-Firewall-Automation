@@ -128,7 +128,7 @@ class FakeRunner:
             with self._lock:
                 self.active_mutations -= 1
 
-    def run_firewall_snapshot(self, snapshot_mode="snapshot", firewall_code=None, timeout_seconds=None):
+    def run_firewall_snapshot(self, snapshot_mode="snapshot", firewall_code=None, timeout_seconds=None, **kwargs):
         code = str(firewall_code)
         with self._lock:
             self.snapshot_calls.append((snapshot_mode, code))

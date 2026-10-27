@@ -943,6 +943,20 @@
         completed: "执行结束",
       };
       elements.jobEventRows.replaceChildren();
+      const auditMessages = {
+        partial: "审计记录不完整，部分日志可能已过期或被清理。",
+        unavailable: "审计记录不可用，日志可能已过期或被清理。",
+        recording: "执行日志尚不完整，部分可能仍在记录，或已过期/清理。",
+      };
+      const auditMessage = auditMessages[payload.audit_status];
+      if (auditMessage) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 5;
+        cell.textContent = auditMessage;
+        row.append(cell);
+        elements.jobEventRows.append(row);
+      }
       events.forEach((event) => {
         const row = document.createElement("tr");
         const timeCell = document.createElement("td");
@@ -967,7 +981,7 @@
         row.append(messageCell);
         elements.jobEventRows.append(row);
       });
-      if (!events.length) {
+      if (!events.length && !auditMessage) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
         cell.colSpan = 5;

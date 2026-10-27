@@ -172,6 +172,16 @@ class JobStorage:
                 "on job_firewall_targets (status, job_id)"
             )
             conn.execute(
+                "create table if not exists worker_heartbeats ("
+                "worker_id text primary key, heartbeat_at text not null, progress_at text not null, "
+                "progress_deadline_at text not null, phase text not null, job_id text, "
+                "last_poll_at text, poll_error integer not null default 0)"
+            )
+            self._ensure_column(conn, "worker_heartbeats", "last_poll_at", "text")
+            self._ensure_column(conn, "worker_heartbeats", "poll_error", "integer not null default 0")
+            conn.execute("create table if not exists runtime_health_probe (id integer primary key, value integer not null)")
+            conn.execute("insert or ignore into runtime_health_probe (id, value) values (1, 0)")
+            conn.execute(
                 """
                 create table if not exists desired_access_states (
                     target_ip text primary key,
@@ -287,6 +297,36 @@ class JobStorage:
                     column_type,
                 )
             )
+
+    def record_worker_heartbeat(self, record: dict[str, Any]) -> None:
+        with self._connect(timeout_seconds=0.5, existing_only=True) as conn:
+            conn.execute(
+                "insert into worker_heartbeats (worker_id, heartbeat_at, progress_at, progress_deadline_at, phase, job_id, last_poll_at, poll_error) "
+                "values (:worker_id, :heartbeat_at, :progress_at, :progress_deadline_at, :phase, :job_id, :last_poll_at, :poll_error) "
+                "on conflict(worker_id) do update set heartbeat_at=excluded.heartbeat_at, "
+                "progress_at=excluded.progress_at, progress_deadline_at=excluded.progress_deadline_at, "
+                "phase=excluded.phase, job_id=excluded.job_id, last_poll_at=excluded.last_poll_at, poll_error=excluded.poll_error",
+                {"last_poll_at": None, "poll_error": False, **record},
+            )
+
+    def runtime_health_snapshot(self) -> dict[str, Any]:
+        with self._connect(timeout_seconds=0.2, existing_only=True) as conn:
+            # Commit a fixed-size health row so write/commit failures are also
+            # detected. Business rows are unchanged; missing DBs are not created.
+            conn.execute("begin immediate")
+            conn.execute("update runtime_health_probe set value=1-value where id=1")
+            workers = [dict(row) for row in conn.execute("select * from worker_heartbeats")]
+            queue = dict(conn.execute(
+                "select count(*) as pending_count, min(created_at) as oldest_created_at "
+                "from jobs where status='pending'"
+            ).fetchone())
+            active_jobs = [dict(row) for row in conn.execute(
+                "select job_id, deadline_at from jobs where status in "
+                "('running', 'prechecking', 'applying', 'verifying', 'reconciling') "
+                "and finished_at is null"
+            )]
+            conn.commit()
+        return {"workers": workers, "queue": queue, "active_jobs": active_jobs}
 
     def create_job(
         self,
@@ -1252,11 +1292,12 @@ class JobStorage:
         )
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.database_path), timeout=5)
+    def _connect(self, timeout_seconds: float = 5, existing_only: bool = False) -> Iterator[sqlite3.Connection]:
+        path = self.database_path.resolve().as_uri() + "?mode=rw" if existing_only else str(self.database_path)
+        conn = sqlite3.connect(path, timeout=timeout_seconds, uri=existing_only)
         try:
             conn.row_factory = sqlite3.Row
-            conn.execute("pragma busy_timeout = 5000")
+            conn.execute("pragma busy_timeout = {0}".format(max(1, int(timeout_seconds * 1000))))
             # sqlite3.Connection's own context manager commits or rolls back,
             # but it does not close the connection.  Keep those transaction
             # semantics while making connection ownership explicit here.

@@ -346,8 +346,9 @@ class RunnerServiceTests(unittest.TestCase):
             "runs",
         )
         artifact_dir = Path(captured_calls[0]["artifact_dir"])
-        self.assertEqual(artifact_dir.name, "artifacts")
-        self.assertEqual(artifact_dir.parent.name, "PG-FW-1")
+        self.assertEqual(artifact_dir.name, "multi-job")
+        self.assertEqual(artifact_dir.parent.name, "job_artifacts")
+        self.assertEqual(artifact_dir.parent.parent.name, "PG-FW-1")
         self.assertTrue(captured_calls[0]["suppress_env_files"])
         self.assertEqual(
             Path(captured_calls[0]["extravars"]["local_tmp_dir"]).name,

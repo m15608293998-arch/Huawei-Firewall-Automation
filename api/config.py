@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from api.env_file import load_runtime_environment
@@ -128,6 +128,11 @@ class Settings(BaseSettings):
     snapshot_timeout_seconds: float = Field(default=300, gt=0, le=86400)
     runner_lock_timeout_seconds: float = Field(default=10, gt=0, le=300)
     precheck_max_attempts: int = Field(default=3, ge=1, le=100)
+    worker_heartbeat_interval_seconds: float = Field(default=2, gt=0, le=60)
+    worker_heartbeat_timeout_seconds: float = Field(default=15, gt=0, le=300)
+    worker_progress_timeout_seconds: float = Field(default=60, gt=0, le=3600)
+    query_max_waiters: int = Field(default=16, ge=0, le=1024)
+    query_wait_timeout_seconds: float = Field(default=10, gt=0, le=300)
     auth_enabled: bool = True
     development_subject: str = "api-placeholder"
     keycloak_server_url: str = "http://127.0.0.1:8080"
@@ -151,6 +156,12 @@ class Settings(BaseSettings):
     keycloak_admin_client_secret: str | None = None
     offline_api_key_authorization_ttl_seconds: int = 300
     offline_api_key_max_per_user: int = 5
+
+    @model_validator(mode="after")
+    def validate_heartbeat_timing(self):
+        if self.worker_heartbeat_timeout_seconds <= 2 * self.worker_heartbeat_interval_seconds:
+            raise ValueError("Worker heartbeat timeout must exceed twice the heartbeat interval.")
+        return self
 
     @property
     def keycloak_issuer(self) -> str:

@@ -383,6 +383,18 @@ curl http://127.0.0.1:8000/healthz
 {"status":"ok"}
 ```
 
+`/healthz` 用于 API 进程存活检查。运行就绪检查使用：
+
+```bash
+curl -i http://127.0.0.1:8000/readyz
+```
+
+数据库可读写、Worker 心跳和任务阶段均正常时返回 `200`、`status=ready`；Worker
+停止、心跳过期、持续无法领取任务、阶段超过预算或数据库不可用时返回 `503`。
+响应包含检查结果、Worker 阶段、最近心跳年龄、待处理任务数量及最老排队时间。
+正常配置/验证按各自执行预算判断，期间心跳独立更新，避免把长任务当作失联。
+就绪检查不访问 Keycloak 或防火墙，也不改变已有任务入队和查询语义。
+
 ## 7. 调用 API
 
 浏览器用户可以通过 `/test-ui` 登录。Postman、`curl` 等外部调用统一使用 Bearer 认证，凭据可以是：
@@ -473,6 +485,10 @@ curl \
 的任务不会插入这次修复过程。
 事件接口默认返回关键业务步骤摘要，`detail=full` 才返回全部 Ansible 事件。普通用户
 只能读取自己的任务，管理员可读取全部任务。
+响应增加 `audit_status`、`audit_warnings`，每条事件携带 `run_id`，便于区分多次尝试。
+日志不完整、已过期或被清理时接口与页面明确提示。变更、预检和最终验证日志按任务
+长期保留；普通快照单独保留最近 20 次，查询轮转不会删除变更证据。旧日志路径仍可
+读取；升级前已删除的日志无法恢复。
 
 取消尚未准备配置的任务：
 
@@ -498,6 +514,11 @@ curl -X POST \
 | `TRADE_ACCESS_API_SNAPSHOT_TIMEOUT_SECONDS` | `300` | 单次设备查询及全量查询的总预算 |
 | `TRADE_ACCESS_API_RUNNER_LOCK_TIMEOUT_SECONDS` | `10` | 全局编排锁与单设备 Runner 锁的最长等待时间 |
 | `TRADE_ACCESS_API_PRECHECK_MAX_ATTEMPTS` | `3` | 持久化的基线查询尝试上限，包含首次查询 |
+| `TRADE_ACCESS_API_WORKER_HEARTBEAT_INTERVAL_SECONDS` | `2` | Worker 独立心跳写入周期 |
+| `TRADE_ACCESS_API_WORKER_HEARTBEAT_TIMEOUT_SECONDS` | `15` | 心跳过期时间及阶段结束宽限，须大于两倍心跳周期 |
+| `TRADE_ACCESS_API_WORKER_PROGRESS_TIMEOUT_SECONDS` | `60` | 任务轮询、准备阶段的推进预算 |
+| `TRADE_ACCESS_API_QUERY_MAX_WAITERS` | `16` | 额外等待同一实时查询的请求上限 |
+| `TRADE_ACCESS_API_QUERY_WAIT_TIMEOUT_SECONDS` | `10` | 同类合并请求的最长等待时间 |
 
 任务详情增加 `deadline_at`、`precheck_attempt_count`。排队时间不计入父任务预算；
 首次认领后，重试和 worker 重启都保留原截止时间。预检退避从
@@ -507,7 +528,13 @@ curl -X POST \
 
 ## 8. 查询与一致性检查
 
-快照来自所有启用防火墙的实时 CLI 查询，不读取 SQLite 任务库：
+快照数据来自所有启用防火墙的实时 CLI 查询，任务库用于执行边界和状态检查：
+
+每个 API 进程最多运行一个全节点查询，内部仍按设备并行配置执行。正在运行的同类
+查询可由其他请求共享，额外最多 16 个等待请求，默认等待 10 秒；不同类型查询或
+等待人数超限时快速返回 `503` 和 `Retry-After: 1`。`snapshot` 与 `snapshot/ports`
+共用同类额度，一致性检查也受查询额度限制。结果只在执行期间共享，后续请求重新
+查询设备。取消 HTTP 请求不会提前释放仍在执行的 Runner 额度。
 
 ```bash
 # 一次查询每台防火墙的 IP 和端口，并生成逐台人工纠错建议
