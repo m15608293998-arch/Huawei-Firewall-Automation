@@ -23,6 +23,9 @@ quit
 {% elif operation.type == 'add_ports' %}
 user-defined-application name {{ operation.app_name }}
 rule name {{ operation.rule_name }}
+{% if operation.set_target_ip | default(false) %}
+ip-address {{ access_request.target_ip }} {{ access_request.mask | default(32) }}
+{% endif %}
 {% for port in operation.ports %}
 port {{ port }}
 {% endfor %}
@@ -57,11 +60,15 @@ add application {{ operation.app_name }}
 quit
 sa
 {% elif operation.type == 'remove_application' %}
+{% if operation.in_group | default(true) %}
 application-group name {{ user_defined_application.application_group_name }}
 undo add application {{ operation.app_name }}
 quit
 sa
+{% endif %}
+{% if operation.object_exists | default(true) %}
 undo user-defined-application name {{ operation.app_name }}
+{% endif %}
 {% endif %}
 {% endfor %}
 quit

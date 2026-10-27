@@ -88,6 +88,7 @@
   when: firewall_ssh_auth_type == 'publickey'
 
 - name: Set base runtime facts
+  no_log: true
   ansible.builtin.set_fact:
     target_ip_cidr: "{{ access_request.target_ip }}/{{ access_request.mask | default(32) }}"
     target_description: "{{ access_request.description | default('trade-server-' ~ access_request.target_ip) }}"
@@ -159,12 +160,32 @@
   ansible.builtin.include_tasks: "{{ role_path }}/tasks/access/deny_ip.yml"
   when: access_request.action == 'deny_ip'
 
+- name: Resolve required finalization steps
+  ansible.builtin.set_fact:
+    application_commit_required: >-
+      {{
+        commit_security_engine | default(true) | bool
+        and (
+          application_mutated | bool
+          or (
+            force_finalize | default(false) | bool
+            and enable_application_config | default(true) | bool
+            and access_request.action in ['allow', 'allow_ports', 'deny_ports', 'deny']
+          )
+        )
+      }}
+    configuration_save_required: >-
+      {{
+        save_config | default(false) | bool
+        and (firewall_mutated | bool or force_finalize | default(false) | bool)
+      }}
+
 - name: Render final commit and save command
   ansible.builtin.copy:
     dest: "{{ local_tmp_dir }}/final_commit_save.cli"
     mode: "0600"
     content: |
-      {% if (application_mutated | default(false) | bool) and (commit_security_engine | default(true) | bool) %}
+      {% if application_commit_required | bool %}
       system-view
       {% if application_vsystem | lower != 'public' %}
       switch vsys {{ application_vsystem }}
@@ -177,13 +198,10 @@
       {% endif %}
       quit
       {% endif %}
-      {% if save_config | default(false) | bool %}
+      {% if configuration_save_required | bool %}
       save
       {% endif %}
-  when:
-    - >-
-      (application_mutated | default(false) | bool and commit_security_engine | default(true) | bool)
-      or (firewall_mutated | default(false) | bool and save_config | default(false) | bool)
+  when: application_commit_required | bool or configuration_save_required | bool
 
 - name: Commit and save firewall configuration in one SSH session
   ansible.builtin.command:
@@ -197,20 +215,14 @@
       'Too many parameters' in final_commit_save_result.stdout or
       'Invalid file name' in final_commit_save_result.stdout or
       'Invalid extension' in final_commit_save_result.stdout
-  when:
-    - >-
-      (application_mutated | default(false) | bool and commit_security_engine | default(true) | bool)
-      or (firewall_mutated | default(false) | bool and save_config | default(false) | bool)
+  when: application_commit_required | bool or configuration_save_required | bool
 
 - name: Show final commit and save result
   ansible.builtin.debug:
     var: final_commit_save_result.stdout_lines
-  when:
-    - >-
-      (application_mutated | default(false) | bool and commit_security_engine | default(true) | bool)
-      or (firewall_mutated | default(false) | bool and save_config | default(false) | bool)
+  when: application_commit_required | bool or configuration_save_required | bool
 
 - name: Report unchanged firewall state
   ansible.builtin.debug:
     msg: "No firewall configuration changed; skipping engine commit and save."
-  when: not (firewall_mutated | default(false) | bool)
+  when: not (application_commit_required | bool or configuration_save_required | bool)

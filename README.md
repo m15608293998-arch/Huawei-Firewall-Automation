@@ -181,9 +181,29 @@ firewall_profiles:
 ```
 
 `trade_access_api` 会被 API 和 worker 直接读取；同名的
-`TRADE_ACCESS_API_FIREWALL_*` 环境变量只作为兼容覆盖项。设备管理 IP、用户名和
-端口、用户名和密码都直接填写在对应 profile 的 `firewall_device` 中；
-`device_port` 省略时默认为 `22`。
+`TRADE_ACCESS_API_FIREWALL_*` 环境变量只作为兼容覆盖项。版本控制中的
+`firewall_device` 保留连接信息占位值；实际管理 IP、用户名和密码填写到被 Git
+忽略的 `.runtime/firewall-devices.yml`，以防火墙代码为键覆盖对应设备的连接字段。
+`device_port` 省略时默认为 `22`，也可在本地文件中覆盖端口或 SSH 私钥配置。
+
+```bash
+mkdir -p .runtime
+install -m 600 config/production/firewall-devices.yml.example .runtime/firewall-devices.yml
+vi .runtime/firewall-devices.yml
+```
+
+本地文件示例：
+
+```yaml
+TEST-FW:
+  device_host: "<FIREWALL_MGMT_IP>"
+  device_user: "<FIREWALL_USER>"
+  device_password: "<FIREWALL_PASSWORD>"
+```
+
+Role 只接受权限为 `0600` 或 `0400` 的本地凭据文件，加载时屏蔽敏感事件。API、worker
+和直接执行 Playbook 均会使用该文件。部署在其他位置时，可通过 Ansible 变量
+`firewall_device_credentials_file` 指定绝对路径。不要将填写后的文件提交到 Git。
 
 也可以将配置档中的设备认证改为 SSH 私钥：
 
@@ -205,9 +225,9 @@ firewall_profiles:
 BEGIN_PRODUCTION_CONFIG ... END_PRODUCTION_CONFIG
 ```
 
-生产启用时删除或注释上面的 TEST-FW 配置，将该生产区块整体取消注释，并直接填写
-PG-FW、PG-FW-1、IDC-FW 各自的 `device_host`、`device_user` 和
-`device_password`。生产区块完整展开，不使用 `&/*`，也不使用环境变量引用。
+生产启用时删除或注释上面的 TEST-FW 配置，将该生产区块整体取消注释，并在
+`.runtime/firewall-devices.yml` 中填写 PG-FW、PG-FW-1、IDC-FW 各自的连接信息。
+生产区块完整展开，不使用 `&/*`，也不使用环境变量引用。
 
 生产拓扑为：
 
@@ -429,10 +449,13 @@ curl \
 ```
 
 任务详情的 `desired_state` 是该 IP 的完整业务期望状态，`target_results` 是逐台
-防火墙的变更前、期望和实测结果。只有全部子任务实时校验一致，父任务才是
+防火墙的变更前、期望和实测结果。只有全部子任务完成所启用的提交/保存，且逐虚拟
+系统地址及原始应用配置实时校验一致，父任务才是
 `successful`。已有期望基线的任务和所有重试均跳过预检；普通 runner 失败时不做
-中间完整查询，父任务内部短暂退避后只重试失败节点。所有节点执行结束后统一做一轮
-最终验证；当前父任务终止前，后来的任务不会插入这次修复过程。
+中间完整查询，父任务内部短暂退避后只重试失败节点。端口任务按固定的完整期望端口
+重新计算差量，重试时即使没有增删也会补提交/保存。所有节点的 runner 均成功后做
+最终验证；提交或保存失败不能仅凭配置已存在而改判成功。当前父任务终止前，后来
+的任务不会插入这次修复过程。
 事件接口默认返回关键业务步骤摘要，`detail=full` 才返回全部 Ansible 事件。普通用户
 只能读取自己的任务，管理员可读取全部任务。
 

@@ -53,6 +53,7 @@
   when: firewall_ssh_auth_type == 'publickey'
 
 - name: Set snapshot runtime facts
+  no_log: true
   ansible.builtin.set_fact:
     snapshot_address_sources: []
     resolved_snapshot_mode: "{{ snapshot_mode | default('snapshot') }}"

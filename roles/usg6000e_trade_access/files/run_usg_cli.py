@@ -241,6 +241,15 @@ def ensure_cli_command_accepted(source_file, cmd, command_output):
             )
 
 
+def ensure_save_completed(command_output):
+    # A returned prompt alone does not prove startup configuration was saved.
+    if not re.search(
+        r"(?i)(?:save the configuration successfully|configuration (?:has been |is )?saved successfully)",
+        command_output,
+    ) or re.search(r"(?i)\b(?:failed|failure)\b|Error:", command_output):
+        raise RuntimeError("Firewall configuration save did not complete successfully: " + command_output.strip())
+
+
 def wait_for_engine_commit_completion(
     child,
     initial_output,
@@ -406,6 +415,8 @@ def main():
             else:
                 # Stop before later commands are sent in the wrong Huawei CLI view.
                 ensure_cli_command_accepted(current_source, cmd, command_output)
+                if cmd.strip().lower() in {"save", "save force"}:
+                    ensure_save_completed(command_output)
 
             output.append("\n")
             output.append(command_output)
