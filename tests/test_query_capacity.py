@@ -59,6 +59,9 @@ class QueryCapacityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(QueryBusyError):
             await self.pool.run(("ports",), self.slow_query)
         follower = asyncio.create_task(self.pool.run(("ips",), self.slow_query))
+        # Admit the follower while the first execution is still blocked.
+        await asyncio.sleep(0)
+        self.assertEqual(self.pool._active.callers, 1)
         self.release.set()
         await follower
         self.assertEqual(self.calls, 1)
