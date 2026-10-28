@@ -126,6 +126,8 @@ class StorageMigrationTests(unittest.TestCase):
 
             self.assertIn("encrypted_offline_token", columns)
             self.assertIn("offline_token_updated_at", columns)
+            self.assertIn("encrypted_access_token", columns)
+            self.assertIn("access_token_usable_until", columns)
 
     def test_legacy_client_tables_are_not_created_for_new_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

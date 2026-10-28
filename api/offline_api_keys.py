@@ -4,6 +4,7 @@ import secrets
 import threading
 import time
 import uuid
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
@@ -11,6 +12,7 @@ from urllib.parse import urlencode
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
+from api.execution import ExecutionTimeout, exclusive_file_lock
 from api.keycloak import (
     InvalidAccessTokenError,
     KeycloakTokenVerifier,
@@ -96,6 +98,7 @@ class OfflineApiKeyService:
             else None
         )
         self._claims_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._refreshes: dict[str, Future] = {}
         self._lock = threading.Lock()
 
     @property
@@ -221,47 +224,111 @@ class OfflineApiKeyService:
     def authenticate(self, raw_key: str) -> tuple[dict[str, Any], dict[str, Any]]:
         self._require_configured()
         fallback_offline_token = self._parse_offline_token(raw_key)
-        record = self.storage.get_offline_api_key_by_hash(self._hash(raw_key))
+        token_hash = self._hash(raw_key)
+        record = self._active_record(token_hash)
+        key_id = str(record["key_id"])
+        with self._lock:
+            cached = self._claims_cache.get(key_id)
+            refresh = self._refreshes.get(key_id)
+            cache_valid = cached is not None and time.time() < cached[0]
+            leader = False
+            if not cache_valid:
+                leader = refresh is None
+                if leader:
+                    refresh = Future()
+                    self._refreshes[key_id] = refresh
+
+        if cache_valid:
+            claims = cached[1]
+        else:
+            if leader:
+                try:
+                    cached = self._refresh_claims(token_hash, fallback_offline_token)
+                except BaseException as exc:
+                    if isinstance(exc, Exception) and not isinstance(exc, (OfflineApiKeyError, OfflineApiKeyUnavailableError)):
+                        exc = OfflineApiKeyUnavailableError("Unable to refresh API key authorization.")
+                    refresh.set_exception(exc)
+                else:
+                    with self._lock:
+                        self._claims_cache[key_id] = cached
+                    refresh.set_result(cached)
+                finally:
+                    with self._lock:
+                        self._refreshes.pop(key_id, None)
+            try:
+                _, claims = refresh.result(timeout=self.timeout_seconds)
+            except FutureTimeoutError as exc:
+                raise OfflineApiKeyUnavailableError("Timed out waiting for API key refresh.") from exc
+
+        # Revocation and disabling remain effective even if they race a slow
+        # refresh. Never hold the cache lock while reading storage or the network.
+        record = self._active_record(token_hash)
+        if float(claims.get("exp") or 0) <= time.time():
+            raise OfflineApiKeyUnavailableError("Refreshed API key authorization has expired; retry.")
+        self._touch_if_needed(record)
+        return self._public_record(record), claims
+
+    def _active_record(self, token_hash: str) -> dict[str, Any]:
+        record = self.storage.get_offline_api_key_by_hash(token_hash)
         if record is None:
             raise OfflineApiKeyError("Invalid API key.")
         if record.get("revoked_at"):
             raise OfflineApiKeyError("API key has been revoked.")
-        subject_id = str(record["subject_id"])
-        self._require_eligible_user(subject_id)
+        self._require_eligible_user(str(record["subject_id"]))
+        return record
 
-        now = time.time()
-        with self._lock:
-            cached = self._claims_cache.get(str(record["key_id"]))
-            if cached is not None and now < cached[0]:
-                claims = cached[1]
-            else:
-                offline_token = self._offline_token_for_record(
-                    record,
-                    fallback_offline_token,
+    def _refresh_claims(self, token_hash: str, fallback_offline_token: str) -> tuple[float, dict[str, Any]]:
+        # Kernel locks coordinate API processes and are released on process exit.
+        # A different key never waits for this key's network request.
+        database_path = self.storage.database_path.resolve()
+        lock_path = database_path.parent / (database_path.name + ".key-locks") / (token_hash + ".lock")
+        try:
+            with exclusive_file_lock(lock_path, self.timeout_seconds):
+                record = self._active_record(token_hash)
+                access_token = record.get("encrypted_access_token")
+                usable_until = float(record.get("access_token_usable_until") or 0)
+                if access_token and time.time() < usable_until:
+                    try:
+                        claims = self._verify_access_token(self._token_cipher.decrypt(access_token))
+                        if claims.get("sub") != record["subject_id"]:
+                            raise OfflineApiKeyError("API key subject does not match Keycloak.")
+                    except OfflineApiKeyError:
+                        # An expired/retired signing key must not pin a new API
+                        # process to unusable cached authorization.
+                        pass
+                    else:
+                        return min(usable_until, float(claims.get("exp") or 0) - 30.0), claims
+
+                payload, record = self._refresh_offline_token(
+                    record, self._offline_token_for_record(record, fallback_offline_token),
                 )
-                payload, token_record = self._refresh_offline_token(
-                    record,
-                    offline_token,
-                )
+                rotated_token = payload.get("refresh_token")
+                if isinstance(rotated_token, str) and rotated_token:
+                    encrypted = self._encrypt_offline_token(rotated_token)
+                    updated_at = datetime.now(timezone.utc).isoformat()
+                    if not self.storage.update_offline_api_key_token(
+                        str(record["key_id"]), encrypted, updated_at, expected_record=record,
+                    ):
+                        self._active_record(token_hash)
+                        raise OfflineApiKeyUnavailableError("API key token changed during refresh; retry.")
+                    record = {**record, "encrypted_offline_token": encrypted, "offline_token_updated_at": updated_at}
+                # Persist rotation before JWT verification: a temporary JWKS
+                # outage must not lose the newly issued refresh token.
                 access_token = payload.get("access_token")
                 if not isinstance(access_token, str) or not access_token:
                     raise OfflineApiKeyError("Keycloak did not return an access token.")
                 claims = self._verify_access_token(access_token)
-                if claims.get("sub") != subject_id:
+                if claims.get("sub") != record["subject_id"]:
                     raise OfflineApiKeyError("API key subject does not match Keycloak.")
-                rotated_offline_token = payload.get("refresh_token")
-                if isinstance(rotated_offline_token, str) and rotated_offline_token:
-                    self.storage.update_offline_api_key_token(
-                        str(token_record["key_id"]),
-                        self._encrypt_offline_token(rotated_offline_token),
-                        datetime.now(timezone.utc).isoformat(),
-                    )
-                raw_exp = claims.get("exp")
-                usable_until = float(raw_exp) - 30.0 if raw_exp else now
-                self._claims_cache[str(record["key_id"])] = (usable_until, claims)
-
-        self._touch_if_needed(record)
-        return self._public_record(record), claims
+                usable_until = float(claims.get("exp") or 0) - 30.0
+                if not self.storage.cache_offline_api_key_access_token(
+                    record, self._encrypt_offline_token(access_token), usable_until,
+                ):
+                    self._active_record(token_hash)
+                    raise OfflineApiKeyUnavailableError("API key token changed during refresh; retry.")
+                return usable_until, claims
+        except ExecutionTimeout as exc:
+            raise OfflineApiKeyUnavailableError("Timed out waiting for API key refresh.") from exc
 
     def list(self, subject_id: str) -> list[dict[str, Any]]:
         return self.storage.list_offline_api_keys(subject_id)
@@ -448,5 +515,7 @@ class OfflineApiKeyService:
             "token_hash",
             "encrypted_offline_token",
             "offline_token_updated_at",
+            "encrypted_access_token",
+            "access_token_usable_until",
         }
         return {key: value for key, value in record.items() if key not in hidden_fields}

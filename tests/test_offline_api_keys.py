@@ -229,7 +229,8 @@ class OfflineApiKeyServiceTests(unittest.TestCase):
                     "refresh_token": "second-rotated-offline-token",
                 }
             ),
-        ) as second_post:
+        ) as second_post, patch("api.offline_api_keys.time.time", return_value=time.time() + 301):
+            # Expire both the process cache and the encrypted shared cache.
             second_record, second_claims = self.service.authenticate(created["api_key"])
 
         self.assertEqual(record["key_id"], created["key_id"])
