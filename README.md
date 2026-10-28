@@ -409,6 +409,13 @@ Token 仍正常验签。新签名密钥若在冷却期内首次出现，调用�
 通过 `TRADE_ACCESS_API_KEYCLOAK_JWKS_REFRESH_MIN_INTERVAL_SECONDS` 调整间隔，
 实际冷却不超过密钥缓存有效期。缓存已过期且 Keycloak 不可用时仍拒绝认证。
 
+长期 SK 按 Key 合并刷新，一个 Key 的慢请求不会阻塞其他 Key 的有效缓存读取或
+独立刷新。同机多个 API 进程通过共享任务库旁的 `<数据库文件名>.key-locks` 目录
+协调，并加密复用短期 Access Token；读取共享 Token 时仍正常验签。等待同一 Key
+刷新超过 Keycloak HTTP 超时配置时返回 `503`，撤销及用户禁用在认证返回前重新检查。
+所有 API 进程需一起升级，使用同一数据库路径、锁目录和 Token 加密密钥；运行期间
+不要删除锁文件。
+
 先调用当前身份接口，确认角色、权限和本地登记的 `allowed_ips`：
 
 ```bash

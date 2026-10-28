@@ -246,6 +246,8 @@ class JobStorage:
             )
             self._ensure_column(conn, "offline_api_keys", "encrypted_offline_token", "text")
             self._ensure_column(conn, "offline_api_keys", "offline_token_updated_at", "text")
+            self._ensure_column(conn, "offline_api_keys", "encrypted_access_token", "text")
+            self._ensure_column(conn, "offline_api_keys", "access_token_usable_until", "real")
             conn.execute(
                 "create index if not exists offline_api_keys_subject_idx "
                 "on offline_api_keys (subject_id, created_at)"
@@ -1173,19 +1175,45 @@ class JobStorage:
         key_id: str,
         encrypted_offline_token: str,
         updated_at: str,
-    ) -> None:
+        expected_record: dict[str, Any] | None = None,
+    ) -> bool:
+        condition = ""
+        values: list[Any] = [encrypted_offline_token, updated_at, key_id]
+        if expected_record is not None:
+            condition = " and encrypted_offline_token is ? and offline_token_updated_at is ?"
+            values.extend([expected_record.get("encrypted_offline_token"), expected_record.get("offline_token_updated_at")])
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     update offline_api_keys
                     set encrypted_offline_token = ?,
-                        offline_token_updated_at = ?
+                        offline_token_updated_at = ?,
+                        encrypted_access_token = null, access_token_usable_until = null
                     where key_id = ? and revoked_at is null
-                    """,
-                    (encrypted_offline_token, updated_at, key_id),
+                    """ + condition,
+                    values,
                 )
                 conn.commit()
+        return cursor.rowcount == 1
+
+    def cache_offline_api_key_access_token(
+        self,
+        record: dict[str, Any],
+        encrypted_access_token: str,
+        usable_until: float,
+    ) -> bool:
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "update offline_api_keys set encrypted_access_token = ?, access_token_usable_until = ? "
+                    "where key_id = ? and revoked_at is null "
+                    "and encrypted_offline_token is ? and offline_token_updated_at is ?",
+                    (encrypted_access_token, usable_until, record["key_id"],
+                     record.get("encrypted_offline_token"), record.get("offline_token_updated_at")),
+                )
+                conn.commit()
+        return cursor.rowcount == 1
 
     def list_offline_api_keys(self, subject_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
