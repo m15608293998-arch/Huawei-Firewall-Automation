@@ -173,7 +173,7 @@
     function formatNodeDifference(node,direction) { const ips=node[`ip_${direction}`]||[]; const ports=node[`port_${direction}`]||[]; return [...ips.map((item)=>`IP：${item.ip}`),...ports.map((item)=>`端口：${item.ip}:${item.port}`)].join("\n")||"无"; }
     function checkStatusLabel(status) { return {consistent:"节点数据一致",drifted:"节点数据不一致",incomplete:"查询不完整"}[status]||status||"未知状态"; }
     function actionLabel(action) { return {add_ip:"补充 IP",remove_ip:"删除 IP",add_port:"补充端口",remove_port:"删除端口",repair_ip:"检查虚系统 IP 配置",repair_application:"检查应用对象"}[action]||action; }
-    function actionObject(action) { const address=action.port==null?action.ip:(action.ip?`${action.ip}:${action.port}`:""); return [address,action.application_name].filter(Boolean).join("\n")||"-"; }
+    function actionObject(action) { const address=action.port==null?action.ip:(action.ip?`${action.ip}:${action.port}`:`端口 ${action.port}`); return [address,action.application_name].filter(Boolean).join("\n")||"-"; }
     function actionBasis(action) { const present=action.present_on_firewalls||[]; const absent=action.absent_on_firewalls||[]; const majority=present.length||absent.length?`存在：${present.join("、")||"无"}；缺失：${absent.join("、")||"无"}`:""; return [majority,action.reason].filter(Boolean).join("\n")||"-"; }
     function renderConsistencyCheck(check) {
       const status=["consistent","drifted","incomplete"].includes(check.overall_status)?check.overall_status:"incomplete";

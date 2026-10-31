@@ -975,7 +975,14 @@ class AnsibleRunnerService:
                     except (ValueError, TypeError):
                         return False
 
-                bound_ips = {pair["ip"] for pair in bindings if valid_binding(pair)}
+                # Keep parseable destinations for diagnostics even when their
+                # masks are invalid; valid_binding still determines correctness.
+                bound_ips: set[str] = set()
+                for pair in bindings:
+                    try:
+                        bound_ips.add(str(ipaddress.IPv4Address(pair.get("ip"))))
+                    except (ValueError, TypeError):
+                        continue
                 expected_pair = {"ip": target_ip, "mask": 32} if target_ip else None
                 targets_valid = (
                     all(valid_binding(pair) for pair in bindings)

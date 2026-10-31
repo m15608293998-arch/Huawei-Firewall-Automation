@@ -13,6 +13,62 @@ from api.storage import JobStorage
 
 
 class StorageMigrationTests(unittest.TestCase):
+    def legacy_ledger_chain(self, path, statuses):
+        storage = JobStorage(path)
+        history = None
+        states = []
+        for version, status in enumerate(statuses, 1):
+            job_id = "legacy-" + str(version)
+            storage.create_job({
+                "job_id": job_id, "status": status, "action": "allow",
+                "target_ip": "203.0.113.10", "mask": 32,
+                "created_at": "2026-10-31T00:00:00+00:00",
+            })
+            state = storage.save_desired_access_state(
+                "203.0.113.10", True, [443, *range(8000, 8000 + version - 1)],
+                job_id, "2026-10-31T00:00:00+00:00",
+            )
+            # Recreate the JSON chain written by the old storage implementation.
+            with storage._connect() as conn:
+                conn.execute("update desired_access_states set previous_state = ?", (history,))
+            states.append(state)
+            previous = {key: value for key, value in state.items() if key != "target_ip"}
+            history = json.dumps({**previous, "previous_state": history})
+        return states
+
+    def test_startup_recovers_baseline_through_consecutive_failed_proposals(self) -> None:
+        for failures in (2, 4):
+            with self.subTest(failures=failures), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "history.sqlite3"
+                states = self.legacy_ledger_chain(
+                    path, ["successful", *(["failed", "manual_intervention_required"] * (failures // 2))],
+                )
+                reopened = JobStorage(path)
+                self.assertEqual(reopened.get_desired_access_state("203.0.113.10"), states[0])
+                self.assertEqual(JobStorage(path).get_desired_access_state("203.0.113.10"), states[0])
+
+    def test_startup_keeps_last_confirmed_baseline_for_an_active_proposal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            states = self.legacy_ledger_chain(
+                path, ["successful", "failed", "manual_intervention_required", "applying"],
+            )
+            reopened = JobStorage(path)
+            self.assertEqual(reopened.get_desired_access_state("203.0.113.10"), states[-1])
+            reopened.update_job("legacy-4", {"status": "failed"})
+            self.assertEqual(reopened.get_desired_access_state("203.0.113.10"), states[0])
+
+    def test_startup_uses_nearest_success_and_does_not_promote_failed_history(self) -> None:
+        for statuses, baseline_index in (
+            (["failed", "successful", "failed", "failed"], 1),
+            (["failed", "manual_intervention_required", "failed"], None),
+        ):
+            with self.subTest(statuses=statuses), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "history.sqlite3"
+                states = self.legacy_ledger_chain(path, statuses)
+                expected = states[baseline_index] if baseline_index is not None else None
+                self.assertEqual(JobStorage(path).get_desired_access_state("203.0.113.10"), expected)
+
     def test_nested_ledger_history_is_flattened_without_losing_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
@@ -255,6 +311,55 @@ class StorageQueueTests(unittest.TestCase):
             conn.execute("update jobs set status = 'failed' where job_id = 'legacy-failure'")
         reopened = JobStorage(self.database_path)
         self.assertEqual(reopened.get_desired_access_state("192.168.5.224"), baseline)
+
+    def test_failed_proposal_with_no_target_attempt_does_not_block_preflight(self) -> None:
+        self.create_job("not-started", "2026-10-31T00:00:00+00:00")
+        self.storage.ensure_job_targets("not-started", ["TEST-FW"], "/tmp/jobs/not-started")
+        for status in ("failed", "manual_intervention_required"):
+            with self.subTest(status=status):
+                self.storage.update_job("not-started", {
+                    "status": status, "desired_state": {"ip_present": False, "ports": []},
+                })
+                self.assertFalse(self.storage.has_unconfirmed_access_change("192.168.5.224"))
+
+    def test_failed_proposal_with_attempted_or_unknown_targets_still_blocks(self) -> None:
+        self.create_job("failure", "2026-10-31T00:00:00+00:00")
+        self.storage.update_job("failure", {
+            "status": "failed", "desired_state": {"ip_present": False, "ports": []},
+        })
+        # Missing child records in an old database do not prove that no CLI ran.
+        self.assertTrue(self.storage.has_unconfirmed_access_change("192.168.5.224"))
+        self.storage.ensure_job_targets("failure", ["TEST-FW", "IDC-FW"], "/tmp/jobs/failure")
+        self.storage.update_job_target("failure", "IDC-FW", {"attempt_count": 1})
+        self.assertTrue(self.storage.has_unconfirmed_access_change("192.168.5.224"))
+
+    def test_success_supersedes_failures_in_completion_order(self) -> None:
+        # A queued job may have been created first but finish after another job.
+        self.create_job("recovery", "2026-10-31T00:00:00+00:00")
+        self.create_job("failure", "2026-10-31T00:00:01+00:00")
+        self.storage.update_job("failure", {
+            "status": "failed", "desired_state": {"ip_present": True, "ports": [443]},
+            "finished_at": "2026-10-31T00:01:00+00:00",
+        })
+        self.storage.update_job("recovery", {
+            "status": "successful", "desired_state": {"ip_present": False, "ports": []},
+            "finished_at": "2026-10-31T00:02:00+00:00",
+        })
+        self.assertFalse(self.storage.has_unconfirmed_access_change("192.168.5.224"))
+        self.storage.update_job("failure", {"finished_at": "2026-10-31T00:03:00+00:00"})
+        self.assertTrue(self.storage.has_unconfirmed_access_change("192.168.5.224"))
+
+    def test_no_attempt_failure_does_not_hide_an_earlier_unconfirmed_change(self) -> None:
+        self.create_job("earlier", "2026-10-31T00:00:00+00:00")
+        self.storage.update_job("earlier", {
+            "status": "failed", "desired_state": {"ip_present": True, "ports": [443]},
+        })
+        self.create_job("not-started", "2026-10-31T00:00:01+00:00")
+        self.storage.ensure_job_targets("not-started", ["TEST-FW"], "/tmp/jobs/not-started")
+        self.storage.update_job("not-started", {
+            "status": "failed", "desired_state": {"ip_present": False, "ports": []},
+        })
+        self.assertTrue(self.storage.has_unconfirmed_access_change("192.168.5.224"))
 
     def create_job(
         self,

@@ -77,6 +77,27 @@ class ConsistencyUiTests(unittest.TestCase):
                 self.assertNotIn("repair_application", rendered["actions"])
                 self.assertNotIn("\u5b58\u5728\uff1a\u65e0\uff1b\u7f3a\u5931\uff1a\u65e0", rendered["actions"])
 
+    def test_non32_legacy_application_shows_ip_and_port_in_both_pages(self):
+        report = check_payload(state_payload(application("Legacy_Trade", (("203.0.113.10", 24, 443),)))).payload
+        for page in ("admin_ui.html", "test_ui.html"):
+            with self.subTest(page=page):
+                rendered = self.render(page, report)
+                self.assertIn("203.0.113.10:443", rendered["actions"])
+                self.assertIn("Legacy_Trade", rendered["actions"])
+                self.assertIn("invalid or mismatched rule IP/mask binding", rendered["actions"])
+
+    def test_application_without_ip_still_shows_its_port_in_both_pages(self):
+        config = application("Legacy_Trade").replace("  ip-address 203.0.113.10 32\n", "")
+        report = check_payload(state_payload(config)).payload
+        action = report["firewalls"]["TEST-FW"]["suggested_actions"][0]
+        self.assertEqual(action["ip"], "")
+        self.assertEqual(action["port"], 443)
+        for page in ("admin_ui.html", "test_ui.html"):
+            with self.subTest(page=page):
+                rendered = self.render(page, report)
+                self.assertIn("443", rendered["actions"])
+                self.assertIn("Legacy_Trade", rendered["actions"])
+
     def test_incomplete_query_still_displays_the_issues_that_were_observed(self):
         report = check_payload(
             state_payload(application(grouped=False)),

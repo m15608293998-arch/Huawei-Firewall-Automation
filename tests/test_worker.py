@@ -5,6 +5,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from api.config import settings
+from api.execution import ExecutionTimeout
 from api.runner_service import RunnerResult, SnapshotRunnerResult
 from api.storage import JobStorage
 from api.worker import JobWorker
@@ -561,6 +562,26 @@ class WorkerTests(unittest.TestCase):
         worker.run_once()
         self.assertEqual(self.storage.get_job("job-2")["status"], "successful")
         self.assertEqual(runner.states["TEST-FW"]["ports"], [443, 12001, 12002])
+
+    def test_failure_before_any_device_attempt_allows_a_fresh_preflight(self) -> None:
+        codes = ("PG-FW", "IDC-FW")
+        self.create_job(action="deny", ports=[], firewall_targets=codes)
+        runner = FakeRunner(states={code: {"ip_present": True, "ports": [443]} for code in codes})
+        worker = self.make_worker(runner)
+        with patch.object(worker, "_execute_targets_parallel", side_effect=ExecutionTimeout("Expired before devices started")):
+            worker.run_once()
+        self.assertEqual(self.storage.get_job("job-1")["status"], "failed")
+        self.assertIsNone(self.storage.get_desired_access_state("203.0.113.10"))
+        self.assertTrue(all(target["attempt_count"] == 0 for target in self.storage.list_job_targets("job-1")))
+        self.assertEqual(runner.jobs, [])
+        self.assertEqual(runner.snapshot_calls, [])
+
+        self.create_job(job_id="job-2", ports=[12002], firewall_targets=codes,
+                        created_at="2026-06-05T00:00:01+00:00")
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("job-2")["status"], "successful")
+        self.assertEqual(len(runner.snapshot_calls), 2 * len(codes))
+        self.assertTrue(all(state["ports"] == [443, 12002] for state in runner.states.values()))
 
     def test_failed_change_without_known_baseline_requires_explicit_cleanup(self) -> None:
         self.create_job(action="deny", ports=[])

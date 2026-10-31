@@ -1478,7 +1478,7 @@
     }
 
     function actionObject(action) {
-      const address = action.port == null ? action.ip : (action.ip ? `${action.ip}:${action.port}` : "");
+      const address = action.port == null ? action.ip : (action.ip ? `${action.ip}:${action.port}` : `端口 ${action.port}`);
       return [address, action.application_name].filter(Boolean).join("\n") || "-";
     }
 

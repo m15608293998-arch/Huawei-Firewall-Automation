@@ -203,13 +203,13 @@ class JobStorage:
                 "select target_ip, previous_state from desired_access_states "
                 "where previous_state is not null"
             ).fetchall():
-                previous = json.loads(row["previous_state"])
-                if "previous_state" in previous:
-                    previous.pop("previous_state")
-                    conn.execute(
-                        "update desired_access_states set previous_state = ? where target_ip = ?",
-                        (json.dumps(previous, sort_keys=True), row["target_ip"]),
-                    )
+                # Resolve failed links before flattening: an older backup may be
+                # the only remaining copy of the last confirmed baseline.
+                previous = self._confirmed_previous_state(conn, row["previous_state"])
+                conn.execute(
+                    "update desired_access_states set previous_state = ? where target_ip = ?",
+                    (json.dumps(previous, sort_keys=True) if previous is not None else None, row["target_ip"]),
+                )
             # Older versions could leave terminal failed proposals as the current ledger.
             while True:
                 failed = conn.execute(
@@ -970,8 +970,23 @@ class JobStorage:
                 return changed
 
     @staticmethod
+    def _confirmed_previous_state(
+        conn: sqlite3.Connection, raw_previous: str | None,
+    ) -> dict[str, Any] | None:
+        while raw_previous is not None:
+            previous = json.loads(raw_previous)
+            job = conn.execute(
+                "select status from jobs where job_id = ?", (previous["source_job_id"],),
+            ).fetchone()
+            if job is None or job["status"] not in {"failed", "manual_intervention_required"}:
+                previous.pop("previous_state", None)
+                return previous
+            raw_previous = previous.get("previous_state")
+        return None
+
+    @classmethod
     def _rollback_desired_access_state(
-        conn: sqlite3.Connection, target_ip: str, source_job_id: str,
+        cls, conn: sqlite3.Connection, target_ip: str, source_job_id: str,
     ) -> bool:
         row = conn.execute(
             "select source_job_id, previous_state from desired_access_states where target_ip = ?",
@@ -979,10 +994,10 @@ class JobStorage:
         ).fetchone()
         if row is None or row["source_job_id"] != source_job_id:
             return False
-        if row["previous_state"] is None:
+        previous = cls._confirmed_previous_state(conn, row["previous_state"])
+        if previous is None:
             conn.execute("delete from desired_access_states where target_ip = ?", (target_ip,))
         else:
-            previous = json.loads(row["previous_state"])
             conn.execute(
                 "update desired_access_states set ip_present = ?, ports = ?, version = ?, "
                 "source_job_id = ?, updated_at = ?, previous_state = null where target_ip = ?",
@@ -996,11 +1011,30 @@ class JobStorage:
         return True
 
     def has_unconfirmed_access_change(self, target_ip: str) -> bool:
+        # Zero-attempt child records prove no device call began. Missing legacy
+        # records remain uncertain; only a later completed success clears them.
         with self._connect() as conn:
             return conn.execute(
-                "select 1 from jobs where target_ip = ? "
-                "and status in ('failed', 'manual_intervention_required') "
-                "and desired_state is not null limit 1",
+                """
+                select 1 from jobs failed
+                where failed.target_ip = ?
+                  and failed.status in ('failed', 'manual_intervention_required')
+                  and failed.desired_state is not null
+                  and (
+                    exists (select 1 from job_firewall_targets targets
+                            where targets.job_id = failed.job_id and targets.attempt_count > 0)
+                    or not exists (select 1 from job_firewall_targets targets
+                                   where targets.job_id = failed.job_id)
+                  )
+                  and not exists (
+                    select 1 from jobs recovered
+                    where recovered.target_ip = failed.target_ip
+                      and recovered.status = 'successful'
+                      and recovered.desired_state is not null
+                      and recovered.finished_at > failed.finished_at
+                  )
+                limit 1
+                """,
                 (target_ip,),
             ).fetchone() is not None
 

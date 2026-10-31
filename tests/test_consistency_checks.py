@@ -93,6 +93,17 @@ class ConsistencyRawStateTests(unittest.TestCase):
                 self.assertTrue(node["config_issues"])
                 self.assertTrue(all(action["application_name"] for action in node["suggested_actions"]))
 
+    def test_legacy_non32_binding_keeps_observed_ip_and_port_in_suggestion(self):
+        for mask in (0, 24, 31):
+            with self.subTest(mask=mask):
+                result = check_payload(state_payload(application("Legacy_Trade", ((IP, mask, 443),))))
+                self.assertEqual(result.payload["overall_status"], "drifted")
+                action = result.payload["firewalls"]["TEST-FW"]["suggested_actions"][0]
+                self.assertEqual(action["ip"], IP)
+                self.assertEqual(action["port"], 443)
+                self.assertEqual(action["application_name"], "Legacy_Trade")
+                self.assertIn("invalid or mismatched rule IP/mask binding", action["reason"])
+
     def test_partial_vsystem_and_wrong_masks_report_the_affected_context(self):
         for addresses in ({}, {IP: 24}):
             with self.subTest(addresses=addresses):
