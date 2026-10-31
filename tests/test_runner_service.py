@@ -678,6 +678,63 @@ class RunnerServiceTests(unittest.TestCase):
         )
         self.assertEqual(result.payload["summary"]["suggested_action_count"], 0)
 
+    def test_consistency_check_detects_partial_vsystem_and_orphan_application_residue(self) -> None:
+        service = AnsibleRunnerService()
+
+        def fake_snapshot(snapshot_mode, firewall_code=None, timeout_seconds=None):
+            return SnapshotRunnerResult(
+                status="successful",
+                rc=0,
+                artifact_dir="/tmp/{0}".format(firewall_code),
+                payload={
+                    "generated_at": "2026-07-21T10:00:00+08:00",
+                    "ip_items": [],
+                    "port_items": [],
+                    "application_prefix": "UD_TServe_",
+                    "address_state": {
+                        "vsystems": ["public", "Internet", "private"],
+                        "by_vsystem": {
+                            "public": {},
+                            "Internet": {"192.168.66.22": 32},
+                            "private": {"192.168.66.22": 32},
+                        },
+                    },
+                    "application_state": {
+                        "applications": [
+                            {
+                                "name": "UD_TServe_192.168.66.33",
+                                "ports": [12001],
+                                "ip_addresses": [{"ip": "192.168.66.33", "mask": 32}],
+                                "rules": [
+                                    {
+                                        "name": "1",
+                                        "ports": [12001],
+                                        "ip_addresses": [{"ip": "192.168.66.33", "mask": 32}],
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                    "application_group_members": ["UD_TServe_192.168.66.33"],
+                },
+            )
+
+        service.run_firewall_snapshot = fake_snapshot
+        result = service.run_firewall_consistency_check(("TEST-FW",))
+
+        self.assertEqual(result.rc, 0)
+        self.assertEqual(result.status, "drifted")
+        self.assertEqual(result.payload["overall_status"], "drifted")
+        self.assertFalse(result.payload["summary"]["ip_consistent"])
+        self.assertFalse(result.payload["summary"]["port_consistent"])
+        self.assertEqual(result.payload["summary"]["suggested_action_count"], 2)
+        node = result.payload["firewalls"]["TEST-FW"]
+        self.assertEqual(len(node["config_issues"]), 2)
+        self.assertEqual(
+            [item["action"] for item in node["suggested_actions"]],
+            ["repair_ip", "repair_application"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

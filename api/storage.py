@@ -191,10 +191,12 @@ class JobStorage:
                     ports text not null,
                     version integer not null,
                     source_job_id text not null,
-                    updated_at text not null
+                    updated_at text not null,
+                    previous_state text
                 )
                 """
             )
+            self._ensure_column(conn, "desired_access_states", "previous_state", "text")
             conn.execute(
                 """
                 create table if not exists subject_permissions (
@@ -847,21 +849,42 @@ class JobStorage:
             with self._connect() as conn:
                 conn.execute("begin immediate")
                 row = conn.execute(
-                    "select version from desired_access_states where target_ip = ?",
+                    "select ip_present, ports, version, source_job_id, updated_at, previous_state "
+                    "from desired_access_states where target_ip = ?",
                     (target_ip,),
                 ).fetchone()
-                version = int(row["version"] if row is not None else 0) + 1
+                if row is None:
+                    version = 1
+                    previous_state = None
+                elif str(row["source_job_id"]) == str(source_job_id):
+                    version = int(row["version"])
+                    previous_state = row["previous_state"]
+                else:
+                    version = int(row["version"]) + 1
+                    previous_state = json.dumps(
+                        {
+                            "ip_present": bool(row["ip_present"]),
+                            "ports": json.loads(row["ports"] or "[]"),
+                            "version": int(row["version"]),
+                            "source_job_id": str(row["source_job_id"]),
+                            "updated_at": str(row["updated_at"]),
+                            "previous_state": row["previous_state"],
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
                 conn.execute(
                     """
                     insert into desired_access_states (
-                        target_ip, ip_present, ports, version, source_job_id, updated_at
-                    ) values (?, ?, ?, ?, ?, ?)
+                        target_ip, ip_present, ports, version, source_job_id, updated_at, previous_state
+                    ) values (?, ?, ?, ?, ?, ?, ?)
                     on conflict(target_ip) do update set
                         ip_present = excluded.ip_present,
                         ports = excluded.ports,
                         version = excluded.version,
                         source_job_id = excluded.source_job_id,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        previous_state = excluded.previous_state
                     """,
                     (
                         target_ip,
@@ -870,6 +893,7 @@ class JobStorage:
                         version,
                         source_job_id,
                         updated_at,
+                        previous_state,
                     ),
                 )
                 conn.commit()
@@ -881,6 +905,56 @@ class JobStorage:
             "source_job_id": source_job_id,
             "updated_at": updated_at,
         }
+
+    def rollback_desired_access_state(
+        self,
+        target_ip: str,
+        source_job_id: str,
+    ) -> bool:
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("begin immediate")
+                row = conn.execute(
+                    "select source_job_id, previous_state "
+                    "from desired_access_states where target_ip = ?",
+                    (target_ip,),
+                ).fetchone()
+                if row is None or str(row["source_job_id"]) != str(source_job_id):
+                    conn.commit()
+                    return False
+                raw_previous = row["previous_state"]
+                if not raw_previous:
+                    conn.execute(
+                        "delete from desired_access_states where target_ip = ? and source_job_id = ?",
+                        (target_ip, source_job_id),
+                    )
+                    conn.commit()
+                    return True
+                previous = json.loads(raw_previous)
+                conn.execute(
+                    """
+                    update desired_access_states
+                    set ip_present = ?,
+                        ports = ?,
+                        version = ?,
+                        source_job_id = ?,
+                        updated_at = ?,
+                        previous_state = ?
+                    where target_ip = ? and source_job_id = ?
+                    """,
+                    (
+                        int(bool(previous["ip_present"])),
+                        json.dumps(sorted({int(port) for port in previous.get("ports") or []})),
+                        int(previous["version"]),
+                        str(previous["source_job_id"]),
+                        str(previous["updated_at"]),
+                        previous.get("previous_state"),
+                        target_ip,
+                        source_job_id,
+                    ),
+                )
+                conn.commit()
+                return True
 
     def get_subject_permissions(self, subject_id: str) -> list[str]:
         with self._connect() as conn:

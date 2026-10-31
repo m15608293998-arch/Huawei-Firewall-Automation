@@ -45,6 +45,19 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             env_file.chmod(0o644)
             with self.assertRaises(EnvironmentFileError):
                 load_runtime_environment(env_file)
+            env_file.chmod(0o660)
+            with self.assertRaises(EnvironmentFileError):
+                load_runtime_environment(env_file)
+
+    def test_group_readable_0640_environment_file_is_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / "runtime.env"
+            env_file.write_text("SETTING=group-readable\n", encoding="utf-8")
+            env_file.chmod(0o640)
+            with patch.dict(os.environ, {}, clear=True):
+                loaded = load_runtime_environment(env_file)
+                self.assertEqual(loaded, env_file)
+                self.assertEqual(os.environ["SETTING"], "group-readable")
 
 
 if __name__ == "__main__":

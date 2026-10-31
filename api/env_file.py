@@ -28,10 +28,10 @@ def load_runtime_environment(path: Path | None = None) -> Path | None:
         )
 
     mode = stat.S_IMODE(env_path.stat().st_mode)
-    if mode & 0o077:
+    if mode & 0o027:
         raise EnvironmentFileError(
-            "Environment file must not be accessible by group or others: "
-            "{0} (mode {1:o}; expected 600)".format(env_path, mode)
+            "Environment file must not be writable by group or accessible by others: "
+            "{0} (mode {1:o}; expected 600 or 640)".format(env_path, mode)
         )
 
     for line_number, raw_line in enumerate(

@@ -1,4 +1,7 @@
 import json
+import os
+import re
+import signal
 import sys
 import tempfile
 import time
@@ -71,20 +74,94 @@ class AnsibleRunnerService:
             yield
 
     @staticmethod
-    def _runner_options(deadline: float) -> dict[str, Any]:
+    def _runner_options(deadline: float, run_token: str | None = None) -> dict[str, Any]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ExecutionTimeout("Runner execution deadline exceeded.")
+        envvars = {
+            "ANSIBLE_CONFIG": str(settings.project_root / "ansible.cfg"),
+            "USG6000E_RUN_DEADLINE": str(time.time() + remaining),
+        }
+        if run_token:
+            envvars["USG6000E_RUNNER_TOKEN"] = run_token
         return {
             # Use settings rather than timeout= so subsecond budgets are not
             # truncated to zero (which disables the runner timeout).
             "settings": {"job_timeout": remaining, "pexpect_timeout": min(0.2, remaining)},
             "cancel_callback": lambda: time.monotonic() >= deadline,
-            "envvars": {
-                "ANSIBLE_CONFIG": str(settings.project_root / "ansible.cfg"),
-                "USG6000E_RUN_DEADLINE": str(time.time() + remaining),
-            },
+            "envvars": envvars,
         }
+
+    @staticmethod
+    def _terminate_runner_processes(run_token: str) -> None:
+        if not run_token:
+            return
+        proc_root = Path("/proc")
+        if not proc_root.is_dir():
+            return
+        needle = ("USG6000E_RUNNER_TOKEN=" + run_token).encode("utf-8") + b"\x00"
+        current_pid = os.getpid()
+
+        def find_matching() -> tuple[set[int], set[int]]:
+            pids: set[int] = set()
+            pgids: set[int] = set()
+            for entry in proc_root.iterdir():
+                if not entry.name.isdigit():
+                    continue
+                pid = int(entry.name)
+                if pid == current_pid:
+                    continue
+                try:
+                    environ = (entry / "environ").read_bytes()
+                except OSError:
+                    continue
+                if needle not in environ:
+                    continue
+                try:
+                    stat_fields = (entry / "stat").read_text(encoding="utf-8", errors="ignore").split()
+                    if len(stat_fields) > 2 and stat_fields[2] == "Z":
+                        continue
+                except OSError:
+                    continue
+                pids.add(pid)
+                try:
+                    pgid = os.getpgid(pid)
+                    if pgid > 1 and pgid != os.getpgid(current_pid):
+                        pgids.add(pgid)
+                except OSError:
+                    pass
+            return pids, pgids
+
+        pids, pgids = find_matching()
+        if not pids:
+            return
+        for pgid in pgids:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+        wait_deadline = time.monotonic() + 1.0
+        while time.monotonic() < wait_deadline:
+            remaining_pids, remaining_pgids = find_matching()
+            if not remaining_pids:
+                break
+            for pgid in remaining_pgids:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError:
+                    pass
+            for pid in remaining_pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            time.sleep(0.02)
 
     @staticmethod
     def _firewall_code(firewall_code: str | None) -> str:
@@ -218,23 +295,26 @@ class AnsibleRunnerService:
 
         try:
             with self._exclusive_runner_lock(firewall_runner_dir, deadline - time.monotonic()):
-                with self._isolated_private_data_dir(
-                    firewall_runner_dir,
-                    ident,
-                ) as private_data_dir:
-                    result = ansible_runner.run(
-                        private_data_dir=str(private_data_dir),
-                        artifact_dir=str(artifact_root),
-                        project_dir=str(project_root),
-                        playbook=playbook,
-                        ident=ident,
-                        extravars=extravars,
-                        **self._runner_options(deadline),
-                        suppress_env_files=True,
-                        rotate_artifacts=0,
-                        quiet=True,
-                        event_handler=capture_failure,
-                    )
+                try:
+                    with self._isolated_private_data_dir(
+                        firewall_runner_dir,
+                        ident,
+                    ) as private_data_dir:
+                        result = ansible_runner.run(
+                            private_data_dir=str(private_data_dir),
+                            artifact_dir=str(artifact_root),
+                            project_dir=str(project_root),
+                            playbook=playbook,
+                            ident=ident,
+                            extravars=extravars,
+                            **self._runner_options(deadline, ident),
+                            suppress_env_files=True,
+                            rotate_artifacts=0,
+                            quiet=True,
+                            event_handler=capture_failure,
+                        )
+                finally:
+                    self._terminate_runner_processes(ident)
         except ExecutionTimeout as exc:
             return RunnerResult("timeout", 254, str(artifact_root / ident), str(exc))
         except Exception as exc:
@@ -325,22 +405,25 @@ class AnsibleRunnerService:
 
             try:
                 with self._exclusive_runner_lock(firewall_runner_dir, deadline - time.monotonic()):
-                    with self._isolated_private_data_dir(
-                        firewall_runner_dir,
-                        snapshot_id,
-                    ) as private_data_dir:
-                        result = ansible_runner.run(
-                            private_data_dir=str(private_data_dir),
-                            artifact_dir=str(artifact_root),
-                            project_dir=str(project_root),
-                            playbook=playbook,
-                            ident=snapshot_id,
-                            extravars=extravars,
-                            **self._runner_options(deadline),
-                            suppress_env_files=True,
-                            rotate_artifacts=0 if audit_job_id else 20,
-                            quiet=True,
-                        )
+                    try:
+                        with self._isolated_private_data_dir(
+                            firewall_runner_dir,
+                            snapshot_id,
+                        ) as private_data_dir:
+                            result = ansible_runner.run(
+                                private_data_dir=str(private_data_dir),
+                                artifact_dir=str(artifact_root),
+                                project_dir=str(project_root),
+                                playbook=playbook,
+                                ident=snapshot_id,
+                                extravars=extravars,
+                                **self._runner_options(deadline, snapshot_id),
+                                suppress_env_files=True,
+                                rotate_artifacts=0 if audit_job_id else 20,
+                                quiet=True,
+                            )
+                    finally:
+                        self._terminate_runner_processes(snapshot_id)
             except ExecutionTimeout as exc:
                 return SnapshotRunnerResult("timeout", 254, artifact_dir, error_message=str(exc))
             except Exception as exc:
@@ -542,6 +625,8 @@ class AnsibleRunnerService:
 
         ip_sets: dict[str, set[tuple[str, int]]] = {}
         port_sets: dict[str, set[tuple[str, int]]] = {}
+        raw_issues_by_code: dict[str, list[str]] = {}
+        raw_actions_by_code: dict[str, list[dict[str, Any]]] = {}
         failures: dict[str, str] = {}
         for code in codes:
             result = results[code]
@@ -551,6 +636,9 @@ class AnsibleRunnerService:
             try:
                 ip_sets[code], port_sets[code] = self._state_snapshot_item_sets(
                     result.payload
+                )
+                raw_issues_by_code[code], raw_actions_by_code[code] = (
+                    self._state_snapshot_raw_anomalies(result.payload, code)
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 failures[code] = "Invalid state snapshot payload: {0}".format(exc)
@@ -571,6 +659,7 @@ class AnsibleRunnerService:
                     "ip_extra": [],
                     "port_missing": [],
                     "port_extra": [],
+                    "config_issues": [],
                     "suggested_actions": [],
                 }
                 for code in codes
@@ -656,6 +745,7 @@ class AnsibleRunnerService:
                     }
                     actions.append(action_item)
 
+            actions.extend(raw_actions_by_code.get(code, []))
             action_count += len(actions)
             result = results[code]
             firewalls[code] = {
@@ -677,6 +767,7 @@ class AnsibleRunnerService:
                 "port_extra": [
                     self._snapshot_item_from_key(item) for item in sorted(port_extra)
                 ],
+                "config_issues": raw_issues_by_code.get(code, []),
                 "suggested_actions": actions,
             }
 
@@ -685,7 +776,18 @@ class AnsibleRunnerService:
             for item in ip_differences + port_differences
             if item["reference_state"] == "ambiguous"
         )
-        drifted = bool(ip_differences or port_differences)
+        has_raw_issues = any(raw_issues_by_code.values())
+        ip_raw_issues = any(
+            action["action"] == "repair_ip"
+            for actions in raw_actions_by_code.values()
+            for action in actions
+        )
+        port_raw_issues = any(
+            action["action"] == "repair_application"
+            for actions in raw_actions_by_code.values()
+            for action in actions
+        )
+        drifted = bool(ip_differences or port_differences or has_raw_issues)
         payload = {
             "checked_at": checked_at,
             "overall_status": "drifted" if drifted else "consistent",
@@ -694,8 +796,8 @@ class AnsibleRunnerService:
             "summary": {
                 "configured_firewall_count": len(codes),
                 "successful_firewall_count": len(codes),
-                "ip_consistent": not ip_differences,
-                "port_consistent": not port_differences,
+                "ip_consistent": not ip_differences and not ip_raw_issues,
+                "port_consistent": not port_differences and not port_raw_issues,
                 "ip_drift_item_count": len(ip_differences),
                 "port_drift_item_count": len(port_differences),
                 "suggested_action_count": action_count,
@@ -745,6 +847,178 @@ class AnsibleRunnerService:
                 raise ValueError("port must be between 1 and 65535")
             port_keys.add((item["ip"], port))
         return ip_keys, port_keys
+
+    @classmethod
+    def _state_snapshot_raw_anomalies(
+        cls,
+        payload: dict[str, Any],
+        firewall_code: str,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        has_address_state = "address_state" in payload
+        has_app_state = (
+            "application_state" in payload or "application_group_members" in payload
+        )
+        if not has_address_state and not has_app_state:
+            return [], []
+
+        issues: list[str] = []
+        actions: list[dict[str, Any]] = []
+        valid_ips: set[str] = set()
+
+        if has_address_state:
+            address_state = payload["address_state"]
+            if not isinstance(address_state, dict):
+                raise TypeError("address_state must be an object")
+            vsystems = address_state.get("vsystems")
+            by_vsystem = address_state.get("by_vsystem")
+            if not isinstance(vsystems, list) or not vsystems or not isinstance(by_vsystem, dict):
+                raise ValueError("address_state must include non-empty vsystems and by_vsystem")
+            all_ips = sorted(
+                {
+                    str(ip_value)
+                    for vsys in vsystems
+                    for ip_value in (by_vsystem.get(vsys) or {})
+                }
+            )
+            for ip_value in all_ips:
+                membership = {
+                    str(vsys): (by_vsystem.get(vsys) or {}).get(ip_value)
+                    for vsys in vsystems
+                }
+                if all(mask == 32 for mask in membership.values()):
+                    valid_ips.add(ip_value)
+                    continue
+                present_vsys = [vsys for vsys, mask in membership.items() if mask == 32]
+                missing_vsys = [vsys for vsys, mask in membership.items() if mask is None]
+                invalid_vsys = [
+                    "{0}(/{1})".format(vsys, mask)
+                    for vsys, mask in membership.items()
+                    if mask is not None and mask != 32
+                ]
+                details: list[str] = []
+                if present_vsys:
+                    details.append("present in {0}".format(",".join(present_vsys)))
+                if missing_vsys:
+                    details.append("missing in {0}".format(",".join(missing_vsys)))
+                if invalid_vsys:
+                    details.append("non-/32 mask in {0}".format(",".join(invalid_vsys)))
+                reason = "Address-set vsystem drift on {0} for {1} ({2}).".format(
+                    firewall_code,
+                    ip_value,
+                    "; ".join(details),
+                )
+                issues.append(reason)
+                actions.append(
+                    {
+                        "firewall_code": firewall_code,
+                        "action": "repair_ip",
+                        "ip": ip_value,
+                        "present_on_firewalls": [],
+                        "absent_on_firewalls": [],
+                        "reason": reason,
+                    }
+                )
+        else:
+            valid_ips = {
+                str(item["ip"])
+                for item in (payload.get("ip_items") or [])
+                if isinstance(item, dict) and isinstance(item.get("ip"), str)
+            }
+
+        if has_app_state:
+            prefix = str(payload.get("application_prefix") or "UD_TServe_")
+            app_name_re = re.compile(
+                r"^" + re.escape(prefix) + r"(\d+\.\d+\.\d+\.\d+)(?:_\d+)?$"
+            )
+            app_state = payload.get("application_state") or {}
+            if not isinstance(app_state, dict) or not isinstance(
+                app_state.get("applications", []), list
+            ):
+                raise TypeError("application_state.applications must be a list")
+            applications = app_state.get("applications", [])
+            raw_group_members = payload.get("application_group_members") or []
+            if not isinstance(raw_group_members, list):
+                raise TypeError("application_group_members must be a list")
+            group_members = {str(name) for name in raw_group_members}
+            object_names: set[str] = set()
+
+            for app in applications:
+                if not isinstance(app, dict) or not isinstance(app.get("name"), str):
+                    raise TypeError("each application entry must contain a string name")
+                app_name = app["name"]
+                object_names.add(app_name)
+                match = app_name_re.fullmatch(app_name)
+                target_ip = match.group(1) if match else ""
+                ports = sorted({int(port) for port in (app.get("ports") or [])})
+                rules = app.get("rules") or []
+                expected_pair = {"ip": target_ip, "mask": 32} if target_ip else None
+                targets_valid = (
+                    bool(target_ip)
+                    and all(
+                        pair == expected_pair
+                        for pair in (app.get("ip_addresses") or [])
+                    )
+                    and all(
+                        (not rule.get("ports") or bool(rule.get("ip_addresses")))
+                        and all(
+                            pair == expected_pair
+                            for pair in (rule.get("ip_addresses") or [])
+                        )
+                        for rule in rules
+                    )
+                )
+                reasons: list[str] = []
+                if not ports or not rules:
+                    reasons.append("empty or ruleless application object")
+                if ports and app_name not in group_members:
+                    reasons.append("missing from application group")
+                if target_ip and target_ip not in valid_ips:
+                    reasons.append(
+                        "target IP {0} is not present in all address-set vsystems".format(
+                            target_ip
+                        )
+                    )
+                if not targets_valid:
+                    reasons.append("invalid or mismatched rule IP/mask binding")
+                if reasons:
+                    reason = "Application anomaly on {0} ({1}): {2}.".format(
+                        firewall_code,
+                        app_name,
+                        "; ".join(reasons),
+                    )
+                    issues.append(reason)
+                    actions.append(
+                        {
+                            "firewall_code": firewall_code,
+                            "action": "repair_application",
+                            "ip": target_ip or app_name,
+                            "port": ports[0] if len(ports) == 1 else None,
+                            "present_on_firewalls": [],
+                            "absent_on_firewalls": [],
+                            "reason": reason,
+                        }
+                    )
+
+            for orphan_member in sorted(group_members - object_names):
+                match = app_name_re.fullmatch(orphan_member)
+                target_ip = match.group(1) if match else orphan_member
+                reason = (
+                    "Application group member {0} on {1} references a missing "
+                    "user-defined-application object."
+                ).format(orphan_member, firewall_code)
+                issues.append(reason)
+                actions.append(
+                    {
+                        "firewall_code": firewall_code,
+                        "action": "repair_application",
+                        "ip": target_ip,
+                        "present_on_firewalls": [],
+                        "absent_on_firewalls": [],
+                        "reason": reason,
+                    }
+                )
+
+        return issues, actions
 
     @staticmethod
     def _snapshot_generated_at(payload: object) -> str | None:

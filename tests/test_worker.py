@@ -474,12 +474,35 @@ class WorkerTests(unittest.TestCase):
         worker = self.make_worker(runner)
         worker.run_once()
         self.assertEqual(self.storage.get_job("job-1")["status"], "failed")
+        self.assertIsNone(self.storage.get_desired_access_state("203.0.113.10"))
         runner.failed_codes.clear()
         self.create_job(job_id="job-2", ports=[12002], created_at="2026-06-05T00:00:01+00:00")
         worker.run_once()
         self.assertEqual(self.storage.get_job("job-2")["status"], "successful")
-        self.assertEqual(runner.states["TEST-FW"]["ports"], [12001, 12002])
-        self.assertEqual(runner.jobs[-1][0]["desired_state"]["ports"], [12001, 12002])
+        self.assertEqual(runner.states["TEST-FW"]["ports"], [12002])
+        self.assertEqual(runner.jobs[-1][0]["desired_state"]["ports"], [12002])
+
+    def test_failed_followup_job_restores_previous_desired_state_ledger(self) -> None:
+        self.storage.save_desired_access_state(
+            target_ip="203.0.113.10",
+            ip_present=True,
+            ports=[12001],
+            source_job_id="job-baseline",
+            updated_at="2026-06-04T00:00:00+00:00",
+        )
+        self.create_job(job_id="job-1", action="allow_ports", ports=[12002])
+        runner = FakeRunner(
+            states={"TEST-FW": {"ip_present": True, "ports": [12001]}},
+            failed_codes={"TEST-FW"},
+        )
+        worker = self.make_worker(runner)
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("job-1")["status"], "failed")
+        restored = self.storage.get_desired_access_state("203.0.113.10")
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored["source_job_id"], "job-baseline")
+        self.assertEqual(restored["ports"], [12001])
+        self.assertEqual(restored["version"], 1)
 
     def test_crash_during_last_attempt_does_not_turn_matching_config_into_success(self) -> None:
         self.create_job()

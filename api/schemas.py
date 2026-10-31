@@ -318,6 +318,7 @@ class FirewallCheckNodeResponse(BaseModel):
     ip_extra: list[FirewallIpSnapshotItem] = Field(default_factory=list)
     port_missing: list[FirewallPortSnapshotItem] = Field(default_factory=list)
     port_extra: list[FirewallPortSnapshotItem] = Field(default_factory=list)
+    config_issues: list[str] = Field(default_factory=list)
     suggested_actions: list[FirewallCheckAction] = Field(default_factory=list)
 
 

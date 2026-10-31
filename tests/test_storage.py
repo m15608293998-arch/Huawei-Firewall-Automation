@@ -444,6 +444,16 @@ class StorageQueueTests(unittest.TestCase):
         self.assertEqual(second["version"], 2)
         self.assertEqual(desired["ports"], [12001])
         self.assertEqual(desired["version"], 2)
+        self.assertTrue(
+            self.storage.rollback_desired_access_state(
+                "192.168.5.224",
+                "multi-job-2",
+            )
+        )
+        rolled_back = self.storage.get_desired_access_state("192.168.5.224")
+        self.assertEqual(rolled_back["ports"], [12001, 12002])
+        self.assertEqual(rolled_back["version"], 1)
+        self.assertEqual(rolled_back["source_job_id"], "multi-job")
 
     def test_legacy_job_can_backfill_firewall_child_rows(self) -> None:
         self.create_job("legacy-job", "2026-06-05T00:00:00+00:00")

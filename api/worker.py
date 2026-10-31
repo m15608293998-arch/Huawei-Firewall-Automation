@@ -267,6 +267,7 @@ class JobWorker:
                 JobStatus.successful.value,
             )
         except Exception as exc:
+            self.storage.rollback_desired_access_state(str(job["target_ip"]), job_id)
             self.storage.update_job(
                 job_id,
                 {
@@ -392,6 +393,7 @@ class JobWorker:
                 )
                 for code in manual_targets
             )
+            self.storage.rollback_desired_access_state(str(job["target_ip"]), job_id)
             self.storage.update_job(
                 job_id,
                 {
@@ -418,6 +420,7 @@ class JobWorker:
             >= settings.firewall_child_max_attempts
         ]
         if exhausted_targets:
+            self.storage.rollback_desired_access_state(str(job["target_ip"]), job_id)
             self.storage.update_job(
                 job_id,
                 {

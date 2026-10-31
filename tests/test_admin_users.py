@@ -1,3 +1,6 @@
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,6 +74,46 @@ class AdminUserServiceTests(unittest.TestCase):
                     allowed_ips=["192.168.5.224"],
                 ),
             )
+
+    def test_cli_manage_permissions_grants_user_profile_and_creates_managed_user(self) -> None:
+        db_path = Path(self.temp_dir.name) / "users.sqlite3"
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "manage_permissions.py"
+        env = {"TRADE_ACCESS_API_DATABASE_PATH": str(db_path)}
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "grant",
+                "--subject-id",
+                "cli-user-1",
+                "--username",
+                "cli-employee",
+                "--profile",
+                "user",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        output = json.loads(proc.stdout)
+        self.assertEqual(output["subject_id"], "cli-user-1")
+        self.assertEqual(output["profile"], "user")
+        managed = self.storage.get_managed_user("cli-user-1")
+        self.assertIsNotNone(managed)
+        self.assertEqual(managed["username"], "cli-employee")
+        self.assertTrue(managed["enabled"])
+        self.assertEqual(
+            managed["permissions"],
+            [
+                "firewall.ip.allow",
+                "firewall.ip.deny",
+                "firewall.job.read",
+                "firewall.ports.allow",
+                "firewall.ports.deny",
+                "firewall.snapshot.read",
+            ],
+        )
 
 
 if __name__ == "__main__":
