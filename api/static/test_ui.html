@@ -390,7 +390,7 @@
             <h3 class="check-section-title">节点查询与差异</h3>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>防火墙节点</th><th>查询状态</th><th>IP / 端口数量</th><th>缺失配置</th><th>多余配置</th><th>查询错误</th></tr></thead>
+                <thead><tr><th>防火墙节点</th><th>查询状态</th><th>IP / 端口数量</th><th>缺失配置</th><th>多余配置</th><th>查询错误 / 配置异常</th></tr></thead>
                 <tbody id="consistencyNodeRows"></tbody>
               </table>
             </div>
@@ -399,7 +399,7 @@
             <h3 class="check-section-title">人工纠错建议（不会自动执行）</h3>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>目标节点</th><th>建议操作</th><th>对象</th><th>多数节点依据</th></tr></thead>
+                <thead><tr><th>目标节点</th><th>建议操作</th><th>对象</th><th>依据 / 异常详情</th></tr></thead>
                 <tbody id="consistencyActionRows"></tbody>
               </table>
             </div>
@@ -1471,18 +1471,24 @@
         remove_ip: "删除 IP",
         add_port: "补充端口",
         remove_port: "删除端口",
+        repair_ip: "检查虚系统 IP 配置",
+        repair_application: "检查应用对象",
       };
       return labels[action] || action;
     }
 
     function actionObject(action) {
-      return action.port == null ? action.ip : `${action.ip}:${action.port}`;
+      const address = action.port == null ? action.ip : (action.ip ? `${action.ip}:${action.port}` : "");
+      return [address, action.application_name].filter(Boolean).join("\n") || "-";
     }
 
     function actionBasis(action) {
-      const present = (action.present_on_firewalls || []).join("、") || "无";
-      const absent = (action.absent_on_firewalls || []).join("、") || "无";
-      return `存在：${present}；缺失：${absent}`;
+      const present = action.present_on_firewalls || [];
+      const absent = action.absent_on_firewalls || [];
+      const majority = present.length || absent.length
+        ? `存在：${present.join("、") || "无"}；缺失：${absent.join("、") || "无"}`
+        : "";
+      return [majority, action.reason].filter(Boolean).join("\n") || "-";
     }
 
     function renderConsistencyCheck(check) {
@@ -1490,12 +1496,15 @@
         ? check.overall_status
         : "incomplete";
       const summary = check.summary || {};
+      const issueCount = summary.config_issue_count
+        ?? Object.values(check.firewalls || {}).reduce((count, node) => count + (node.config_issues || []).length, 0);
       elements.consistencyStatus.className = `consistency-status ${status}`;
       elements.consistencyStatus.textContent = checkStatusLabel(status);
       elements.consistencySummary.textContent = [
         `已查询 ${summary.successful_firewall_count || 0}/${summary.configured_firewall_count || (check.firewall_codes || []).length} 台`,
-        `IP 差异 ${summary.ip_drift_item_count || 0}`,
-        `端口差异 ${summary.port_drift_item_count || 0}`,
+        `跨节点 IP 差异 ${summary.ip_drift_item_count || 0}`,
+        `跨节点端口差异 ${summary.port_drift_item_count || 0}`,
+        `配置异常 ${issueCount}`,
         `纠错建议 ${summary.suggested_action_count || 0}`,
         `需人工判定 ${summary.ambiguous_item_count || 0}`,
         `检查时间 ${formatDateTime(check.checked_at)}`,
@@ -1517,7 +1526,7 @@
         appendTextCell(row, `${node.ip_count || 0} / ${node.port_count || 0}`);
         appendTextCell(row, formatNodeDifference(node, "missing"), "check-list");
         appendTextCell(row, formatNodeDifference(node, "extra"), "check-list");
-        appendTextCell(row, node.error_message || "-");
+        appendTextCell(row, [node.error_message, ...(node.config_issues || [])].filter(Boolean).join("\n") || "-", "check-list");
         elements.consistencyNodeRows.append(row);
       });
 
@@ -1529,8 +1538,8 @@
         const row = document.createElement("tr");
         appendTextCell(row, action.firewall_code, "mono");
         appendTextCell(row, actionLabel(action.action));
-        appendTextCell(row, actionObject(action), "mono");
-        appendTextCell(row, actionBasis(action));
+        appendTextCell(row, actionObject(action), "check-list mono");
+        appendTextCell(row, actionBasis(action), "check-list");
         elements.consistencyActionRows.append(row);
       });
       elements.consistencyActionsSection.classList.toggle("hidden", actions.length === 0);
@@ -1555,7 +1564,7 @@
       elements.consistencyAmbiguousSection.classList.toggle("hidden", ambiguous.length === 0);
       elements.consistencyWarning.textContent = status === "incomplete"
         ? "部分防火墙查询失败，本次不会生成纠错建议。请先恢复失败节点连接，再重新检查。"
-        : "纠错建议依据全部配置节点的严格多数结果，仅供人工核实，不会自动执行；操作前请确认真实业务期望状态。";
+        : "报告包含跨节点差异与单机配置异常，纠错建议仅供人工核实，不会自动执行；操作前请确认真实业务期望状态。";
       elements.consistencyReport.classList.remove("hidden");
     }
 

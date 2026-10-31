@@ -286,6 +286,7 @@ class FirewallCheckAction(BaseModel):
     action: str
     ip: str
     port: int | None = None
+    application_name: str | None = None
     present_on_firewalls: list[str] = Field(default_factory=list)
     absent_on_firewalls: list[str] = Field(default_factory=list)
     reason: str
@@ -331,6 +332,7 @@ class FirewallCheckSummary(BaseModel):
     port_drift_item_count: int
     suggested_action_count: int
     ambiguous_item_count: int
+    config_issue_count: int = 0
 
 
 class FirewallConsistencyCheckResponse(BaseModel):

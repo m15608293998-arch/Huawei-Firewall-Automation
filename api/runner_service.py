@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import os
 import re
@@ -659,7 +660,7 @@ class AnsibleRunnerService:
                     "ip_extra": [],
                     "port_missing": [],
                     "port_extra": [],
-                    "config_issues": [],
+                    "config_issues": raw_issues_by_code.get(code, []),
                     "suggested_actions": [],
                 }
                 for code in codes
@@ -678,6 +679,7 @@ class AnsibleRunnerService:
                     "port_drift_item_count": 0,
                     "suggested_action_count": 0,
                     "ambiguous_item_count": 0,
+                    "config_issue_count": sum(len(issues) for issues in raw_issues_by_code.values()),
                 },
                 "firewalls": firewalls,
                 "differences": {"ips": [], "ports": []},
@@ -802,6 +804,7 @@ class AnsibleRunnerService:
                 "port_drift_item_count": len(port_differences),
                 "suggested_action_count": action_count,
                 "ambiguous_item_count": ambiguous_count,
+                "config_issue_count": sum(len(issues) for issues in raw_issues_by_code.values()),
             },
             "firewalls": firewalls,
             "differences": {
@@ -809,8 +812,8 @@ class AnsibleRunnerService:
                 "ports": port_differences,
             },
             "warning": (
-                "Correction actions are majority-based suggestions only. Verify the "
-                "intended business state before changing a firewall manually."
+                "The report includes cross-firewall differences and local configuration "
+                "issues. Verify the intended business state before applying any suggestion."
             ),
         }
         return SnapshotRunnerResult(
@@ -873,6 +876,8 @@ class AnsibleRunnerService:
             by_vsystem = address_state.get("by_vsystem")
             if not isinstance(vsystems, list) or not vsystems or not isinstance(by_vsystem, dict):
                 raise ValueError("address_state must include non-empty vsystems and by_vsystem")
+            if any(not isinstance(by_vsystem.get(vsys), dict) for vsys in vsystems):
+                raise TypeError("each vsystem must contain an address map")
             all_ips = sorted(
                 {
                     str(ip_value)
@@ -930,16 +935,14 @@ class AnsibleRunnerService:
             app_name_re = re.compile(
                 r"^" + re.escape(prefix) + r"(\d+\.\d+\.\d+\.\d+)(?:_\d+)?$"
             )
-            app_state = payload.get("application_state") or {}
-            if not isinstance(app_state, dict) or not isinstance(
-                app_state.get("applications", []), list
-            ):
+            app_state = payload.get("application_state")
+            if not isinstance(app_state, dict) or not isinstance(app_state.get("applications"), list):
                 raise TypeError("application_state.applications must be a list")
-            applications = app_state.get("applications", [])
-            raw_group_members = payload.get("application_group_members") or []
-            if not isinstance(raw_group_members, list):
+            applications = app_state["applications"]
+            raw_group_members = payload.get("application_group_members")
+            if not isinstance(raw_group_members, list) or not all(isinstance(name, str) for name in raw_group_members):
                 raise TypeError("application_group_members must be a list")
-            group_members = {str(name) for name in raw_group_members}
+            group_members = set(raw_group_members)
             object_names: set[str] = set()
 
             for app in applications:
@@ -948,22 +951,37 @@ class AnsibleRunnerService:
                 app_name = app["name"]
                 object_names.add(app_name)
                 match = app_name_re.fullmatch(app_name)
-                target_ip = match.group(1) if match else ""
+                try:
+                    target_ip = str(ipaddress.IPv4Address(match.group(1))) if match else ""
+                except ValueError:
+                    target_ip = ""
+                # The inventory also contains unrelated applications. Legacy members
+                # of the business group use rule destinations rather than their names.
+                if not target_ip and app_name not in group_members:
+                    continue
                 ports = sorted({int(port) for port in (app.get("ports") or [])})
                 rules = app.get("rules") or []
+                if not isinstance(rules, list) or not all(isinstance(rule, dict) for rule in rules):
+                    raise TypeError("application rules must be a list of objects")
+                bindings = app.get("ip_addresses") or []
+                for rule in rules:
+                    bindings = bindings + (rule.get("ip_addresses") or [])
+                if not isinstance(bindings, list) or not all(isinstance(pair, dict) for pair in bindings):
+                    raise TypeError("application IP bindings must be a list of objects")
+
+                def valid_binding(pair: dict[str, Any]) -> bool:
+                    try:
+                        return pair.get("mask") == 32 and str(ipaddress.IPv4Address(pair.get("ip"))) == pair.get("ip")
+                    except (ValueError, TypeError):
+                        return False
+
+                bound_ips = {pair["ip"] for pair in bindings if valid_binding(pair)}
                 expected_pair = {"ip": target_ip, "mask": 32} if target_ip else None
                 targets_valid = (
-                    bool(target_ip)
-                    and all(
-                        pair == expected_pair
-                        for pair in (app.get("ip_addresses") or [])
-                    )
+                    all(valid_binding(pair) for pair in bindings)
+                    and (not target_ip or all(pair == expected_pair for pair in bindings))
                     and all(
                         (not rule.get("ports") or bool(rule.get("ip_addresses")))
-                        and all(
-                            pair == expected_pair
-                            for pair in (rule.get("ip_addresses") or [])
-                        )
                         for rule in rules
                     )
                 )
@@ -972,12 +990,15 @@ class AnsibleRunnerService:
                     reasons.append("empty or ruleless application object")
                 if ports and app_name not in group_members:
                     reasons.append("missing from application group")
-                if target_ip and target_ip not in valid_ips:
+                missing_ips = (bound_ips | ({target_ip} if target_ip else set())) - valid_ips
+                if missing_ips:
                     reasons.append(
                         "target IP {0} is not present in all address-set vsystems".format(
-                            target_ip
+                            ", ".join(sorted(missing_ips))
                         )
                     )
+                if any(port < 1 or port > 65535 for port in ports):
+                    reasons.append("invalid application port")
                 if not targets_valid:
                     reasons.append("invalid or mismatched rule IP/mask binding")
                 if reasons:
@@ -991,7 +1012,8 @@ class AnsibleRunnerService:
                         {
                             "firewall_code": firewall_code,
                             "action": "repair_application",
-                            "ip": target_ip or app_name,
+                            "ip": target_ip or next(iter(sorted(bound_ips)), ""),
+                            "application_name": app_name,
                             "port": ports[0] if len(ports) == 1 else None,
                             "present_on_firewalls": [],
                             "absent_on_firewalls": [],
@@ -1001,7 +1023,7 @@ class AnsibleRunnerService:
 
             for orphan_member in sorted(group_members - object_names):
                 match = app_name_re.fullmatch(orphan_member)
-                target_ip = match.group(1) if match else orphan_member
+                target_ip = match.group(1) if match else ""
                 reason = (
                     "Application group member {0} on {1} references a missing "
                     "user-defined-application object."
@@ -1012,6 +1034,7 @@ class AnsibleRunnerService:
                         "firewall_code": firewall_code,
                         "action": "repair_application",
                         "ip": target_ip,
+                        "application_name": orphan_member,
                         "present_on_firewalls": [],
                         "absent_on_firewalls": [],
                         "reason": reason,

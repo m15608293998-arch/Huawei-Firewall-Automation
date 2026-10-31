@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from api.permissions import expand_permissions
+
 
 JOB_COLUMNS = [
     "job_id",
@@ -197,6 +199,27 @@ class JobStorage:
                 """
             )
             self._ensure_column(conn, "desired_access_states", "previous_state", "text")
+            for row in conn.execute(
+                "select target_ip, previous_state from desired_access_states "
+                "where previous_state is not null"
+            ).fetchall():
+                previous = json.loads(row["previous_state"])
+                if "previous_state" in previous:
+                    previous.pop("previous_state")
+                    conn.execute(
+                        "update desired_access_states set previous_state = ? where target_ip = ?",
+                        (json.dumps(previous, sort_keys=True), row["target_ip"]),
+                    )
+            # Older versions could leave terminal failed proposals as the current ledger.
+            while True:
+                failed = conn.execute(
+                    "select states.target_ip, states.source_job_id from desired_access_states states "
+                    "join jobs on jobs.job_id = states.source_job_id "
+                    "where jobs.status in ('failed', 'manual_intervention_required') limit 1"
+                ).fetchone()
+                if failed is None:
+                    break
+                self._rollback_desired_access_state(conn, failed["target_ip"], failed["source_job_id"])
             conn.execute(
                 """
                 create table if not exists subject_permissions (
@@ -708,10 +731,26 @@ class JobStorage:
 
         with self._lock:
             with self._connect() as conn:
+                conn.execute("begin immediate")
+                row = conn.execute(
+                    "select target_ip from jobs where job_id = ? and status != 'canceled'",
+                    (job_id,),
+                ).fetchone()
+                if row is None:
+                    return
                 conn.execute(
                     "update jobs set {0} where job_id = ? and status != 'canceled'".format(assignments),
                     values,
                 )
+                # The terminal status and its ledger change must survive a crash together.
+                if fields.get("status") in {"failed", "manual_intervention_required"}:
+                    self._rollback_desired_access_state(conn, row["target_ip"], job_id)
+                elif fields.get("status") == "successful":
+                    conn.execute(
+                        "update desired_access_states set previous_state = null "
+                        "where target_ip = ? and source_job_id = ?",
+                        (row["target_ip"], job_id),
+                    )
                 conn.commit()
 
     def list_job_targets(self, job_id: str) -> list[dict[str, Any]]:
@@ -843,6 +882,8 @@ class JobStorage:
         ports: list[int],
         source_job_id: str,
         updated_at: str,
+        baseline: dict[str, Any] | None = None,
+        expected_version: int | None = None,
     ) -> dict[str, Any]:
         normalized_ports = sorted({int(port) for port in ports})
         with self._lock:
@@ -855,7 +896,16 @@ class JobStorage:
                 ).fetchone()
                 if row is None:
                     version = 1
-                    previous_state = None
+                    previous_state = (
+                        json.dumps({
+                            "ip_present": bool(baseline["ip_present"]),
+                            "ports": sorted({int(port) for port in baseline["ports"]}),
+                            "version": 0,
+                            "source_job_id": "baseline:" + source_job_id,
+                            "updated_at": updated_at,
+                        }, sort_keys=True)
+                        if baseline is not None else None
+                    )
                 elif str(row["source_job_id"]) == str(source_job_id):
                     version = int(row["version"])
                     previous_state = row["previous_state"]
@@ -868,11 +918,12 @@ class JobStorage:
                             "version": int(row["version"]),
                             "source_job_id": str(row["source_job_id"]),
                             "updated_at": str(row["updated_at"]),
-                            "previous_state": row["previous_state"],
                         },
                         ensure_ascii=False,
                         sort_keys=True,
                     )
+                if expected_version is not None and version != expected_version:
+                    raise ValueError("Desired-state version changed while recovering the job.")
                 conn.execute(
                     """
                     insert into desired_access_states (
@@ -914,47 +965,44 @@ class JobStorage:
         with self._lock:
             with self._connect() as conn:
                 conn.execute("begin immediate")
-                row = conn.execute(
-                    "select source_job_id, previous_state "
-                    "from desired_access_states where target_ip = ?",
-                    (target_ip,),
-                ).fetchone()
-                if row is None or str(row["source_job_id"]) != str(source_job_id):
-                    conn.commit()
-                    return False
-                raw_previous = row["previous_state"]
-                if not raw_previous:
-                    conn.execute(
-                        "delete from desired_access_states where target_ip = ? and source_job_id = ?",
-                        (target_ip, source_job_id),
-                    )
-                    conn.commit()
-                    return True
-                previous = json.loads(raw_previous)
-                conn.execute(
-                    """
-                    update desired_access_states
-                    set ip_present = ?,
-                        ports = ?,
-                        version = ?,
-                        source_job_id = ?,
-                        updated_at = ?,
-                        previous_state = ?
-                    where target_ip = ? and source_job_id = ?
-                    """,
-                    (
-                        int(bool(previous["ip_present"])),
-                        json.dumps(sorted({int(port) for port in previous.get("ports") or []})),
-                        int(previous["version"]),
-                        str(previous["source_job_id"]),
-                        str(previous["updated_at"]),
-                        previous.get("previous_state"),
-                        target_ip,
-                        source_job_id,
-                    ),
-                )
+                changed = self._rollback_desired_access_state(conn, target_ip, source_job_id)
                 conn.commit()
-                return True
+                return changed
+
+    @staticmethod
+    def _rollback_desired_access_state(
+        conn: sqlite3.Connection, target_ip: str, source_job_id: str,
+    ) -> bool:
+        row = conn.execute(
+            "select source_job_id, previous_state from desired_access_states where target_ip = ?",
+            (target_ip,),
+        ).fetchone()
+        if row is None or row["source_job_id"] != source_job_id:
+            return False
+        if row["previous_state"] is None:
+            conn.execute("delete from desired_access_states where target_ip = ?", (target_ip,))
+        else:
+            previous = json.loads(row["previous_state"])
+            conn.execute(
+                "update desired_access_states set ip_present = ?, ports = ?, version = ?, "
+                "source_job_id = ?, updated_at = ?, previous_state = null where target_ip = ?",
+                (
+                    int(bool(previous["ip_present"])),
+                    json.dumps(sorted({int(port) for port in previous["ports"]})),
+                    int(previous["version"]), previous["source_job_id"],
+                    previous["updated_at"], target_ip,
+                ),
+            )
+        return True
+
+    def has_unconfirmed_access_change(self, target_ip: str) -> bool:
+        with self._connect() as conn:
+            return conn.execute(
+                "select 1 from jobs where target_ip = ? "
+                "and status in ('failed', 'manual_intervention_required') "
+                "and desired_state is not null limit 1",
+                (target_ip,),
+            ).fetchone() is not None
 
     def get_subject_permissions(self, subject_id: str) -> list[str]:
         with self._connect() as conn:
@@ -1032,6 +1080,36 @@ class JobStorage:
                 )
                 conn.commit()
         return cursor.rowcount > 0
+
+    def revoke_subject_permissions(self, subject_id: str, permissions: list[str]) -> list[str]:
+        requested = expand_permissions(permissions)
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("begin immediate")
+                rows = conn.execute(
+                    "select permission, created_at from subject_permissions where subject_id = ?",
+                    (subject_id,),
+                ).fetchall()
+                existing = expand_permissions(row["permission"] for row in rows)
+                # Expand legacy grants before revoking a granular permission, so the
+                # alias cannot retain access or revoke unrelated operations.
+                for row in rows:
+                    for permission in expand_permissions([row["permission"]]):
+                        conn.execute(
+                            "insert or ignore into subject_permissions values (?, ?, ?)",
+                            (subject_id, permission, row["created_at"]),
+                        )
+                conn.execute(
+                    "delete from subject_permissions where subject_id = ? "
+                    "and permission in ('firewall.allow', 'firewall.deny')",
+                    (subject_id,),
+                )
+                conn.executemany(
+                    "delete from subject_permissions where subject_id = ? and permission = ?",
+                    [(subject_id, permission) for permission in requested],
+                )
+                conn.commit()
+        return sorted(existing & requested)
 
     def grant_subject_allowed_ip(
         self,

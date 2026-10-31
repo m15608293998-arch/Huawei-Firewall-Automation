@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from api.config import settings
-from api.permissions import VALID_PERMISSIONS, validate_permission
+from api.permissions import VALID_PERMISSIONS, expand_permissions
 from api.storage import JobStorage
 from api.time_utils import utc_now_iso
 
@@ -26,27 +26,14 @@ USER_PROFILE = {
 ADMIN_PROFILE = set(VALID_PERMISSIONS)
 
 
-def _expand_permissions(raw_permissions: set[str]) -> set[str]:
-    expanded: set[str] = set()
-    for permission in raw_permissions:
-        normalized = validate_permission(permission)
-        if normalized == "firewall.allow":
-            expanded.update({"firewall.ip.allow", "firewall.ports.allow"})
-        elif normalized == "firewall.deny":
-            expanded.update({"firewall.ip.deny", "firewall.ports.deny"})
-        else:
-            expanded.add(normalized)
-    return expanded
-
-
 def selected_permissions(args: argparse.Namespace) -> list[str]:
-    permissions = _expand_permissions(set(args.permission or []))
+    permissions = expand_permissions(args.permission or [])
     # profile 是快捷模板，仍然会经过 validate_permission 做统一校验。
     if args.profile == "user":
         permissions.update(USER_PROFILE)
     elif args.profile == "admin":
-        permissions.update(_expand_permissions(ADMIN_PROFILE))
-    return sorted(validate_permission(permission) for permission in permissions)
+        permissions.update(expand_permissions(ADMIN_PROFILE))
+    return sorted(permissions)
 
 
 def selected_ips(args: argparse.Namespace) -> list[str]:
@@ -101,7 +88,7 @@ def main() -> int:
             parser.error("grant requires --profile, --permission, or --ip")
         now_iso = utc_now_iso()
         existing_user = storage.get_managed_user(subject_id)
-        existing_permissions = set(storage.get_subject_permissions(subject_id))
+        existing_permissions = expand_permissions(storage.get_subject_permissions(subject_id))
         existing_ips = set(storage.get_subject_allowed_ips(subject_id))
         merged_permissions = sorted(existing_permissions | set(permissions))
         merged_ips = sorted(existing_ips | set(allowed_ips))
@@ -147,17 +134,11 @@ def main() -> int:
         return 0
 
     if args.command == "revoke":
-        raw_requested = {validate_permission(p) for p in (args.permission or [])}
         permissions = selected_permissions(args)
-        permissions_to_revoke = sorted(set(permissions) | raw_requested)
         allowed_ips = selected_ips(args)
-        if not permissions_to_revoke and not allowed_ips:
+        if not permissions and not allowed_ips:
             parser.error("revoke requires --profile, --permission, or --ip")
-        revoked = []
-        for permission in permissions_to_revoke:
-            removed = storage.revoke_subject_permission(subject_id, permission)
-            if removed:
-                revoked.append(permission)
+        revoked = storage.revoke_subject_permissions(subject_id, permissions)
         revoked_ips = []
         for ip_address in allowed_ips:
             removed = storage.revoke_subject_allowed_ip(subject_id, ip_address)

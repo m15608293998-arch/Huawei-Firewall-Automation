@@ -474,7 +474,10 @@ class WorkerTests(unittest.TestCase):
         worker = self.make_worker(runner)
         worker.run_once()
         self.assertEqual(self.storage.get_job("job-1")["status"], "failed")
-        self.assertIsNone(self.storage.get_desired_access_state("203.0.113.10"))
+        baseline = self.storage.get_desired_access_state("203.0.113.10")
+        self.assertFalse(baseline["ip_present"])
+        self.assertEqual(baseline["ports"], [])
+        self.assertEqual(baseline["version"], 0)
         runner.failed_codes.clear()
         self.create_job(job_id="job-2", ports=[12002], created_at="2026-06-05T00:00:01+00:00")
         worker.run_once()
@@ -503,6 +506,79 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(restored["source_job_id"], "job-baseline")
         self.assertEqual(restored["ports"], [12001])
         self.assertEqual(restored["version"], 1)
+
+    def test_first_partial_failure_does_not_promote_failed_ports_to_baseline(self) -> None:
+        for codes in (("TEST-FW",), ("PG-FW", "IDC-FW")):
+            with self.subTest(codes=codes):
+                job_id = "partial-" + codes[0]
+                self.create_job(job_id=job_id, ports=[12001], firewall_targets=codes)
+                runner = FakeRunner(failed_after_apply_codes={codes[-1]})
+                worker = self.make_worker(runner)
+                worker.run_once()
+                self.assertEqual(self.storage.get_job(job_id)["status"], "failed")
+                baseline = self.storage.get_desired_access_state("203.0.113.10")
+                self.assertIsNotNone(baseline)
+                self.assertEqual(baseline["ports"], [])
+                runner.failed_after_apply_codes.clear()
+                next_id = job_id + "-next"
+                self.create_job(job_id=next_id, ports=[12002], firewall_targets=codes,
+                                created_at="2026-06-05T00:00:01+00:00")
+                worker.run_once()
+                self.assertEqual(self.storage.get_job(next_id)["status"], "successful")
+                for code in codes:
+                    self.assertEqual(runner.states[code]["ports"], [12002])
+                # Start the next subcase without an inherited confirmed ledger.
+                with self.storage._connect() as conn:
+                    conn.execute("delete from desired_access_states")
+                    conn.execute("delete from job_firewall_targets")
+                    conn.execute("delete from jobs")
+
+    def test_first_multinode_failure_can_repair_nodes_that_disagree(self) -> None:
+        codes = ("PG-FW", "IDC-FW")
+        self.create_job(ports=[12001], firewall_targets=codes)
+        runner = FakeRunner(failed_codes={"IDC-FW"})
+        worker = self.make_worker(runner)
+        worker.run_once()
+        self.assertNotEqual(runner.states["PG-FW"], runner.states["IDC-FW"])
+        runner.failed_codes.clear()
+        self.create_job(job_id="job-2", ports=[12002], firewall_targets=codes,
+                        created_at="2026-06-05T00:00:01+00:00")
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("job-2")["status"], "successful")
+        self.assertTrue(all(state["ports"] == [12002] for state in runner.states.values()))
+
+    def test_recovered_job_republishes_ledger_before_success_and_followup(self) -> None:
+        self.storage.save_desired_access_state("203.0.113.10", True, [443], "baseline", "now")
+        self.create_job(ports=[12001])
+        desired = {"ip_present": True, "ports": [443, 12001], "version": 2}
+        self.storage.update_job("job-1", {"status": "applying", "desired_state": desired, "state_version": 2})
+        runner = FakeRunner(states={"TEST-FW": {"ip_present": True, "ports": [443]}})
+        worker = self.make_worker(runner)
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("job-1")["status"], "successful")
+        self.assertEqual(self.storage.get_desired_access_state("203.0.113.10")["ports"], [443, 12001])
+        self.create_job(job_id="job-2", ports=[12002], created_at="2026-06-05T00:00:01+00:00")
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("job-2")["status"], "successful")
+        self.assertEqual(runner.states["TEST-FW"]["ports"], [443, 12001, 12002])
+
+    def test_failed_change_without_known_baseline_requires_explicit_cleanup(self) -> None:
+        self.create_job(action="deny", ports=[])
+        runner = FakeRunner(failed_after_apply_codes={"TEST-FW"})
+        worker = self.make_worker(runner)
+        worker.run_once()
+        runner.failed_after_apply_codes.clear()
+        self.create_job(job_id="job-2", ports=[12002], created_at="2026-06-05T00:00:01+00:00")
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("job-2")["status"], "failed")
+        self.assertIn("No confirmed baseline", self.storage.get_job("job-2")["error_message"])
+        self.create_job(job_id="cleanup", action="deny", ports=[], created_at="2026-06-05T00:00:02+00:00")
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("cleanup")["status"], "successful")
+        self.create_job(job_id="after-cleanup", ports=[12002], created_at="2026-06-05T00:00:03+00:00")
+        worker.run_once()
+        self.assertEqual(self.storage.get_job("after-cleanup")["status"], "successful")
+        self.assertEqual(runner.states["TEST-FW"]["ports"], [12002])
 
     def test_crash_during_last_attempt_does_not_turn_matching_config_into_success(self) -> None:
         self.create_job()

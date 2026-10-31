@@ -1,0 +1,37 @@
+# 复审问题修复与验证
+
+本轮在 `fix/review-findings` 分支修复六项复审问题；对照基线为 `e7f0e05`。
+
+| 问题 | 修复结果 | 验证场景 |
+| --- | --- | --- |
+| 回滚历史指数膨胀 | 只保留一层基线，成功后清理；升级时压平旧数据 | 同一 IP 连续保存 100 次，每次检查回滚字段小于 512 字节，并验证回滚仍可用 |
+| 首次部分失败污染后续任务 | 保存预检确认的版本 0 基线，失败后恢复该基线 | 单机写入后失败、多机写入后失败及节点配置不一致后，后续任务均只保留新请求端口 |
+| 回滚和终态之间的崩溃窗口 | 任务终态与账本回滚同事务提交；恢复任务校验并补写账本 | 对失败及人工介入终态注入提交前中断，重新打开数据库确认无半提交；恢复任务后继续变更，确认成功端口保留 |
+| 旧用户撤权不完整 | 同事务展开旧总权限，再撤销指定权限 | user/admin 整组撤权，以及只撤销 IP 放行但保留端口放行；通过实际授权检查确认生效 |
+| 合法历史应用误报 | 兼容业务组内历史命名和多 IP 规则，限定托管对象范围 | 历史名称、多 IP、无关业务组外应用正常；错误绑定、错误掩码、缺组、空对象及残留组成员仍被发现 |
+| 前端不显示异常原因 | 两个页面展示配置异常、虚系统、应用名称和具体建议原因 | 使用 QuickJS 实际执行页面渲染函数，检查完整及部分查询失败报告的输出 |
+
+## 验证结果
+
+- 全量自动化测试：346 项通过，其中本轮新增 20 项。
+- 相同六项核心回归测试：旧提交全部未通过，修复后全部通过。
+- `ansible-playbook --syntax-check playbooks/trade_server_access.yml`：通过。
+- `python -m pip check` 与 `git diff --check`：通过。
+- 原有 Runner 超时后清理本地子进程及生产环境 `0640` 配置权限测试继续通过。
+
+测试使用临时 SQLite、项目设备模拟、真实本地 Ansible 进程和 JavaScript 运行库，
+未连接实际防火墙。防火墙 SSH 主机密钥策略与旧版设备算法配置未修改。
+
+## 复现命令
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m unittest discover -s tests -v
+.venv/bin/ansible-playbook --syntax-check playbooks/trade_server_access.yml
+.venv/bin/python -m pip check
+git diff --check
+```
+
+`quickjs` 是开发测试依赖，生产部署继续使用 `requirements.txt`。
+对于没有可确认原始基线的历史失败变更，后续放行会返回明确错误；人工核实并
+成功完成完整 `deny` 后，可以继续放行，避免从失败残留推断授权。

@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fastapi import HTTPException
 from api.admin_users import AdminUserService, ManagedUserValidationError
+from api.auth import Principal, require_firewall_ip_allow, require_firewall_ports_allow
 from api.schemas import ManagedUserUpdate
 from api.storage import JobStorage
 
@@ -114,6 +116,45 @@ class AdminUserServiceTests(unittest.TestCase):
                 "firewall.snapshot.read",
             ],
         )
+
+    def run_cli(self, *arguments):
+        script = Path(__file__).resolve().parents[1] / "scripts/manage_permissions.py"
+        result = subprocess.run(
+            [sys.executable, str(script), *arguments], capture_output=True, text=True,
+            env={"TRADE_ACCESS_API_DATABASE_PATH": str(self.storage.database_path)}, check=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_cli_profile_revoke_removes_legacy_and_granular_grants(self) -> None:
+        for profile in ("user", "admin"):
+            with self.subTest(profile=profile):
+                subject = "legacy-" + profile
+                for permission in ("firewall.allow", "firewall.deny", "firewall.ip.allow", "firewall.job.read"):
+                    self.storage.grant_subject_permission(subject, permission, "now")
+                result = self.run_cli("revoke", "--subject-id", subject, "--profile", profile)
+                self.assertIn("firewall.ip.allow", result["revoked_permissions"])
+                self.assertEqual(self.storage.get_subject_permissions(subject), [])
+                principal = Principal(subject_id=subject, subject=subject, auth_type="keycloak_bearer")
+                with self.assertRaises(HTTPException):
+                    require_firewall_ip_allow(principal)
+
+    def test_cli_granular_revoke_expands_legacy_grant_and_preserves_other_access(self) -> None:
+        self.storage.grant_subject_permission("legacy", "firewall.allow", "now")
+        self.run_cli("revoke", "--subject-id", "legacy", "--permission", "firewall.ip.allow")
+        principal = Principal(subject_id="legacy", subject="legacy", auth_type="keycloak_bearer",
+                              permissions=self.storage.get_subject_permissions("legacy"))
+        self.assertEqual(principal.permissions, ["firewall.ports.allow"])
+        with self.assertRaises(HTTPException):
+            require_firewall_ip_allow(principal)
+        require_firewall_ports_allow(principal)
+
+    def test_cli_grant_normalizes_existing_legacy_permissions(self) -> None:
+        self.storage.grant_subject_permission("legacy", "firewall.allow", "now")
+        self.run_cli("grant", "--subject-id", "legacy", "--profile", "user")
+        user = self.storage.get_managed_user("legacy")
+        self.assertNotIn("firewall.allow", user["permissions"])
+        self.assertIn("firewall.ip.allow", user["permissions"])
+        self.assertIn("firewall.ports.allow", user["permissions"])
 
 
 if __name__ == "__main__":
