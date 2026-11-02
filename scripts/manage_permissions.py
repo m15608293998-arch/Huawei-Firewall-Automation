@@ -87,44 +87,30 @@ def main() -> int:
         if not permissions and not allowed_ips and not args.profile:
             parser.error("grant requires --profile, --permission, or --ip")
         now_iso = utc_now_iso()
-        existing_user = storage.get_managed_user(subject_id)
-        existing_permissions = expand_permissions(storage.get_subject_permissions(subject_id))
-        existing_ips = set(storage.get_subject_allowed_ips(subject_id))
-        merged_permissions = sorted(existing_permissions | set(permissions))
-        merged_ips = sorted(existing_ips | set(allowed_ips))
-        profile = args.profile or (existing_user["profile"] if existing_user else ("admin" if "identity.user.manage" in merged_permissions or "firewall.job.audit" in merged_permissions else "user"))
-        username = (args.username or (existing_user["username"] if existing_user else subject_id)).strip()
-        display_name = (
-            args.display_name
-            if args.display_name is not None
-            else (existing_user["display_name"] if existing_user else None)
-        )
         if getattr(args, "disabled", False):
             enabled = False
         elif getattr(args, "enabled", False):
             enabled = True
-        elif existing_user is not None:
-            enabled = bool(existing_user["enabled"])
         else:
-            enabled = True
+            enabled = None
 
-        storage.save_managed_user_access(
+        user = storage.grant_managed_user_access(
             subject_id=subject_id,
-            username=username,
-            display_name=display_name,
-            profile=profile,
+            username=args.username,
+            display_name=args.display_name,
+            profile=args.profile,
             enabled=enabled,
-            permissions=merged_permissions,
-            allowed_ips=merged_ips,
+            permissions=permissions,
+            allowed_ips=allowed_ips,
             updated_at=now_iso,
         )
         print(
             json.dumps(
                 {
                     "subject_id": subject_id,
-                    "username": username,
-                    "profile": profile,
-                    "enabled": enabled,
+                    "username": user["username"],
+                    "profile": user["profile"],
+                    "enabled": user["enabled"],
                     "granted_permissions": permissions,
                     "granted_ips": allowed_ips,
                 },

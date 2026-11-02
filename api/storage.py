@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from api.execution import exclusive_file_lock
 from api.permissions import expand_permissions
 
 
@@ -78,7 +79,11 @@ class JobStorage:
         self.initialize()
 
     def initialize(self) -> None:
-        with self._connect() as conn:
+        database_path = self.database_path.resolve()
+        initialization_lock = database_path.with_name(database_path.name + ".initialize.lock")
+        # Journal switching can report SQLITE_BUSY before SQLite's schema lock
+        # is acquired. Serialize the entire bootstrap across local processes.
+        with exclusive_file_lock(initialization_lock, 5), self._connect() as conn:
             conn.execute("pragma journal_mode = wal")
             conn.execute("begin immediate")
             # SQLite 没有独立迁移工具，这里用 create + ensure_column 做轻量升级。
@@ -1174,6 +1179,51 @@ class JobStorage:
                 conn.commit()
         return cursor.rowcount > 0
 
+    def grant_managed_user_access(
+        self,
+        subject_id: str,
+        permissions: list[str],
+        allowed_ips: list[str],
+        updated_at: str,
+        username: str | None = None,
+        display_name: str | None = None,
+        profile: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            with self._connect() as conn:
+                # Read the current user and access lists only after reserving
+                # the write transaction, so concurrent revokes cannot be undone.
+                conn.execute("begin immediate")
+                existing = conn.execute(
+                    "select username, display_name, profile, enabled from managed_users where subject_id = ?",
+                    (subject_id,),
+                ).fetchone()
+                rows = conn.execute(
+                    "select permission from subject_permissions where subject_id = ?", (subject_id,),
+                ).fetchall()
+                permissions = sorted(expand_permissions(row["permission"] for row in rows) | expand_permissions(permissions))
+                rows = conn.execute(
+                    "select ip_address from subject_allowed_ips where subject_id = ?", (subject_id,),
+                ).fetchall()
+                allowed_ips = sorted({row["ip_address"] for row in rows} | set(allowed_ips))
+                username = (username or (existing["username"] if existing is not None else subject_id)).strip()
+                if display_name is None and existing is not None:
+                    display_name = existing["display_name"]
+                profile = profile or (
+                    existing["profile"] if existing is not None else (
+                        "admin" if "identity.user.manage" in permissions or "firewall.job.audit" in permissions else "user"
+                    )
+                )
+                if enabled is None:
+                    enabled = bool(existing["enabled"]) if existing is not None else True
+                self._upsert_managed_user(
+                    conn, subject_id, username, display_name, profile, enabled, updated_at,
+                )
+                self._replace_subject_access(conn, subject_id, permissions, allowed_ips, updated_at)
+                conn.commit()
+        return {"username": username, "profile": profile, "enabled": enabled}
+
     def save_managed_user_access(
         self,
         subject_id: str,
@@ -1189,33 +1239,8 @@ class JobStorage:
             with self._connect() as conn:
                 conn.execute("begin immediate")
                 # 用户资料和权限/IP 列表在一个事务里更新，避免前端看到半更新状态。
-                conn.execute(
-                    """
-                    insert into managed_users (
-                        subject_id,
-                        username,
-                        display_name,
-                        profile,
-                        enabled,
-                        created_at,
-                        updated_at
-                    ) values (?, ?, ?, ?, ?, ?, ?)
-                    on conflict(subject_id) do update set
-                        username = excluded.username,
-                        display_name = excluded.display_name,
-                        profile = excluded.profile,
-                        enabled = excluded.enabled,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        subject_id,
-                        username,
-                        display_name,
-                        profile,
-                        int(enabled),
-                        updated_at,
-                        updated_at,
-                    ),
+                self._upsert_managed_user(
+                    conn, subject_id, username, display_name, profile, enabled, updated_at,
                 )
                 self._replace_subject_access(
                     conn,
@@ -1472,6 +1497,31 @@ class JobStorage:
                 )
                 conn.commit()
         return cursor.rowcount > 0
+
+    @staticmethod
+    def _upsert_managed_user(
+        conn: sqlite3.Connection,
+        subject_id: str,
+        username: str,
+        display_name: str | None,
+        profile: str,
+        enabled: bool,
+        updated_at: str,
+    ) -> None:
+        conn.execute(
+            """
+            insert into managed_users (
+                subject_id, username, display_name, profile, enabled, created_at, updated_at
+            ) values (?, ?, ?, ?, ?, ?, ?)
+            on conflict(subject_id) do update set
+                username = excluded.username,
+                display_name = excluded.display_name,
+                profile = excluded.profile,
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at
+            """,
+            (subject_id, username, display_name, profile, int(enabled), updated_at, updated_at),
+        )
 
     @staticmethod
     def _replace_subject_access(
