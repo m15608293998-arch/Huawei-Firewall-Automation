@@ -292,7 +292,14 @@ class JobWorker:
         # device's removal workflow still verifies ownership before deleting.
         if str(job["action"]) == "deny" or job.get("desired_state"):
             return False
-        return self.storage.get_desired_access_state(str(job["target_ip"])) is None
+        if self.storage.get_desired_access_state(str(job["target_ip"])) is not None:
+            return False
+        if self.storage.has_unconfirmed_access_change(str(job["target_ip"])):
+            raise RuntimeError(
+                "No confirmed baseline exists after a failed firewall change. "
+                "Inspect the failed job and complete a full deny before granting access again."
+            )
+        return True
 
     def _preflight(
         self,
@@ -484,32 +491,7 @@ class JobWorker:
                 "ports": sorted({int(port) for port in stored["ports"]}),
             }
         else:
-            for state in before_states.values():
-                membership = state["address_membership"]
-                if (
-                    not state["application_targets_valid"]
-                    or not state["application_group_complete"]
-                    or (
-                        not state["ip_present"]
-                        and (
-                            any(value is not None for value in membership.values())
-                            or state["application_names"]
-                        )
-                    )
-                ):
-                    raise RuntimeError(
-                        "Firewall precheck found inconsistent state and no desired-state baseline exists."
-                    )
-            normalized = {
-                (bool(state["ip_present"]), tuple(state["ports"]))
-                for state in before_states.values()
-            }
-            if len(normalized) != 1:
-                raise RuntimeError(
-                    "Firewall precheck found inconsistent state and no desired-state baseline exists."
-                )
-            ip_present, ports = next(iter(normalized))
-            base = {"ip_present": ip_present, "ports": list(ports)}
+            base = self._confirmed_baseline(before_states)
 
         action = str(job["action"])
         requested_ports = {int(port) for port in job.get("ports") or []}
@@ -532,6 +514,32 @@ class JobWorker:
             return {"ip_present": False, "ports": []}
         raise RuntimeError("Unsupported firewall action: {0}".format(action))
 
+    @staticmethod
+    def _confirmed_baseline(before_states: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        for state in before_states.values():
+            membership = state["address_membership"]
+            if (
+                not state["application_targets_valid"]
+                or not state["application_group_complete"]
+                or (not state["ip_present"] and (
+                    any(value is not None for value in membership.values())
+                    or state["application_names"]
+                ))
+            ):
+                raise RuntimeError(
+                    "Firewall precheck found inconsistent state and no desired-state baseline exists."
+                )
+        normalized = {
+            (bool(state["ip_present"]), tuple(sorted(set(state["ports"]))))
+            for state in before_states.values()
+        }
+        if len(normalized) != 1:
+            raise RuntimeError(
+                "Firewall precheck found inconsistent state and no desired-state baseline exists."
+            )
+        ip_present, ports = next(iter(normalized))
+        return {"ip_present": ip_present, "ports": list(ports)}
+
     def _resolve_desired_state(
         self,
         job: dict[str, Any],
@@ -539,11 +547,20 @@ class JobWorker:
     ) -> dict[str, Any]:
         persisted = job.get("desired_state")
         if persisted:
-            return {
+            desired = {
                 "ip_present": bool(persisted["ip_present"]),
                 "ports": sorted({int(port) for port in persisted.get("ports") or []}),
                 "version": int(persisted.get("version") or job["state_version"]),
             }
+            ledger = self.storage.get_desired_access_state(str(job["target_ip"]))
+            if ledger is None or ledger["source_job_id"] != job["job_id"]:
+                self.storage.save_desired_access_state(
+                    target_ip=str(job["target_ip"]),
+                    ip_present=desired["ip_present"], ports=desired["ports"],
+                    source_job_id=str(job["job_id"]), updated_at=utc_now_iso(),
+                    expected_version=desired["version"],
+                )
+            return desired
 
         ledger_state = self.storage.get_desired_access_state(str(job["target_ip"]))
         # Handles a crash after the ledger transaction committed but before the
@@ -562,6 +579,7 @@ class JobWorker:
             ports=list(requested["ports"]),
             source_job_id=str(job["job_id"]),
             updated_at=utc_now_iso(),
+            baseline=self._confirmed_baseline(before_states) if before_states else None,
         )
         return {
             "ip_present": saved["ip_present"],

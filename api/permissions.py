@@ -1,3 +1,6 @@
+from collections.abc import Iterable
+
+
 VALID_PERMISSIONS = {
     "firewall.allow",
     "firewall.deny",
@@ -28,3 +31,16 @@ def validate_permission(permission: str) -> str:
     if normalized not in VALID_PERMISSIONS:
         raise ValueError("Unknown permission: {0}".format(permission))
     return normalized
+
+
+def expand_permissions(permissions: Iterable[str]) -> set[str]:
+    expanded: set[str] = set()
+    for permission in permissions:
+        normalized = validate_permission(permission)
+        if normalized == FIREWALL_ALLOW:
+            expanded.update({FIREWALL_IP_ALLOW, FIREWALL_PORTS_ALLOW})
+        elif normalized == FIREWALL_DENY:
+            expanded.update({FIREWALL_IP_DENY, FIREWALL_PORTS_DENY})
+        else:
+            expanded.add(normalized)
+    return expanded

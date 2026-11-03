@@ -566,12 +566,26 @@ curl \
 
 `check` 在三台一致或存在漂移时均返回 HTTP `200`，通过 `overall_status` 区分
 `consistent` 和 `drifted`。响应包含 IP/端口差异、每台设备的缺失/多余项，以及
-按严格多数节点计算的 `suggested_actions`；建议仅供人工核实，不会自动执行。任一
+按严格多数节点计算的 `suggested_actions`。单机虚系统成员不完整、掩码错误和应用
+残留会单独列入 `config_issues`，并计入 `summary.config_issue_count`；应用检查兼容
+业务组中历史命名和多 IP 规则，忽略业务组外不属于本服务命名范围的应用。建议
+仅供人工核实，不会自动执行。任一
 设备查询失败时返回 HTTP `503`、`overall_status=incomplete`，且不生成纠错动作。
 
 存在 `reconciling` 父任务时，普通全量快照接口返回 HTTP `409`，避免把已知不一致
 状态当作可用清单；`check` 仍可执行，用于查看失败节点和人工纠错建议。测试页和管理
 页均提供“检查节点一致性”按钮，测试页任务详情还会展示逐台子任务状态。
+
+## 9. 本地测试验证
+
+安装开发依赖后运行全量测试。`quickjs` 仅用于执行页面渲染回归测试，生产服务
+继续安装 `requirements.txt` 即可；测试使用本地设备模拟，不连接实际防火墙。
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m unittest discover -s tests -v
+.venv/bin/ansible-playbook --syntax-check playbooks/trade_server_access.yml
+```
 
 三台逻辑结果完全一致时返回 HTTP `200` 和干净的 `items`；结果漂移返回 HTTP
 `409` 及逐台差异；任一设备查询失败返回 HTTP `503`，不会把部分结果当成全量

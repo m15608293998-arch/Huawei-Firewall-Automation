@@ -1,0 +1,2 @@
+-r requirements.txt
+quickjs==1.19.4

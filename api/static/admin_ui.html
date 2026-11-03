@@ -128,11 +128,11 @@
           <div class="consistency-overview"><span id="consistencyStatus" class="consistency-status"></span><span id="consistencySummary" class="consistency-summary"></span></div>
           <section class="check-section">
             <h3 class="check-section-title">节点查询与差异</h3>
-            <div class="table-wrap"><table><thead><tr><th>防火墙节点</th><th>查询状态</th><th>IP / 端口数量</th><th>缺失配置</th><th>多余配置</th><th>查询错误</th></tr></thead><tbody id="consistencyNodeRows"></tbody></table></div>
+            <div class="table-wrap"><table><thead><tr><th>防火墙节点</th><th>查询状态</th><th>IP / 端口数量</th><th>缺失配置</th><th>多余配置</th><th>查询错误 / 配置异常</th></tr></thead><tbody id="consistencyNodeRows"></tbody></table></div>
           </section>
           <section id="consistencyActionsSection" class="check-section hidden">
             <h3 class="check-section-title">人工纠错建议（不会自动执行）</h3>
-            <div class="table-wrap"><table><thead><tr><th>目标节点</th><th>建议操作</th><th>对象</th><th>多数节点依据</th></tr></thead><tbody id="consistencyActionRows"></tbody></table></div>
+            <div class="table-wrap"><table><thead><tr><th>目标节点</th><th>建议操作</th><th>对象</th><th>依据 / 异常详情</th></tr></thead><tbody id="consistencyActionRows"></tbody></table></div>
           </section>
           <section id="consistencyAmbiguousSection" class="check-section hidden">
             <h3 class="check-section-title">无法按多数节点判定，需人工确认</h3>
@@ -172,28 +172,29 @@
     function appendCheckStatus(cell,successful) { const badge=document.createElement("span"); badge.className=`status-badge ${successful?"successful":"failed"}`; badge.textContent=successful?"查询成功":"查询失败"; cell.append(badge); }
     function formatNodeDifference(node,direction) { const ips=node[`ip_${direction}`]||[]; const ports=node[`port_${direction}`]||[]; return [...ips.map((item)=>`IP：${item.ip}`),...ports.map((item)=>`端口：${item.ip}:${item.port}`)].join("\n")||"无"; }
     function checkStatusLabel(status) { return {consistent:"节点数据一致",drifted:"节点数据不一致",incomplete:"查询不完整"}[status]||status||"未知状态"; }
-    function actionLabel(action) { return {add_ip:"补充 IP",remove_ip:"删除 IP",add_port:"补充端口",remove_port:"删除端口"}[action]||action; }
-    function actionObject(action) { return action.port==null?action.ip:`${action.ip}:${action.port}`; }
-    function actionBasis(action) { return `存在：${(action.present_on_firewalls||[]).join("、")||"无"}；缺失：${(action.absent_on_firewalls||[]).join("、")||"无"}`; }
+    function actionLabel(action) { return {add_ip:"补充 IP",remove_ip:"删除 IP",add_port:"补充端口",remove_port:"删除端口",repair_ip:"检查虚系统 IP 配置",repair_application:"检查应用对象"}[action]||action; }
+    function actionObject(action) { const address=action.port==null?action.ip:(action.ip?`${action.ip}:${action.port}`:`端口 ${action.port}`); return [address,action.application_name].filter(Boolean).join("\n")||"-"; }
+    function actionBasis(action) { const present=action.present_on_firewalls||[]; const absent=action.absent_on_firewalls||[]; const majority=present.length||absent.length?`存在：${present.join("、")||"无"}；缺失：${absent.join("、")||"无"}`:""; return [majority,action.reason].filter(Boolean).join("\n")||"-"; }
     function renderConsistencyCheck(check) {
       const status=["consistent","drifted","incomplete"].includes(check.overall_status)?check.overall_status:"incomplete";
       const summary=check.summary||{};
       $("#consistencyStatus").className=`consistency-status ${status}`;
       $("#consistencyStatus").textContent=checkStatusLabel(status);
-      $("#consistencySummary").textContent=[`已查询 ${summary.successful_firewall_count||0}/${summary.configured_firewall_count||(check.firewall_codes||[]).length} 台`,`IP 差异 ${summary.ip_drift_item_count||0}`,`端口差异 ${summary.port_drift_item_count||0}`,`纠错建议 ${summary.suggested_action_count||0}`,`需人工判定 ${summary.ambiguous_item_count||0}`,`检查时间 ${formatBeijingTime(check.checked_at)}`].join(" · ");
+      const issueCount=summary.config_issue_count??Object.values(check.firewalls||{}).reduce((count,node)=>count+(node.config_issues||[]).length,0);
+      $("#consistencySummary").textContent=[`已查询 ${summary.successful_firewall_count||0}/${summary.configured_firewall_count||(check.firewall_codes||[]).length} 台`,`跨节点 IP 差异 ${summary.ip_drift_item_count||0}`,`跨节点端口差异 ${summary.port_drift_item_count||0}`,`配置异常 ${issueCount}`,`纠错建议 ${summary.suggested_action_count||0}`,`需人工判定 ${summary.ambiguous_item_count||0}`,`检查时间 ${formatBeijingTime(check.checked_at)}`].join(" · ");
       const codes=check.firewall_codes||Object.keys(check.firewalls||{});
       $("#consistencyNodeRows").replaceChildren();
-      codes.forEach((code)=>{ const node=(check.firewalls||{})[code]||{}; const row=document.createElement("tr"); appendCheckCell(row,code,"mono"); const statusCell=document.createElement("td"); appendCheckStatus(statusCell,node.query_status==="successful"); row.append(statusCell); appendCheckCell(row,`${node.ip_count||0} / ${node.port_count||0}`); appendCheckCell(row,formatNodeDifference(node,"missing"),"check-list"); appendCheckCell(row,formatNodeDifference(node,"extra"),"check-list"); appendCheckCell(row,node.error_message||"-"); $("#consistencyNodeRows").append(row); });
+      codes.forEach((code)=>{ const node=(check.firewalls||{})[code]||{}; const row=document.createElement("tr"); appendCheckCell(row,code,"mono"); const statusCell=document.createElement("td"); appendCheckStatus(statusCell,node.query_status==="successful"); row.append(statusCell); appendCheckCell(row,`${node.ip_count||0} / ${node.port_count||0}`); appendCheckCell(row,formatNodeDifference(node,"missing"),"check-list"); appendCheckCell(row,formatNodeDifference(node,"extra"),"check-list"); appendCheckCell(row,[node.error_message,...(node.config_issues||[])].filter(Boolean).join("\n")||"-","check-list"); $("#consistencyNodeRows").append(row); });
       const actions=codes.flatMap((code)=>((check.firewalls||{})[code]||{}).suggested_actions||[]);
       $("#consistencyActionRows").replaceChildren();
-      actions.forEach((action)=>{ const row=document.createElement("tr"); appendCheckCell(row,action.firewall_code,"mono"); appendCheckCell(row,actionLabel(action.action)); appendCheckCell(row,actionObject(action),"mono"); appendCheckCell(row,actionBasis(action)); $("#consistencyActionRows").append(row); });
+      actions.forEach((action)=>{ const row=document.createElement("tr"); appendCheckCell(row,action.firewall_code,"mono"); appendCheckCell(row,actionLabel(action.action)); appendCheckCell(row,actionObject(action),"check-list mono"); appendCheckCell(row,actionBasis(action),"check-list"); $("#consistencyActionRows").append(row); });
       $("#consistencyActionsSection").classList.toggle("hidden",actions.length===0);
       const differences=check.differences||{};
       const ambiguous=[...(differences.ips||[]).filter((item)=>item.reference_state==="ambiguous").map((item)=>({...item,object:item.ip})),...(differences.ports||[]).filter((item)=>item.reference_state==="ambiguous").map((item)=>({...item,object:`${item.ip}:${item.port}`}))];
       $("#consistencyAmbiguousRows").replaceChildren();
       ambiguous.forEach((item)=>{ const row=document.createElement("tr"); appendCheckCell(row,item.object,"mono"); appendCheckCell(row,(item.present_on_firewalls||[]).join("、")||"无"); appendCheckCell(row,(item.absent_on_firewalls||[]).join("、")||"无"); $("#consistencyAmbiguousRows").append(row); });
       $("#consistencyAmbiguousSection").classList.toggle("hidden",ambiguous.length===0);
-      $("#consistencyWarning").textContent=status==="incomplete"?"部分防火墙查询失败，本次不会生成纠错建议。请先恢复失败节点连接，再重新检查。":"纠错建议依据全部配置节点的严格多数结果，仅供人工核实，不会自动执行；操作前请确认真实业务期望状态。";
+      $("#consistencyWarning").textContent=status==="incomplete"?"部分防火墙查询失败，本次不会生成纠错建议。请先恢复失败节点连接，再重新检查。":"报告包含跨节点差异与单机配置异常，纠错建议仅供人工核实，不会自动执行；操作前请确认真实业务期望状态。";
       $("#consistencyReport").classList.remove("hidden");
     }
     function consistencyCheckFromError(error) { return error&&error.payload&&error.payload.detail&&error.payload.detail.check?error.payload.detail.check:null; }
