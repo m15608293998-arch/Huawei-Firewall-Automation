@@ -1,6 +1,8 @@
+import hashlib
 from typing import Any
 
 from api.config import settings
+from api.execution import ExecutionTimeout, exclusive_file_lock
 from api.keycloak_admin import KeycloakAdminClient
 from api.permissions import VALID_PERMISSIONS
 from api.schemas import ManagedUserUpdate, UserProfile
@@ -23,6 +25,10 @@ class ManagedUserValidationError(ValueError):
     pass
 
 
+class ManagedUserBusyError(RuntimeError):
+    pass
+
+
 class AdminUserService:
     def __init__(
         self,
@@ -39,6 +45,18 @@ class AdminUserService:
         return self.storage.list_managed_users()
 
     def update(self, subject_id: str, request: ManagedUserUpdate) -> dict[str, Any]:
+        database = self.storage.database_path.resolve()
+        subject_hash = hashlib.sha256(subject_id.encode("utf-8")).hexdigest()
+        lock_path = database.parent / (database.name + ".user-locks") / (subject_hash + ".lock")
+        try:
+            # Cover the read, both systems' writes, compensation and response.
+            # Separate services/processes for the same DB share this lock.
+            with exclusive_file_lock(lock_path, settings.keycloak_http_timeout_seconds):
+                return self._update_locked(subject_id, request)
+        except ExecutionTimeout as exc:
+            raise ManagedUserBusyError("This user's access is being updated; retry later.") from exc
+
+    def _update_locked(self, subject_id: str, request: ManagedUserUpdate) -> dict[str, Any]:
         keycloak_user = self.keycloak_admin.get_user(subject_id)
         username = str(keycloak_user.get("username") or "").strip()
         if not username:

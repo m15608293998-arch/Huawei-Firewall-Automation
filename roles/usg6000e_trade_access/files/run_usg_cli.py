@@ -88,7 +88,12 @@ def read_commands(cli_file):
     commands = []
     cli_path = pathlib.Path(cli_file).expanduser()
 
-    for line in cli_path.read_text(encoding="utf-8").splitlines():
+    text = cli_path.read_text(encoding="utf-8")
+    # Reject legacy/stored payloads as well as new API input. Only actual LF
+    # (including normalized CRLF) separates commands, never Unicode text.
+    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029]", text):
+        raise ValueError("CLI file contains unsupported control or line separator characters.")
+    for line in text.split("\n"):
         line = line.strip()
         if not line:
             continue

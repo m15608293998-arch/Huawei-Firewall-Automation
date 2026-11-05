@@ -1,4 +1,5 @@
 import argparse
+import ipaddress
 import logging
 import re
 import signal
@@ -36,6 +37,7 @@ logger.addHandler(logging.NullHandler())
 MANUAL_INTERVENTION_ERROR_MARKERS = (
     "user-defined applications reached the upper limit",
     "no more user-defined applications can be created",
+    "unmanaged application bindings require manual migration",
 )
 
 
@@ -338,7 +340,8 @@ class JobWorker:
                         job_id,
                         code,
                         {
-                            "status": "precheck_failed",
+                            "status": (JobStatus.manual_intervention_required.value
+                                       if self._requires_manual_intervention(str(exc)) else "precheck_failed"),
                             "error_message": str(exc),
                             "finished_at": utc_now_iso(),
                         },
@@ -351,7 +354,9 @@ class JobWorker:
         errors: dict[str, str],
     ) -> None:
         self._require_job_time(job)
+        manual = any(self._requires_manual_intervention(message) for message in errors.values())
         exhausted = int(job.get("precheck_attempt_count") or 0) >= settings.precheck_max_attempts
+        terminal = manual or exhausted
         delay = min(
             settings.firewall_reconcile_retry_seconds * 2 ** max(0, int(job.get("precheck_attempt_count") or 1) - 1),
             60, self._remaining_job_seconds(job),
@@ -359,8 +364,10 @@ class JobWorker:
         self.storage.update_job(
             str(job["job_id"]),
             {
-                "status": JobStatus.failed.value if exhausted else JobStatus.reconciling.value,
-                "runner_status": "precheck_attempt_limit_reached" if exhausted else "precheck_retry_scheduled",
+                "status": (JobStatus.manual_intervention_required.value if manual else
+                           JobStatus.failed.value if exhausted else JobStatus.reconciling.value),
+                "runner_status": ("manual_intervention_required" if manual else
+                                  "precheck_attempt_limit_reached" if exhausted else "precheck_retry_scheduled"),
                 "runner_rc": 1,
                 "error_message": "Firewall precheck failed: {0}".format(
                     "; ".join(
@@ -368,8 +375,8 @@ class JobWorker:
                         for code, message in sorted(errors.items())
                     )
                 ),
-                "finished_at": utc_now_iso() if exhausted else None,
-                "next_attempt_at": None if exhausted else utc_after_iso(delay),
+                "finished_at": utc_now_iso() if terminal else None,
+                "next_attempt_at": None if terminal else utc_after_iso(delay),
             },
         )
 
@@ -787,7 +794,8 @@ class JobWorker:
                 job_id,
                 firewall_code,
                 {
-                    "status": "failed",
+                    "status": (JobStatus.manual_intervention_required.value
+                               if self._requires_manual_intervention(str(exc)) else "failed"),
                     "runner_status": "verification_query_failed",
                     "error_message": "Verification query failed: {0}".format(exc),
                     "finished_at": utc_now_iso(),
@@ -867,6 +875,27 @@ class JobWorker:
             name_pattern = re.compile(
                 re.escape(payload["application_prefix"] + target_ip) + r"(?:_[0-9]+)?$"
             )
+            # Snapshot/check support legacy and shared business applications.
+            # The mutation planner only owns canonical per-IP objects: never
+            # certify a revocation while a different object can still allow it.
+            unmanaged = []
+            for application in payload["application_state"]["applications"]:
+                name = application["name"]
+                if name_pattern.fullmatch(name) or name not in payload["application_group_members"]:
+                    continue
+                bindings = list(application["ip_addresses"])
+                for rule in application["rules"]:
+                    bindings.extend(rule["ip_addresses"])
+                if any(ipaddress.IPv4Address(target_ip) in ipaddress.IPv4Network(
+                    "{0}/{1}".format(pair["ip"], pair["mask"]), strict=False,
+                ) for pair in bindings):
+                    unmanaged.append(name)
+            if unmanaged:
+                raise RuntimeError(
+                    "Unmanaged application bindings require manual migration for {0}: {1}. "
+                    "Inspect shared rules before changing access; automatic success cannot be verified."
+                    .format(target_ip, ", ".join(sorted(set(unmanaged))))
+                )
             applications = [
                 application for application in payload["application_state"]["applications"]
                 if name_pattern.fullmatch(application["name"])

@@ -55,7 +55,7 @@ class TradeAccessRequestBase(BaseModel):
     def validate_description(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        if re.search(r"[\r\n\x00-\x1f\x7f]", value):
+        if re.search(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", value):
             raise ValueError("description must not contain newline or control characters")
         return value.strip()
 
