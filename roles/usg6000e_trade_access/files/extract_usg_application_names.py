@@ -119,7 +119,7 @@ def extract_application_config(
         if rule is not None and port not in rule["ports"]:
             rule["ports"].append(port)
 
-    for raw_line in normalized_text.splitlines():
+    for raw_line in normalized_text.split("\n"):
         line = " ".join(raw_line.strip().split())
         if not line:
             continue

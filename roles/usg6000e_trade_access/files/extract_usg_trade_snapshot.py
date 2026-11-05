@@ -104,11 +104,11 @@ def application_name_sort_key(name: str, prefix: str) -> tuple[int, int, str]:
 def parse_address_inventory(text: str) -> dict[str, int]:
     addresses: dict[str, int] = {}
     pattern = re.compile(
-        r"\baddress\s+\d+\s+(?P<ip>"
+        r"^address\s+\d+\s+(?P<ip>"
         + IPV4_PATTERN
         + r")\s+mask\s+(?P<mask>\S+)\b"
     )
-    for raw_line in normalize_text(text).splitlines():
+    for raw_line in normalize_text(text).split("\n"):
         line = " ".join(raw_line.strip().split())
         match = pattern.search(line)
         if not match:
@@ -174,7 +174,7 @@ def parse_application_config(text: str, prefix: str) -> dict[str, Any]:
         if port not in rule["ports"]:
             rule["ports"].append(port)
 
-    for raw_line in normalize_text(text).splitlines():
+    for raw_line in normalize_text(text).split("\n"):
         line = " ".join(raw_line.strip().split())
         if not line:
             continue
@@ -277,7 +277,7 @@ def parse_application_group_members(text: str, prefix: str, application_group: s
     seen_group_context = False
     in_target_group = False
 
-    for raw_line in normalize_text(text).splitlines():
+    for raw_line in normalize_text(text).split("\n"):
         line = " ".join(raw_line.strip().split())
         if not line:
             continue

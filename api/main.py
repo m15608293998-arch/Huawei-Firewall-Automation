@@ -70,6 +70,7 @@ from api.permissions import (
     FIREWALL_PORTS_DENY,
 )
 from api.admin_users import (
+    ManagedUserBusyError,
     ManagedUserValidationError,
     admin_user_service,
     keycloak_admin_client,
@@ -325,6 +326,8 @@ def revoke_offline_api_key(
 
 
 def raise_admin_user_error(exc: Exception) -> None:
+    if isinstance(exc, ManagedUserBusyError):
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "1"}) from exc
     if isinstance(exc, ManagedUserValidationError):
         code = status.HTTP_400_BAD_REQUEST
     elif isinstance(exc, KeycloakAdminConfigurationError):
@@ -382,6 +385,7 @@ def update_managed_user(
     try:
         return admin_user_service.update(subject_id, request)
     except (
+        ManagedUserBusyError,
         ManagedUserValidationError,
         KeycloakAdminConfigurationError,
         KeycloakAdminError,

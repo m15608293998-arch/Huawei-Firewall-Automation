@@ -24,7 +24,7 @@ def main():
             text = f.read()
     except Exception as e:
         print(json.dumps({"ids": [], "lines": [], "error": str(e)}, ensure_ascii=False))
-        return 0
+        return 1
 
     text = normalize_text(text)
 
@@ -35,16 +35,16 @@ def main():
     # address 190 192.168.66.13 mask 32 description xxx
     # 这里不做模糊匹配，避免把描述或别的 IP 输出误当成地址对象。
     pattern = re.compile(
-        r"\baddress\s+(\d+)\s+"
+        r"^address\s+(\d+)\s+"
         + re.escape(args.ip)
         + r"\s+mask\s+"
         + re.escape(str(args.mask))
         + r"\b"
     )
 
-    for raw_line in text.splitlines():
+    for raw_line in text.split("\n"):
         line = " ".join(raw_line.strip().split())
-        m = pattern.search(line)
+        m = pattern.match(line)
         if m:
             ids.append(m.group(1))
             lines.append(line)
@@ -53,4 +53,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
